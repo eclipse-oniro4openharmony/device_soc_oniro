@@ -199,36 +199,3 @@ int hdi_gbm_bo_get_fd(struct gbm_bo *bo)
         DISPLAY_LOGE("drmPrimeHandleToFD  failed ret: %{public}d  errno: %{public}d", ret, errno));
     return fd;
 }
-
-int hdi_gbm_bo_fill_random(struct gbm_bo *bo)
-{
-    DISPLAY_CHK_RETURN((bo == NULL), -1, DISPLAY_LOGE("the bo is null"));
-
-    // Map the buffer
-    struct drm_mode_map_dumb mreq = {0};
-    mreq.handle = bo->handle;
-    int32_t ret = drmIoctl(bo->gbm->fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
-    DISPLAY_CHK_RETURN(
-        (ret != 0), -1, DISPLAY_LOGE("DRM_IOCTL_MODE_MAP_DUMB failed errno %{public}d", errno));
-
-    void* map = mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED, bo->gbm->fd, mreq.offset);
-    if (map == MAP_FAILED) {
-        DISPLAY_LOGE("mmap failed errno %{public}d", errno);
-        return -1;
-    }
-
-    // Seed the random number generator
-    srand(time(0));
-
-    // Fill the buffer with random pixels
-    uint32_t* pixel = (uint32_t*)map;
-    for (uint64_t i = 0; i < bo->size / 4; ++i) {
-        pixel[i] = rand();
-    }
-
-
-    // Unmap the buffer
-    munmap(map, bo->size);
-
-    return 0;
-}
