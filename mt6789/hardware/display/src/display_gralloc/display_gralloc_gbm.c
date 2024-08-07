@@ -286,8 +286,6 @@ int32_t GbmAllocMem(const AllocInfo *info, BufferHandle **buffer)
     DISPLAY_CHK_RETURN((bo == NULL), DISPLAY_NOMEM, DISPLAY_LOGE("gbm create bo failed"); \
         GRALLOC_UNLOCK());
 
-    hdi_gbm_bo_fill_random(bo);
-
     int fd = hdi_gbm_bo_get_fd(bo);
     DISPLAY_CHK_RETURN((fd < 0), DISPLAY_FD_ERR, DISPLAY_LOGE("gbm can not get fd"); \
         hdi_gbm_bo_destroy(bo); \

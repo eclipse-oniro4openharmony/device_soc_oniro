@@ -95,7 +95,6 @@ uint32_t hdi_gbm_bo_get_height(struct gbm_bo *bo);
 uint32_t hdi_gbm_bo_get_size(struct gbm_bo *bo);
 void hdi_gbm_bo_destroy(struct gbm_bo *bo);
 int hdi_gbm_bo_get_fd(struct gbm_bo *bo);
-int hdi_gbm_bo_fill_random(struct gbm_bo *bo);
 
 #if defined(__cplusplus)
 }
