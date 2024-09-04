@@ -17,7 +17,7 @@
 #define HDI_DEVICE_COMMON_H
 #include <memory>
 #include <unordered_map>
-#include "display_type.h"
+#include "common/include/display_common.h"
 
 namespace OHOS {
 namespace HDI {
@@ -30,6 +30,7 @@ class DrmCrtc;
 class DrmPlane;
 class DrmDevice;
 class DrmConnector;
+class VsyncCallBack;
 class DrmVsyncWorker;
 } // namespace OHOS
 } // namespace HDI

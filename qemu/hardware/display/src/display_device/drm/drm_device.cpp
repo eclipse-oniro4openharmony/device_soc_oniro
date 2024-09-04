@@ -30,12 +30,62 @@ namespace DISPLAY {
 FdPtr DrmDevice::mDrmFd = nullptr;
 std::shared_ptr<DrmDevice> DrmDevice::mInstance;
 
+static int OpenKmsCard(DIR *dir, struct dirent *d) {
+    int fd;
+    drmModeResPtr res;
+
+    fd = openat(dirfd(dir), d->d_name, O_RDWR | O_CLOEXEC);
+
+    if (fd < 0) {
+        goto err;
+    }
+    res = drmModeGetResources(fd);
+    if (res == NULL) {
+        goto err_fd;
+    }
+    if (res->count_crtcs <= 0 ||
+        res->count_connectors <= 0 ||
+	    res->count_encoders <= 0) {
+        goto err_res;
+    }
+    drmModeFreeResources(res);
+    return fd;
+
+err_res:
+    drmModeFreeResources(res);
+err_fd:
+    close(fd);
+err:
+    return -1;
+}
+
+static int FindAndOpenKmsCard() {
+    DIR *dir;
+    struct dirent *d;
+    int fd = -1;
+
+    dir = opendir("/dev/dri");
+    if (!dir) {
+        return -1;
+    }
+    while ((d = readdir(dir))) {
+        if (strncmp(d->d_name, "card", 4)) {
+            continue;
+        }
+        fd = OpenKmsCard(dir, d);
+        if (fd >= 0) {
+            break;
+        }
+    }
+    closedir(dir);
+    return fd;
+}
+
 std::shared_ptr<HdiDeviceInterface> DrmDevice::Create()
 {
     DISPLAY_LOGD();
     if (mDrmFd == nullptr) {
-        const std::string name("/dev/dri/card0");
-        int drmFd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC); 
+        int drmFd = FindAndOpenKmsCard();
         if (drmFd < 0) {
             DISPLAY_LOGE("can't open drm card device");
             return nullptr;
@@ -192,16 +242,10 @@ void DrmDevice::FindAllConnector(const drmModeResPtr &res)
     int ret;
     for (int i = 0; i < res->count_connectors; i++) {
         drmModeConnectorPtr connector = drmModeGetConnector(GetDrmFd(), res->connectors[i]);
-        if (!connector) {
+        if (!connector || connector->connection != DRM_MODE_CONNECTED) {
             DISPLAY_LOGE("can not get connector mode %{public}d", i);
             continue;
         }
-                
-        if (connector->connection != DRM_MODE_CONNECTED) {
-            DISPLAY_LOGD("connector %{public}d status is disconnected skip", connector->connector_id);
-            continue;
-        }
-
         std::shared_ptr<DrmConnector> drmConnector = std::make_shared<DrmConnector>(*connector, mDrmFd);
         ret = drmConnector->Init(*this);
         drmModeFreeConnector(connector);
@@ -313,7 +357,6 @@ std::unordered_map<uint32_t, std::shared_ptr<HdiDisplay>> DrmDevice::DiscoveryDi
         }
         DISPLAY_LOGD();
         auto crtc = crtcIter->second;
-        DISPLAY_LOGD("crtc %{public}p", crtc.get());
         // create the display
         std::shared_ptr<HdiDisplay> display = std::make_shared<DrmDisplay>(connector, crtc, mInstance);
         DISPLAY_LOGD();

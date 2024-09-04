@@ -15,7 +15,7 @@
 
 #ifndef DISPLAY_GRALLOC_INTERNAL_H
 #define DISPLAY_GRALLOC_INTERNAL_H
-#include "display_type.h"
+#include "buffer_handle.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
