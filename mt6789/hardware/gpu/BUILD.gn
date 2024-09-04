@@ -22,7 +22,7 @@ ohos_prebuilt_shared_library("mesa_egl") {
         source = "lib64/libEGL.so.1.0.0"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -39,7 +39,7 @@ ohos_prebuilt_shared_library("mesa_gbm") {
         source = "lib64/libgbm.so.1.0.0"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -55,7 +55,7 @@ ohos_prebuilt_shared_library("mesa_glapi") {
         source = "lib64/libglapi.so.0.0.0"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -71,7 +71,7 @@ ohos_prebuilt_shared_library("mesa_glesv1") {
         source = "lib64/libGLESv1_CM.so.1.1.0"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -87,7 +87,7 @@ ohos_prebuilt_shared_library("mesa_glesv2") {
         source = "lib64/libGLESv2.so.2.0.0"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -106,7 +106,7 @@ ohos_prebuilt_shared_library("libgallium_dri") {
         source = "lib64/libgallium_dri.so"
     }
     install_enable = true
-    part_name = "oniro_products"
+    part_name = "device_qemu"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -118,7 +118,7 @@ ohos_prebuilt_shared_library("libgallium_dri") {
 # ohos_prebuilt_executable("glmark2-es2-ohos") {
 #     source = "test/glmark2-es2-ohos"
 #     install_images = [ system_base_dir ]
-#     part_name = "oniro_products"
+#     part_name = "device_qemu"
 #     install_enable = true
 # }
 

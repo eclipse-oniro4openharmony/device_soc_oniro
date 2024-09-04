@@ -19,7 +19,6 @@
 #include <memory>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include <display_type.h>
 #include <drm_crtc.h>
 
 namespace OHOS {

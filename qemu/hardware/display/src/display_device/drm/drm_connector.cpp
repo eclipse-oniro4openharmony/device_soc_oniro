@@ -73,7 +73,7 @@ int32_t DrmConnector::Init(DrmDevice &drmDevice)
 {
     DrmProperty prop;
     DISPLAY_LOGD();
-    DISPLAY_CHK_RETURN((mDrmFdPtr == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("the mDrmFdPtr is NULL"));
+    DISPLAY_CHK_RETURN((mDrmFdPtr == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("the mDrmFdPtr is nullptr"));
     DISPLAY_CHK_RETURN((mDrmFdPtr->GetFd() == -1), DISPLAY_FAILURE, DISPLAY_LOGE("the drm fd is -1"));
     // find dpms prop
     int32_t ret = drmDevice.GetConnectorProperty(*this, PROP_DPMS, prop);
@@ -127,7 +127,7 @@ void DrmConnector::GetDisplayCap(DisplayCapability &cap)
     cap.phyHeight = mPhyHeight;
     cap.phyWidth = mPhyWidth;
     cap.type = mType;
-    memcpy_s(cap.name, sizeof(cap.name), mName.c_str(), mName.size());
+    memcpy_s(const_cast<char*>(cap.name.c_str()), cap.name.size(), mName.c_str(), mName.size());
     if (mName.size() >= sizeof(cap.name)) {
         cap.name[sizeof(cap.name) - 1] = 0;
     } else {

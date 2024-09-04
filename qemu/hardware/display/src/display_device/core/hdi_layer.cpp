@@ -14,14 +14,26 @@
  */
 
 #include "hdi_layer.h"
-#include <unistd.h>
 #include <cerrno>
+#include <fstream>
+#include <libsync.h>
+#include <securec.h>
+#include <sstream>
+#include <string>
+#include <sys/time.h>
+#include <unistd.h>
+#include "display_buffer_vdi_impl.h"
+#include "v1_0/display_composer_type.h"
 
 namespace OHOS {
 namespace HDI {
 namespace DISPLAY {
 uint32_t HdiLayer::mIdleId = 0;
 std::unordered_set<uint32_t> HdiLayer::mIdSets;
+std::shared_ptr<IDisplayBufferVdi> g_buffer;
+constexpr int TIME_BUFFER_MAX_LEN = 15;
+constexpr int FILE_NAME_MAX_LEN = 80;
+const std::string PATH_PREFIX = "/data/local/traces/";
 
 HdiLayerBuffer::HdiLayerBuffer(const BufferHandle &hdl)
     : mPhyAddr(hdl.phyAddr), mHeight(hdl.height), mWidth(hdl.width), mStride(hdl.stride), mFormat(hdl.format)
@@ -86,7 +98,7 @@ int32_t HdiLayer::Init()
     return DISPLAY_SUCCESS;
 }
 
-int32_t HdiLayer::SetLayerSize(IRect *rect)
+int32_t HdiLayer::SetLayerRegion(IRect *rect)
 {
     DISPLAY_CHK_RETURN((rect == nullptr), DISPLAY_NULL_PTR, DISPLAY_LOGE("in rect is nullptr"));
     DISPLAY_LOGD(" displayRect x: %{public}d y : %{public}d w : %{public}d h : %{public}d", rect->x, rect->y, rect->w,
@@ -125,7 +137,7 @@ int32_t HdiLayer::SetLayerAlpha(LayerAlpha *alpha)
     return DISPLAY_SUCCESS;
 }
 
-int32_t HdiLayer::SetTransformMode(TransformType type)
+int32_t HdiLayer::SetLayerTransformMode(TransformType type)
 {
     DISPLAY_LOGD("TransformType %{public}d", type);
     mTransformType = type;
@@ -211,6 +223,7 @@ void HdiLayer::ClearColor(uint32_t color)
 }
 HdiLayer::~HdiLayer()
 {
+    mIdSets.erase(mId);
     while (!releaseFences_.empty()) {
         close(releaseFences_.front());
         releaseFences_.pop();
