@@ -14,6 +14,8 @@
 
 group("hardware_group") {
   deps = [
+    "display:display_buffer_model",
+    "display:display_composer_model",
    "//device/soc/oniro/qemu/hardware/gpu:mesa3d-lib",
    "//device/soc/oniro/qemu/hardware/wifi:firmware",
   ]

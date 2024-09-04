@@ -18,9 +18,11 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
-#include "display_device.h"
+#include "common/include/display_common.h"
+#include "display_common.h"
 #include "hdi_device_interface.h"
 #include "hdi_display.h"
+#include "v1_0/display_composer_type.h"
 
 namespace OHOS {
 namespace HDI {

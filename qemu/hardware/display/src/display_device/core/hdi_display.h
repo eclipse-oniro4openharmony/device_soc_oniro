@@ -19,9 +19,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory.h>
-#include "display_device.h"
 #include "hdi_composer.h"
 #include "hdi_layer.h"
+#include "v1_0/display_composer_type.h"
 
 namespace OHOS {
 namespace HDI {
@@ -84,7 +84,7 @@ public:
         return DISPLAY_NOT_SUPPORT;
     }
     virtual int32_t CreateLayer(const LayerInfo *layerInfo, uint32_t *layerId);
-    virtual int32_t CloseLayer(uint32_t layerId);
+    virtual int32_t DestroyLayer(uint32_t layerId);
     virtual int32_t PrepareDisplayLayers(bool *needFlushFb);
     virtual int32_t Commit(int32_t *fence);
     virtual int32_t GetDisplayCompChange(uint32_t *num, uint32_t *layers, int32_t *type);

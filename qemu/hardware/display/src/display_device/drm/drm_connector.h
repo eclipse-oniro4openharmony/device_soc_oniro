@@ -20,7 +20,6 @@
 #include <vector>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include "display_type.h"
 #include "drm_encoder.h"
 #include "hdi_device_common.h"
 #include "hdi_fd.h"
@@ -36,9 +35,9 @@ class DrmModeBlock;
 
 class DrmMode {
 public:
-    DrmMode() {}
+    DrmMode() {};
     DrmMode(drmModeModeInfo &modeInfo, uint32_t id) : mModeInfo(modeInfo), mId(id) {}
-    virtual ~DrmMode() {}
+    virtual ~DrmMode() {};
     drmModeModeInfoPtr GetModeInfoPtr()
     {
         return &mModeInfo;
@@ -67,7 +66,7 @@ private:
 class DrmConnector {
 public:
     DrmConnector(drmModeConnector c, const FdPtr &fd);
-    virtual ~DrmConnector() {}
+    virtual ~DrmConnector() {};
     uint32_t GetId() const
     {
         return mId;
