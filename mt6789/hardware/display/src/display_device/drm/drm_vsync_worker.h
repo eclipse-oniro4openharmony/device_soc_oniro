@@ -19,8 +19,7 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
-#include "display_device.h"
-#include "hdi_display.h"
+#include "hdi_device_common.h"
 
 namespace OHOS {
 namespace HDI {

@@ -21,12 +21,14 @@
 #include <queue>
 #include "buffer_handle.h"
 #include "display_common.h"
+#include "v1_0/display_composer_type.h"
 #include "hdi_device_common.h"
 #include "hdi_fd.h"
 
 namespace OHOS {
 namespace HDI {
 namespace DISPLAY {
+using namespace OHOS::HDI::Display::Composer::V1_0;
 const uint32_t INVALIDE_LAYER_ID = 0xffffffff;
 struct HdiLayerBuffer {
 public:
@@ -142,7 +144,7 @@ public:
             fd = releaseFences_.front();
             releaseFences_.pop();
         }
-        DISPLAY_LOGD("fd is %d releaseFences_ size %zu", fd, releaseFences_.size());
+        DISPLAY_LOGD("fd is %{public}d releaseFences_ size %{public}zu", fd, releaseFences_.size());
         return fd;
     }
 
@@ -159,12 +161,12 @@ public:
 
     void SetPixel(const BufferHandle &handle, int x, int y, uint32_t color);
 
-    virtual int32_t SetLayerSize(IRect *rect);
+    virtual int32_t SetLayerRegion(IRect *rect);
     virtual int32_t SetLayerCrop(IRect *rect);
     virtual void SetLayerZorder(uint32_t zorder);
     virtual int32_t SetLayerPreMulti(bool preMul);
     virtual int32_t SetLayerAlpha(LayerAlpha *alpha);
-    virtual int32_t SetTransformMode(TransformType type);
+    virtual int32_t SetLayerTransformMode(TransformType type);
     virtual int32_t SetLayerDirtyRegion(IRect *region);
     virtual int32_t SetLayerVisibleRegion(uint32_t num, IRect *rect);
     virtual int32_t SetLayerBuffer(const BufferHandle *buffer, int32_t fence);

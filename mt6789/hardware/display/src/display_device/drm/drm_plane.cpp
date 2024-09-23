@@ -35,15 +35,15 @@ int32_t DrmPlane::Init(DrmDevice &drmDevice)
     DrmProperty prop;
     ret = drmDevice.GetPlaneProperty(*this, PROP_FBID, prop);
     mPropFbId = prop.propId;
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get plane fb id"));
+    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get plane prop fbid"));
     ret = drmDevice.GetPlaneProperty(*this, PROP_IN_FENCE_FD, prop);
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("cat not get plane in fence prop id"));
+    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get plane prop in_fence_fd"));
     mPropFenceInId = prop.propId;
     ret = drmDevice.GetPlaneProperty(*this, PROP_CRTC_ID, prop);
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("cat not get pane crtc prop id"));
+    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get plane prop crtc_id"));
     mPropCrtcId = prop.propId;
     ret = drmDevice.GetPlaneProperty(*this, PROP_TYPE, prop);
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("cat not get pane crtc prop id"));
+    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get plane prop type"));
     switch (prop.value) {
         case DRM_PLANE_TYPE_OVERLAY:
         case DRM_PLANE_TYPE_PRIMARY:

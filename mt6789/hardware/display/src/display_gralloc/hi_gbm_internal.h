@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2023 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -16,8 +16,9 @@
 #ifndef HI_GBM_INTERNEL_H
 #define HI_GBM_INTERNEL_H
 
-#define DIV_ROUND_UP(n, d) (((n) + (d)-1) / (d))
-#define ALIGN_UP(x, a) ((((x) + ((a)-1)) / (a)) * (a))
+namespace OHOS {
+namespace HDI {
+namespace DISPLAY {
 #define HEIGHT_ALIGN 2U
 #define WIDTH_ALIGN 8U
 
@@ -36,5 +37,7 @@ struct gbm_bo {
     uint32_t stride;
     uint32_t size;
 };
-
+} // namespace DISPLAY
+} // namespace HDI
+} // namespace OHOS
 #endif // HI_GBM_INTERNEL_H
