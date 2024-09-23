@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2023 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -15,24 +15,28 @@
 
 #ifndef DISPLAY_GRALLOC_GBM_H
 #define DISPLAY_GRALLOC_GBM_H
-#include "display_type.h"
+#include "buffer_handle.h"
 #include "hdf_dlist.h"
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "hdf_log.h"
+#include "v1_0/display_buffer_type.h"
 
-typedef struct {
+namespace OHOS {
+namespace HDI {
+namespace DISPLAY {
+using namespace OHOS::HDI::Display::Buffer::V1_0;
+
+using GrallocManager = struct {
     struct gbm_device *gbmDevice;
     int drmFd;
     struct DListHead gbmBoHead;
     int32_t referCount;
-} GrallocManager;
+};
 
-typedef struct {
+using GbmBoList = struct {
     struct DListHead entry;
     struct gbm_bo *bo;
     int fd;
-} GbmBoList;
+};
 
 int32_t GbmAllocMem(const AllocInfo *info, BufferHandle **buffer);
 void GbmFreeMem(BufferHandle *buffer);
@@ -66,9 +70,7 @@ int32_t GbmGrallocInitialize(void);
         pthread_mutex_unlock(&g_lock); \
     } while (0)
 #endif
-
-#ifdef __cplusplus
-}
-#endif
-
+} // namespace DISPLAY
+} // namespace HDI
+} // namespace OHOS
 #endif // DISPLAY_GRALLOC_GBM_H

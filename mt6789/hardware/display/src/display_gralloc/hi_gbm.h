@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2023 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -15,12 +15,11 @@
 
 #ifndef HI_GBM_H
 #define HI_GBM_H
-#include <stdint.h>
+#include <cstdint>
 
-#if defined(__cplusplus)
-extern "C" {
-#endif
-
+namespace OHOS {
+namespace HDI {
+namespace DISPLAY {
 struct gbm_device;
 struct gbm_bo;
 
@@ -87,7 +86,7 @@ enum gbm_bo_flags {
 
 struct gbm_device *hdi_gbm_create_device(int fd);
 void hdi_gbm_device_destroy(struct gbm_device *gbm);
-struct gbm_bo *hdi_gbm_bo_create(struct gbm_device *gbm, uint32_t width, uint32_t height,
+struct gbm_bo *hdi_gbm_bo_create(struct gbm_device *gbm, uint32_t width, uint32_t height, \
     uint32_t format, uint32_t usage);
 uint32_t hdi_gbm_bo_get_stride(struct gbm_bo *bo);
 uint32_t hdi_gbm_bo_get_width(struct gbm_bo *bo);
@@ -95,8 +94,7 @@ uint32_t hdi_gbm_bo_get_height(struct gbm_bo *bo);
 uint32_t hdi_gbm_bo_get_size(struct gbm_bo *bo);
 void hdi_gbm_bo_destroy(struct gbm_bo *bo);
 int hdi_gbm_bo_get_fd(struct gbm_bo *bo);
-
-#if defined(__cplusplus)
-}
-#endif
+} // namespace DISPLAY
+} // namespace HDI
+} // namespace OHOS
 #endif // HI_GBM_H

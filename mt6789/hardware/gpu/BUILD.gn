@@ -1,17 +1,3 @@
-# Copyright (c) 2024 Institute of Software, Chinese Academy of Sciences. 
-# Copyright (c) 2022 Diemit <598757652@qq.com>
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import("//build/ohos.gni")
 import("//build/ohos/ndk/ndk.gni")
 
@@ -22,12 +8,12 @@ ohos_prebuilt_shared_library("mesa_egl") {
         source = "lib64/libEGL.so.1.0.0"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
-        "libEGL.so",
         "libEGL.so.1",
+        "libEGL.so",
         "libEGL_impl.so",
     ]
 }
@@ -39,7 +25,7 @@ ohos_prebuilt_shared_library("mesa_gbm") {
         source = "lib64/libgbm.so.1.0.0"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -55,7 +41,7 @@ ohos_prebuilt_shared_library("mesa_glapi") {
         source = "lib64/libglapi.so.0.0.0"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
@@ -71,10 +57,12 @@ ohos_prebuilt_shared_library("mesa_glesv1") {
         source = "lib64/libGLESv1_CM.so.1.1.0"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
+        "libGLESv1_CM.so.1",
+        "libGLESv1_CM.so",
         "libGLESv1.so",
         "libGLESv1_impl.so",
     ]
@@ -87,15 +75,15 @@ ohos_prebuilt_shared_library("mesa_glesv2") {
         source = "lib64/libGLESv2.so.2.0.0"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
+        "libGLESv2.so.2",
         "libGLESv2.so",
         "libGLESv2_impl.so",
         "libGLESv3.so",
         "libGLESv3_impl.so",
-        "libGLESv2.so.2",
     ]
 }
 
@@ -106,21 +94,14 @@ ohos_prebuilt_shared_library("libgallium_dri") {
         source = "lib64/libgallium_dri.so"
     }
     install_enable = true
-    part_name = "device_qemu"
+    part_name = "device_x23"
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
-        "swrast_dri.so",
-        "kms_swrast_dri.so"
+        "v3d_dri.so",
+        "vc4_dri.so",
     ]
 }
-
-# ohos_prebuilt_executable("glmark2-es2-ohos") {
-#     source = "test/glmark2-es2-ohos"
-#     install_images = [ system_base_dir ]
-#     part_name = "device_qemu"
-#     install_enable = true
-# }
 
 group("mesa3d-lib") {
     deps = [
@@ -130,6 +111,5 @@ group("mesa3d-lib") {
         ":mesa_glesv1",
         ":mesa_glesv2",
         ":libgallium_dri",
-        # ":glmark2-es2-ohos",
     ]
 }
