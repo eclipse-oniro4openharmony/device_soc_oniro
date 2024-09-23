@@ -17,20 +17,23 @@
 #include <string>
 #include <cerrno>
 #include <memory>
+#include <sys/ioctl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include "display_gralloc.h"
+#include "display_buffer_vdi_impl.h"
 #include "display_common.h"
 #include "drm_device.h"
 #include "drm_vsync_worker.h"
 #include "hdi_drm_composition.h"
 #include "hdi_gfx_composition.h"
+#include "idisplay_buffer_vdi.h"
 
 namespace OHOS {
 namespace HDI {
 namespace DISPLAY {
-DrmDisplay::DrmDisplay(std::shared_ptr<DrmConnector> &connector, const std::shared_ptr<DrmCrtc> &crtc,
-    std::shared_ptr<DrmDevice> &drmDevice)
+using namespace OHOS::HDI::Display::Buffer::V1_0;
+DrmDisplay::DrmDisplay(std::shared_ptr<DrmConnector> connector, std::shared_ptr<DrmCrtc> crtc,
+    std::shared_ptr<DrmDevice> drmDevice)
     : mDrmDevice(drmDevice), mConnector(connector), mCrtc(crtc)
 {}
 
@@ -190,14 +193,13 @@ bool DrmDisplay::IsConnected()
 
 int32_t DrmDisplay::PushFirstFrame()
 {
-    GrallocFuncs *grallocFucs = nullptr;
-    int ret = GrallocInitialize(&grallocFucs);
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("Gralloc init failed"));
+    std::shared_ptr<IDisplayBufferVdi> hdiImpl = std::make_shared<DisplayBufferVdiImpl>();
+    int ret = DISPLAY_SUCCESS;
     DrmMode mode;
     ret = mConnector->GetModeFromId(mCrtc->GetActiveModeId(), mode);
     DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE,
         DISPLAY_LOGE("can not get the mode from id %{public}d", mCrtc->GetActiveModeId()));
-    AllocInfo info = {
+    const AllocInfo info = {
         .width = mode.GetModeInfoPtr()->hdisplay,
         .height = mode.GetModeInfoPtr()->vdisplay,
         .usage = HBM_USE_MEM_DMA | HBM_USE_CPU_READ | HBM_USE_CPU_WRITE,
@@ -205,7 +207,7 @@ int32_t DrmDisplay::PushFirstFrame()
     };
 
     BufferHandle *buffer = nullptr;
-    ret = grallocFucs->AllocMem(&info, &buffer);
+    ret = hdiImpl->AllocMem(info, buffer);
     DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not alloc memory"));
     mClientLayer->SetLayerBuffer(buffer, -1);
 
@@ -234,7 +236,6 @@ int32_t DrmDisplay::ChosePreferenceMode()
 
 int32_t DrmDisplay::RegDisplayVBlankCallback(VBlankCallback cb, void *data)
 {
-    DISPLAY_LOGD("the VBlankCallback %{public}p ", cb);
     std::shared_ptr<VsyncCallBack> vsyncCb = std::make_shared<VsyncCallBack>(cb, data);
     DrmVsyncWorker::GetInstance().ReqesterVBlankCb(vsyncCb);
     return DISPLAY_SUCCESS;

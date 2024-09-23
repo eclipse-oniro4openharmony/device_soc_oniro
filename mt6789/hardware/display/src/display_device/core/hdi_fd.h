@@ -17,6 +17,7 @@
 #define HDI_FD_H
 #include <fcntl.h>
 #include <memory>
+#include <unistd.h>
 #include "display_common.h"
 
 namespace OHOS {
