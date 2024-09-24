@@ -98,8 +98,8 @@ ohos_prebuilt_shared_library("libgallium_dri") {
     install_images = [ chipset_base_dir ]
     relative_install_dir = "chipsetsdk"
     symlink_target_name = [
-        "v3d_dri.so",
-        "vc4_dri.so",
+        "kms_swrast_dri.so",
+        "swrast_dri.so"
     ]
 }
 
