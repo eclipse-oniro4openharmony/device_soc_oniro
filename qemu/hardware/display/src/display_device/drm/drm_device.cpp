@@ -30,62 +30,11 @@ namespace DISPLAY {
 FdPtr DrmDevice::mDrmFd = nullptr;
 std::shared_ptr<DrmDevice> DrmDevice::mInstance;
 
-static int OpenKmsCard(DIR *dir, struct dirent *d) {
-    int fd;
-    drmModeResPtr res;
-
-    fd = openat(dirfd(dir), d->d_name, O_RDWR | O_CLOEXEC);
-
-    if (fd < 0) {
-        goto err;
-    }
-    res = drmModeGetResources(fd);
-    if (res == NULL) {
-        goto err_fd;
-    }
-    if (res->count_crtcs <= 0 ||
-        res->count_connectors <= 0 ||
-	    res->count_encoders <= 0) {
-        goto err_res;
-    }
-    drmModeFreeResources(res);
-    return fd;
-
-err_res:
-    drmModeFreeResources(res);
-err_fd:
-    close(fd);
-err:
-    return -1;
-}
-
-static int FindAndOpenKmsCard() {
-    DIR *dir;
-    struct dirent *d;
-    int fd = -1;
-
-    dir = opendir("/dev/dri");
-    if (!dir) {
-        return -1;
-    }
-    while ((d = readdir(dir))) {
-        if (strncmp(d->d_name, "card", 4)) {
-            continue;
-        }
-        fd = OpenKmsCard(dir, d);
-        if (fd >= 0) {
-            break;
-        }
-    }
-    closedir(dir);
-    return fd;
-}
-
 std::shared_ptr<HdiDeviceInterface> DrmDevice::Create()
 {
     DISPLAY_LOGD();
     if (mDrmFd == nullptr) {
-        int drmFd = FindAndOpenKmsCard();
+        int drmFd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC); 
         if (drmFd < 0) {
             DISPLAY_LOGE("can't open drm card device");
             return nullptr;
