@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2023 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -22,149 +22,83 @@ namespace HDI {
 namespace DISPLAY {
 HdiDrmComposition::HdiDrmComposition(std::shared_ptr<DrmConnector> &connector, const std::shared_ptr<DrmCrtc> &crtc,
     std::shared_ptr<DrmDevice> &drmDevice)
-    : mDrmDevice(drmDevice), mConnector(connector), mCrtc(crtc)
-{
-    DISPLAY_LOGD();
-}
+        : mDrmDevice(drmDevice), mConnector(connector), mCrtc(crtc)
+    {
+        DISPLAY_LOGD();
+    }
 
-int32_t HdiDrmComposition::Init()
-{
-    DISPLAY_LOGD();
-    mPrimPlanes.clear();
-    mOverlayPlanes.clear();
-    mPlanes.clear();
-    DISPLAY_CHK_RETURN((mCrtc == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("crtc is null"));
-    DISPLAY_CHK_RETURN((mConnector == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("connector is null"));
-    DISPLAY_CHK_RETURN((mDrmDevice == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("drmDevice is null"));
-    mPrimPlanes = mDrmDevice->GetDrmPlane(mCrtc->GetPipe(), DRM_PLANE_TYPE_PRIMARY);
-    mOverlayPlanes = mDrmDevice->GetDrmPlane(mCrtc->GetPipe(), DRM_PLANE_TYPE_OVERLAY);
-    DISPLAY_CHK_RETURN((mPrimPlanes.size() == 0), DISPLAY_FAILURE, DISPLAY_LOGE("has no primary plane"));
-    mPlanes.insert(mPlanes.end(), mPrimPlanes.begin(), mPrimPlanes.end());
-    mPlanes.insert(mPlanes.end(), mOverlayPlanes.begin(), mOverlayPlanes.end());
-    return DISPLAY_SUCCESS;
-}
+    // Initialize the DRM composition
+    int32_t HdiDrmComposition::Init()
+    {
+        DISPLAY_LOGD();
+        mPrimPlanes.clear();
+        mOverlayPlanes.clear();
+        mPlanes.clear();
+        DISPLAY_CHK_RETURN((mCrtc == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("crtc is null"));
+        DISPLAY_CHK_RETURN((mConnector == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("connector is null"));
+        DISPLAY_CHK_RETURN((mDrmDevice == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("drmDevice is null"));
+        mPrimPlanes = mDrmDevice->GetDrmPlane(mCrtc->GetPipe(), DRM_PLANE_TYPE_PRIMARY);
+        mOverlayPlanes = mDrmDevice->GetDrmPlane(mCrtc->GetPipe(), DRM_PLANE_TYPE_OVERLAY);
+        DISPLAY_CHK_RETURN((mPrimPlanes.size() == 0), DISPLAY_FAILURE, DISPLAY_LOGE("has no primary plane"));
+        mPlanes.insert(mPlanes.end(), mPrimPlanes.begin(), mPrimPlanes.end());
+        mPlanes.insert(mPlanes.end(), mOverlayPlanes.begin(), mOverlayPlanes.end());
+        return DISPLAY_SUCCESS;
+    }
 
-int32_t HdiDrmComposition::SetLayers(std::vector<HdiLayer *> &layers, HdiLayer &clientLayer)
-{
-    // now we do not surpport present direct
-    DISPLAY_LOGD();
-    mCompLayers.clear();
-    mCompLayers.push_back(&clientLayer);
-    return DISPLAY_SUCCESS;
-}
+    // Set the layers for composition
+    int32_t HdiDrmComposition::SetLayers(std::vector<HdiLayer *> &layers, HdiLayer &clientLayer)
+    {
+        // now we do not surpport present direct
+        DISPLAY_LOGD();
+        mCompLayers.clear();
+        mCompLayers.push_back(&clientLayer);
+        return DISPLAY_SUCCESS;
+    }
 
-int32_t HdiDrmComposition::ApplyPlane(HdiDrmLayer &layer, const DrmPlane &drmPlane, drmModeAtomicReqPtr pset)
-{
-    // set fence in
-    int ret;
-    int fenceFd = layer.GetAcquireFenceFd();
-    int propId = drmPlane.GetPropFenceInId();
-    DISPLAY_LOGD();
-    if (propId != 0) {
-        DISPLAY_LOGD("set the fence in prop");
-        if (fenceFd >= 0) {
-            ret = drmModeAtomicAddProperty(pset, drmPlane.GetId(), propId, fenceFd);
-            DISPLAY_LOGD("set the IfenceProp plane id %{public}d, propId %{public}d, fenceFd %{public}d",
-                drmPlane.GetId(), propId, fenceFd);
-            DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE, DISPLAY_LOGE("set IN_FENCE_FD failed"));
+    // Apply the composition settings
+    int32_t HdiDrmComposition::Apply(bool modeSet)
+    {
+        DISPLAY_LOGD();
+        if (mCompLayers.empty()) {
+            DISPLAY_LOGE("No layers to apply");
+            return DISPLAY_FAILURE;
         }
-    }
 
-    // set fb id
-    DrmGemBuffer *gemBuffer = layer.GetGemBuffer();
-    DISPLAY_CHK_RETURN((gemBuffer == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("current gemBuffer is nullptr"));
-    DISPLAY_CHK_RETURN((!gemBuffer->IsValid()), DISPLAY_FAILURE, DISPLAY_LOGE("the DrmGemBuffer is invalid"));
-    ret = drmModeAtomicAddProperty(pset, drmPlane.GetId(), drmPlane.GetPropFbId(), gemBuffer->GetFbId());
-    DISPLAY_LOGD("set the fb planeid %{public}d, propId %{public}d, fbId %{public}d", drmPlane.GetId(),
-        drmPlane.GetPropFbId(), gemBuffer->GetFbId());
-    DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE, DISPLAY_LOGE("set fb id fialed errno : %{public}d", errno));
+        DISPLAY_LOGD("Number of layers to apply: %{public}zu", mCompLayers.size());
 
-    // set crtc id
-    ret = drmModeAtomicAddProperty(pset, drmPlane.GetId(), drmPlane.GetPropCrtcId(), mCrtc->GetId());
-    DISPLAY_LOGD("set the crtc planeId %{public}d, propId %{public}d, crtcId %{public}d", drmPlane.GetId(),
-        drmPlane.GetPropCrtcId(), mCrtc->GetId());
-    DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE, DISPLAY_LOGE("set crtc id fialed errno : %{public}d", errno));
-    return DISPLAY_SUCCESS;
-}
-
-int32_t HdiDrmComposition::UpdateMode(std::unique_ptr<DrmModeBlock> &modeBlock, drmModeAtomicReq &pset)
-{
-    // set the mode
-    DISPLAY_LOGD();
-    if (mCrtc->NeedModeSet()) {
-        modeBlock = mConnector->GetModeBlockFromId(mCrtc->GetActiveModeId());
-        if ((modeBlock != nullptr) && (modeBlock->GetBlockId() != DRM_INVALID_ID)) {
-            // set to active
-            DISPLAY_LOGD("set crtc to active");
-            int ret = drmModeAtomicAddProperty(&pset, mCrtc->GetId(), mCrtc->GetActivePropId(), 1);
-            DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE,
-                DISPLAY_LOGE("can not add the active prop errno %{public}d", errno));
-
-            // set the mode id
-            DISPLAY_LOGD("set the mode");
-            ret = drmModeAtomicAddProperty(&pset, mCrtc->GetId(), mCrtc->GetModePropId(), modeBlock->GetBlockId());
-            DISPLAY_LOGD("set the mode planeId %{public}d, propId %{public}d, GetBlockId: %{public}d", mCrtc->GetId(),
-                mCrtc->GetModePropId(), modeBlock->GetBlockId());
-            DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE,
-                DISPLAY_LOGE("can not add the mode prop errno %{public}d", errno));
-            ret = drmModeAtomicAddProperty(&pset, mConnector->GetId(), mConnector->GetPropCrtcId(), mCrtc->GetId());
-            DISPLAY_LOGD("set the connector id: %{public}d, propId %{public}d, crtcId %{public}d", mConnector->GetId(),
-                mConnector->GetPropCrtcId(), mCrtc->GetId());
-            DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE,
-                DISPLAY_LOGE("can not add the crtc id prop %{public}d", errno));
+        HdiDrmLayer *layer = static_cast<HdiDrmLayer *>(mCompLayers[0]);
+        DrmGemBuffer *buffer = layer->GetGemBuffer();
+        if (!buffer || !buffer->IsValid()) {
+            DISPLAY_LOGE("Invalid buffer");
+            return DISPLAY_FAILURE;
         }
-    }
-    return DISPLAY_SUCCESS;
-}
 
-int32_t HdiDrmComposition::Apply(bool modeSet)
-{
-    (void)modeSet;
-    uint64_t crtcOutFence = -1;
-    int ret;
-    std::unique_ptr<DrmModeBlock> modeBlock;
-    int drmFd = mDrmDevice->GetDrmFd();
-    DISPLAY_LOGD();
-    DISPLAY_CHK_RETURN((mPlanes.size() < mCompLayers.size()), DISPLAY_FAILURE, DISPLAY_LOGE("plane not enough"));
-    drmModeAtomicReqPtr pset = drmModeAtomicAlloc();
-    DISPLAY_CHK_RETURN((pset == nullptr), DISPLAY_NULL_PTR,
-        DISPLAY_LOGE("drm atomic alloc failed errno %{public}d", errno));
-    AtomicReqPtr atomicReqPtr = AtomicReqPtr(pset);
+        int fd = DrmDevice::GetDrmFd();
+        DrmMode mode;
+        int ret = mConnector->GetModeFromId(mCrtc->GetActiveModeId(), mode);
+        DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE,
+            DISPLAY_LOGE("Cannot get the mode from id %{public}d", mCrtc->GetActiveModeId()));
 
-    // set the outFence property
-    ret = drmModeAtomicAddProperty(atomicReqPtr.Get(), mCrtc->GetId(), mCrtc->GetOutFencePropId(),
-        (uint64_t)&crtcOutFence);
-
-    DISPLAY_LOGD("Apply Set OutFence crtc id: %{public}d, fencePropId %{public}d", mCrtc->GetId(),
-        mCrtc->GetOutFencePropId());
-    DISPLAY_CHK_RETURN((ret < 0), DISPLAY_FAILURE, DISPLAY_LOGE("set the outfence property of crtc failed "));
-
-    // set the plane info.
-    DISPLAY_LOGD("mCompLayers size %{public}zd", mCompLayers.size());
-    for (uint32_t i = 0; i < mCompLayers.size(); i++) {
-        HdiDrmLayer *layer = static_cast<HdiDrmLayer *>(mCompLayers[i]);
-        const auto &drmPlane = mPlanes[i];
-        ret = ApplyPlane(*layer, *drmPlane, atomicReqPtr.Get());
-        if (ret != DISPLAY_SUCCESS) {
-            DISPLAY_LOGE("apply plane failed");
-            break;
+        drmModeEncoder *enc = drmModeGetEncoder(fd, mConnector->GetEncoderId());
+        if (!enc) {
+            DISPLAY_LOGE("No encoder found");
+            return DISPLAY_FAILURE;
         }
-    }
-    ret = UpdateMode(modeBlock, *(atomicReqPtr.Get()));
-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("update mode failed"));
-    uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_NONBLOCK;
 
-    ret = drmModeAtomicCommit(drmFd, atomicReqPtr.Get(), flags, nullptr);
-    DISPLAY_CHK_RETURN((ret != 0), DISPLAY_FAILURE,
-        DISPLAY_LOGE("drmModeAtomicCommit failed %{public}d errno %{public}d", ret, errno));
-    // set the release fence
-    for (auto layer : mCompLayers) {
-        layer->SetReleaseFence(dup(static_cast<int32_t>(crtcOutFence)));
+        uint32_t fb = buffer->GetFbId();
+
+        uint32_t connector_id = mConnector->GetId();
+        ret = drmModeSetCrtc(fd, enc->crtc_id, fb, 0, 0, &connector_id, 1, mode.GetModeInfoPtr());
+        drmModeFreeEncoder(enc);
+
+        if (ret != 0) {
+            DISPLAY_LOGE("Failed to set CRTC: %{public}s", strerror(errno));
+            return DISPLAY_FAILURE;
+        }
+
+        return DISPLAY_SUCCESS;
     }
-    close(static_cast<int32_t>(crtcOutFence));
-    crtcOutFence = -1;
-    return DISPLAY_SUCCESS;
-}
+
 } // OHOS
 } // HDI
 } // DISPLAY
