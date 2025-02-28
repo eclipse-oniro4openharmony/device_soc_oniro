@@ -30,23 +30,17 @@ DrmGemBuffer::DrmGemBuffer(int drmFd, HdiLayerBuffer &hdl) : mDrmFd(drmFd)
 void DrmGemBuffer::Init(int drmFd, HdiLayerBuffer &hdl)
 {
     int ret;
-    const int MAX_COUNT = 4;
-    uint32_t pitches[MAX_COUNT] = {0};
-    uint32_t gemHandles[MAX_COUNT] = {0};
-    uint32_t offsets[MAX_COUNT] = {0};
+    
     DISPLAY_CHK_RETURN_NOT_VALUE((drmFd < 0), DISPLAY_LOGE("can not init drmfd %{public}d", drmFd));
     mDrmFormat = DrmDevice::ConvertToDrmFormat(static_cast<PixelFormat>(hdl.GetFormat()));
     ret = drmPrimeFDToHandle(drmFd, hdl.GetFb(), &mGemHandle);
     DISPLAY_CHK_RETURN_NOT_VALUE((ret != 0), DISPLAY_LOGE("can not get handle errno %{public}d", errno));
 
-    pitches[0] = hdl.GetStride();
-    gemHandles[0] = mGemHandle;
-    offsets[0] = 0;
-    ret = drmModeAddFB2(drmFd, hdl.GetWidth(), hdl.GetHeight(), mDrmFormat, gemHandles, pitches, offsets, &mFdId, 0);
-    DISPLAY_LOGD("mGemHandle %{public}d  mFdId %{public}d", mGemHandle, mFdId);
-    DISPLAY_LOGD("w: %{public}d  h: %{public}d mDrmFormat : %{public}d gemHandles: %{public}d pitches: %{public}d "
-        "offsets: %{public}d",
-        hdl.GetWidth(), hdl.GetHeight(), mDrmFormat, gemHandles[0], pitches[0], offsets[0]);
+    ret = drmModeAddFB(drmFd, hdl.GetWidth(), hdl.GetHeight(), 24, 32, hdl.GetStride(), mGemHandle, &mFdId);
+    DISPLAY_LOGD("drmModeAddFB parameters: fd: %{public}d, width: %{public}u, height: %{public}u, depth: %{public}u, bpp: %{public}u, pitch: %{public}u, bo_handle: %{public}u",
+                 drmFd, hdl.GetWidth(), hdl.GetHeight(), 24, 32, hdl.GetStride(), mGemHandle);
+
+
     DISPLAY_CHK_RETURN_NOT_VALUE((ret != 0), DISPLAY_LOGE("can not add fb errno %{public}d", errno));
 }
 
