@@ -65,10 +65,10 @@ bool DrmCrtc::CanBind() const
     return (mDisplayId == INVALIDE_DISPLAY_ID);
 }
 
-int32_t DrmCrtc::SetActivieMode(int32_t id)
+int32_t DrmCrtc::SetActiveMode(int32_t id)
 {
-    DISPLAY_LOGD("set activie modeid to %{public}d", id);
-    DISPLAY_CHK_RETURN((id > 0), DISPLAY_PARAM_ERR, DISPLAY_LOGE("id %{public}d is invalid ", id));
+    DISPLAY_LOGD("set active modeid to %{public}d", id);
+    DISPLAY_CHK_RETURN((id < 0), DISPLAY_PARAM_ERR, DISPLAY_LOGE("id %{public}d is invalid ", id));
     if (mActiveModeId != id) {
         mNeedModeSet = true;
     }
