@@ -94,7 +94,7 @@ int32_t DrmDisplay::GetDisplayMode(uint32_t *modeId)
 
 int32_t DrmDisplay::SetDisplayMode(uint32_t modeId)
 {
-    return mCrtc->SetActivieMode(modeId);
+    return mCrtc->SetActiveMode(modeId);
 }
 
 int32_t DrmDisplay::GetDisplayPowerStatus(DispPowerStatus *status)

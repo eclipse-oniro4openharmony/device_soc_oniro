@@ -59,7 +59,7 @@ public:
         return mPipe;
     }
     int32_t Init(DrmDevice &drmDevice);
-    int32_t SetActivieMode(int32_t id);
+    int32_t SetActiveMode(int32_t id);
     int32_t GetActiveModeId() const
     {
         return mActiveModeId;
