@@ -1,0 +1,109 @@
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+import("//build/ohos/ndk/ndk.gni")
+
+if (target_cpu == "arm64" || target_cpu == "riscv64" || target_cpu == "x86_64") {
+  virt_lib = "lib64"
+} else if (target_cpu == "arm") {
+  virt_lib = "lib"
+}
+
+
+
+ohos_prebuilt_shared_library("libglapi.so.0.0.0") {
+  source = "${target_cpu}/libglapi.so.0.0.0"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "libglapi.so",
+    "libglapi.so.0",
+  ]
+}
+
+ohos_prebuilt_shared_library("libEGL.so.1.0.0") {
+  source = "${target_cpu}/libEGL.so.1.0.0"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "libEGL_impl.so",
+  ]
+}
+
+ohos_prebuilt_shared_library("libgbm.so.1.0.0") {
+  source = "${target_cpu}/libgbm.so.1.0.0"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "libgbm.so",
+    "libgbm.so.1",
+  ]
+}
+
+ohos_prebuilt_shared_library("kms_swrast_dri.so") {
+  source = "${target_cpu}/kms_swrast_dri.so"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "swrast_dri.so",
+  ]
+}
+
+ohos_prebuilt_shared_library("libGLESv1_CM.so.1.1.0") {
+  source = "${target_cpu}/libGLESv1_CM.so.1.1.0"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "libGLESv1_impl.so",
+  ]
+}
+
+ohos_prebuilt_shared_library("libGLESv2.so.2.0.0") {
+  source = "${target_cpu}/libGLESv2.so.2.0.0"
+  install_images = [ "system" ]
+  module_install_dir = "$virt_lib"
+  subsystem_name = "oniro_virt"
+  part_name = "oniro_virt"
+  install_enable = true
+  symlink_target_name = [
+    "libGLESv2_impl.so",
+    "libGLESv3_impl.so",
+  ]
+}
+
+group("virtio") {
+  deps = [
+    ":libEGL.so.1.0.0",
+    ":libgbm.so.1.0.0",
+    ":libglapi.so.0.0.0",
+    ":kms_swrast_dri.so",
+    ":libGLESv1_CM.so.1.1.0",
+    ":libGLESv2.so.2.0.0",
+  ]
+}
