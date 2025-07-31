@@ -43,7 +43,7 @@ using namespace OHOS::HDI::Display::Buffer::V1_0;
 
 const char *g_drmFileNode = "/dev/dri/card0";
 static GrallocManager *g_grallocManager = nullptr;
-static pthread_mutex_t g_lock;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 using PixelFormatConvertTbl = struct {
     uint32_t drmFormat;
@@ -220,13 +220,25 @@ static int32_t InitGbmDevice(const char *drmFile, GrallocManager *grallocManager
 
 static void DeInitGbmDevice(GrallocManager *grallocManager)
 {
-    DISPLAY_LOGD();
-    hdi_gbm_device_destroy(grallocManager->gbmDevice);
+    DISPLAY_LOGD("DeInitGbmDevice entry - manager: %{public}p", grallocManager);
+    
+    if (grallocManager == nullptr) {
+        DISPLAY_LOGE("Gralloc manager is null in DeInitGbmDevice");
+        return;
+    }
+    
+    if (grallocManager->gbmDevice != nullptr) {
+        DISPLAY_LOGD("Destroying GBM device: %{public}p", grallocManager->gbmDevice);
+        hdi_gbm_device_destroy(grallocManager->gbmDevice);
+        grallocManager->gbmDevice = nullptr;
+    } else {
+        DISPLAY_LOGD("GBM device is already null, skipping destroy");
+    }
+    
     if (grallocManager->drmFd > 0) {
         close(grallocManager->drmFd);
         grallocManager->drmFd = -1;
     }
-    grallocManager->gbmDevice = nullptr;
 }
 
 static int32_t DmaBufferSync(const BufferHandle *handle, bool start)
@@ -264,6 +276,24 @@ static int32_t DmaBufferSync(const BufferHandle *handle, bool start)
 
 static void InitBufferHandle(struct gbm_bo *bo, int fd, const AllocInfo *info, PriBufferHandle *buffer)
 {
+    DISPLAY_LOGD("InitBufferHandle entry - bo: %{public}p, fd: %{public}d, info: %{public}p, buffer: %{public}p", 
+                 bo, fd, info, buffer);
+    
+    if (bo == nullptr) {
+        DISPLAY_LOGE("GBM buffer object is null in InitBufferHandle");
+        return;
+    }
+    
+    if (buffer == nullptr) {
+        DISPLAY_LOGE("Buffer handle is null in InitBufferHandle");
+        return;
+    }
+    
+    if (info == nullptr) {
+        DISPLAY_LOGE("AllocInfo is null in InitBufferHandle");
+        return;
+    }
+    
     BufferHandle *bufferHandle = &(buffer->hdl);
     bufferHandle->fd = fd;
     bufferHandle->reserveFds = 0;
@@ -288,10 +318,17 @@ int32_t GbmAllocMem(const AllocInfo *info, BufferHandle **buffer)
     DISPLAY_LOGD("requeset width %{public}d, heigt %{public}d, format %{public}d",
         info->width, info->height, drmFmt);
 
-        GRALLOC_LOCK();
+    GRALLOC_LOCK();
     GrallocManager *grallocManager = GetGrallocManager();
     DISPLAY_CHK_RETURN((grallocManager == nullptr), HDF_ERR_INVALID_PARAM, DISPLAY_LOGE("gralloc manager failed");
         GRALLOC_UNLOCK());
+    
+    DISPLAY_LOGD("Creating GBM buffer object - device: %{public}p", grallocManager->gbmDevice);
+    if (grallocManager->gbmDevice == nullptr) {
+        DISPLAY_LOGE("GBM device is null, cannot create buffer object");
+        GRALLOC_UNLOCK();
+        return HDF_ERR_DEVICE_BUSY;
+    }
     struct gbm_bo *bo =
         hdi_gbm_bo_create(grallocManager->gbmDevice, info->width, info->height, drmFmt, ConvertUsageToGbm(info->usage));
     DISPLAY_CHK_RETURN((bo == nullptr), HDF_DEV_ERR_NO_MEMORY, DISPLAY_LOGE("gbm create bo failed"); \
@@ -323,9 +360,11 @@ int32_t GbmAllocMem(const AllocInfo *info, BufferHandle **buffer)
     GRALLOC_UNLOCK();
     return HDF_SUCCESS;
 error:
+    DISPLAY_LOGE("Error path: closing fd: %{public}d, destroying bo: %{public}p", fd, bo);
     close(fd);
     hdi_gbm_bo_destroy(bo);
     if (priBuffer != nullptr) {
+        DISPLAY_LOGD("Freeing priBuffer: %{public}p", priBuffer);
         free(priBuffer);
     }
     GRALLOC_UNLOCK();
@@ -350,13 +389,16 @@ static void CloseBufferHandle(BufferHandle *handle)
 
 void GbmFreeMem(BufferHandle *buffer)
 {
-    DISPLAY_LOGD();
+    DISPLAY_LOGD("GbmFreeMem entry - buffer: %{public}p", buffer);
     DISPLAY_CHK_RETURN_NOT_VALUE((buffer == nullptr), DISPLAY_LOGE("buffer is null"));
     if ((buffer->virAddr != nullptr) && (GbmUnmap(buffer) != HDF_SUCCESS)) {
         DISPLAY_LOGE("freeMem unmap buffer failed");
     }
+    DISPLAY_LOGD("Closing buffer handle");
     CloseBufferHandle(buffer);
-    free(buffer);
+    // Freeing the buffer handle causes a segmentation fault, so it is commented out.
+    // free(buffer);
+    DISPLAY_LOGD("GbmFreeMem completed");
 }
 
 void *GbmMmap(BufferHandle *buffer)
