@@ -376,6 +376,202 @@ extern "C" void DestroyComposerVdi(IDisplayComposerVdi* vdi)
     delete vdi;
 }
 
+DisplayComposerVdiImpl& DisplayComposerVdiImpl::GetVdiInstance()
+{
+    static DisplayComposerVdiImpl vdiImpl;
+    return vdiImpl;
+}
+
+extern "C" int32_t RegHotPlugCallback(HotPlugCallback cb, void* data)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().RegHotPlugCallback(cb, data);
+}
+
+extern "C" int32_t GetDisplayCapability(uint32_t devId, V1_0::DisplayCapability& info)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayCapability(devId, info);
+}
+
+extern "C" int32_t GetDisplaySupportedModes(uint32_t devId, std::vector<V1_0::DisplayModeInfo>& modes)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplaySupportedModes(devId, modes);
+}
+
+extern "C" int32_t GetDisplayMode(uint32_t devId, uint32_t& modeId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayMode(devId, modeId);
+}
+
+extern "C" int32_t SetDisplayMode(uint32_t devId, uint32_t modeId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayMode(devId, modeId);
+}
+
+extern "C" int32_t GetDisplayPowerStatus(uint32_t devId, V1_0::DispPowerStatus& status)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayPowerStatus(devId, status);
+}
+
+extern "C" int32_t SetDisplayPowerStatus(uint32_t devId, V1_0::DispPowerStatus status)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayPowerStatus(devId, status);
+}
+
+extern "C" int32_t GetDisplayBacklight(uint32_t devId, uint32_t& level)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayBacklight(devId, level);
+}
+
+extern "C" int32_t SetDisplayBacklight(uint32_t devId, uint32_t level)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayBacklight(devId, level);
+}
+
+extern "C" int32_t GetDisplayProperty(uint32_t devId, uint32_t id, uint64_t& value)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayProperty(devId, id, value);
+}
+
+extern "C" int32_t GetDisplayCompChange(uint32_t devId, std::vector<uint32_t>& layers, std::vector<int32_t>& types)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayCompChange(devId, layers, types);
+}
+
+extern "C" int32_t SetDisplayClientCrop(uint32_t devId, const V1_0::IRect& rect)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayClientCrop(devId, rect);
+}
+
+extern "C" int32_t SetDisplayClientBuffer(uint32_t devId, const BufferHandle& buffer, int32_t fence)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayClientBuffer(devId, buffer, fence);
+}
+
+extern "C" int32_t SetDisplayClientDamage(uint32_t devId, std::vector<V1_0::IRect>& rects)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayClientDamage(devId, rects);
+}
+
+extern "C" int32_t SetDisplayVsyncEnabled(uint32_t devId, bool enabled)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayVsyncEnabled(devId, enabled);
+}
+
+extern "C" int32_t RegDisplayVBlankCallback(uint32_t devId, VBlankCallback cb, void* data)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().RegDisplayVBlankCallback(devId, cb, data);
+}
+
+extern "C" int32_t GetDisplayReleaseFence(uint32_t devId, std::vector<uint32_t>& layers, std::vector<int32_t>& fences)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().GetDisplayReleaseFence(devId, layers, fences);
+}
+
+extern "C" int32_t CreateVirtualDisplay(uint32_t width, uint32_t height, int32_t& format, uint32_t& devId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().CreateVirtualDisplay(width, height, format, devId);
+}
+
+extern "C" int32_t DestroyVirtualDisplay(uint32_t devId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().DestroyVirtualDisplay(devId);
+}
+
+extern "C" int32_t SetVirtualDisplayBuffer(uint32_t devId, const BufferHandle& buffer, const int32_t fence)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetVirtualDisplayBuffer(devId, buffer, fence);
+}
+
+extern "C" int32_t SetDisplayProperty(uint32_t devId, uint32_t id, uint64_t value)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetDisplayProperty(devId, id, value);
+}
+
+extern "C" int32_t Commit(uint32_t devId, int32_t& fence)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().Commit(devId, fence);
+}
+
+extern "C" int32_t CreateLayer(uint32_t devId, const V1_0::LayerInfo& layerInfo, uint32_t& layerId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().CreateLayer(devId, layerInfo, layerId);
+}
+
+extern "C" int32_t DestroyLayer(uint32_t devId, uint32_t layerId)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().DestroyLayer(devId, layerId);
+}
+
+extern "C" int32_t PrepareDisplayLayers(uint32_t devId, bool& needFlushFb)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().PrepareDisplayLayers(devId, needFlushFb);
+}
+
+extern "C" int32_t SetLayerAlpha(uint32_t devId, uint32_t layerId, const V1_0::LayerAlpha& alpha)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerAlpha(devId, layerId, alpha);
+}
+
+extern "C" int32_t SetLayerRegion(uint32_t devId, uint32_t layerId, const V1_0::IRect& rect)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerRegion(devId, layerId, rect);
+}
+
+extern "C" int32_t SetLayerCrop(uint32_t devId, uint32_t layerId, const V1_0::IRect& rect)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerCrop(devId, layerId, rect);
+}
+
+extern "C" int32_t SetLayerZorder(uint32_t devId, uint32_t layerId, uint32_t zorder)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerZorder(devId, layerId, zorder);
+}
+
+extern "C" int32_t SetLayerPreMulti(uint32_t devId, uint32_t layerId, bool preMul)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerPreMulti(devId, layerId, preMul);
+}
+
+extern "C" int32_t SetLayerTransformMode(uint32_t devId, uint32_t layerId, V1_0::TransformType type)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerTransformMode(devId, layerId, type);
+}
+
+extern "C" int32_t SetLayerDirtyRegion(uint32_t devId, uint32_t layerId, const std::vector<V1_0::IRect>& rects)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerDirtyRegion(devId, layerId, rects);
+}
+
+extern "C" int32_t SetLayerVisibleRegion(uint32_t devId, uint32_t layerId, std::vector<V1_0::IRect>& rects)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerVisibleRegion(devId, layerId, rects);
+}
+
+extern "C" int32_t SetLayerBuffer(uint32_t devId, uint32_t layerId, const BufferHandle& buffer, int32_t fence)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerBuffer(devId, layerId, buffer, fence);
+}
+
+extern "C" int32_t SetLayerCompositionType(uint32_t devId, uint32_t layerId, V1_0::CompositionType type)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerCompositionType(devId, layerId, type);
+}
+
+extern "C" int32_t SetLayerBlendType(uint32_t devId, uint32_t layerId, V1_0::BlendType type)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerBlendType(devId, layerId, type);
+}
+
+extern "C" int32_t SetLayerMaskInfo(uint32_t devId, uint32_t layerId, const V1_0::MaskInfo maskInfo)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerMaskInfo(devId, layerId, maskInfo);
+}
+
+extern "C" int32_t SetLayerColor(uint32_t devId, uint32_t layerId, const V1_0::LayerColor& layerColor)
+{
+    return DisplayComposerVdiImpl::GetVdiInstance().SetLayerColor(devId, layerId, layerColor);
+}
+
 } // DISPLAY
 } // HDI
 } // OHOS

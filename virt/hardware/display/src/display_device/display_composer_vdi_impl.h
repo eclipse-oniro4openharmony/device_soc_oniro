@@ -30,6 +30,7 @@ using namespace OHOS::HDI::Display::Composer::V1_0;
 
 class DisplayComposerVdiImpl : public IDisplayComposerVdi {
 public:
+    static DisplayComposerVdiImpl& GetVdiInstance();
     DisplayComposerVdiImpl();
     virtual ~DisplayComposerVdiImpl();
     virtual int32_t RegHotPlugCallback(HotPlugCallback cb, void* data) override;
