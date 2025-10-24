@@ -1,0 +1,38 @@
+{
+    "name": "@ohos/x86_general",
+    "version": "3.1",
+    "license": "Apache License 2.0",
+    "private": false,
+    "scripts": {},
+    "dirs": [""],
+    "component": {
+      "name": "x86_general",
+      "subsystem": "oniro_soc_products",
+      "syscap": [],
+      "features": [],
+      "deps": {
+        "components": [
+          "c_utils",
+          "hilog",
+          "hdf_core",
+          "drivers_interface_display",
+          "drivers_interface_camera",
+          "hitrace",
+          "ipc",
+          "graphic_surface",
+          "window_manager",
+          "graphic_2d"
+        ],
+        "third_party": [
+          "libdrm",
+          "zlib"
+        ]
+      },
+      "build": {
+        "sub_component": [
+          "//device/soc/oniro/x86_general/hardware:hardware_group"
+        ],
+        "test": []
+      }
+    }
+  }
