@@ -1,0 +1,168 @@
+# Copyright (c) 2024 Diemit <598757652@qq.com>
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+ohos_shared_library("libelf") {
+  output_prefix_override = true
+  output_name = "libelf"
+  output_extension = "so"
+
+  include_dirs = [
+    "./",
+    "./include",
+    "//third_party/elfutils/include",
+    "//third_party/elfutils/lib",
+    "//third_party/elfutils/libelf",
+  ]
+
+  cflags = [
+    "-DHAVE_CONFIG_H",
+    "-D_GNU_SOURCE",
+    "-Werror",
+    "-Wno-pointer-arith",
+    "-Wno-int-conversion",
+    "-Wno-implicit-function-declaration",
+  ]
+
+  sources = [
+        "//third_party/elfutils/libelf/elf32_checksum.c",
+        "//third_party/elfutils/libelf/elf32_fsize.c",
+        "//third_party/elfutils/libelf/elf32_getchdr.c",
+        "//third_party/elfutils/libelf/elf32_getehdr.c",
+        "//third_party/elfutils/libelf/elf32_getphdr.c",
+        "//third_party/elfutils/libelf/elf32_getshdr.c",
+        "//third_party/elfutils/libelf/elf32_newehdr.c",
+        "//third_party/elfutils/libelf/elf32_newphdr.c",
+        "//third_party/elfutils/libelf/elf32_offscn.c",
+        "//third_party/elfutils/libelf/elf32_updatefile.c",
+        "//third_party/elfutils/libelf/elf32_updatenull.c",
+        "//third_party/elfutils/libelf/elf32_xlatetof.c",
+        "//third_party/elfutils/libelf/elf32_xlatetom.c",
+        "//third_party/elfutils/libelf/elf64_checksum.c",
+        "//third_party/elfutils/libelf/elf64_fsize.c",
+        "//third_party/elfutils/libelf/elf64_getchdr.c",
+        "//third_party/elfutils/libelf/elf64_getehdr.c",
+        "//third_party/elfutils/libelf/elf64_getphdr.c",
+        "//third_party/elfutils/libelf/elf64_getshdr.c",
+        "//third_party/elfutils/libelf/elf64_newehdr.c",
+        "//third_party/elfutils/libelf/elf64_newphdr.c",
+        "//third_party/elfutils/libelf/elf64_offscn.c",
+        "//third_party/elfutils/libelf/elf64_updatefile.c",
+        "//third_party/elfutils/libelf/elf64_updatenull.c",
+        "//third_party/elfutils/libelf/elf64_xlatetof.c",
+        "//third_party/elfutils/libelf/elf64_xlatetom.c",
+        "//third_party/elfutils/libelf/elf_begin.c",
+        "//third_party/elfutils/libelf/elf_clone.c",
+        "//third_party/elfutils/libelf/elf_cntl.c",
+        "//third_party/elfutils/libelf/elf_compress.c",
+        "//third_party/elfutils/libelf/elf_end.c",
+        "//third_party/elfutils/libelf/elf_error.c",
+        "//third_party/elfutils/libelf/elf_fill.c",
+        "//third_party/elfutils/libelf/elf_flagdata.c",
+        "//third_party/elfutils/libelf/elf_flagehdr.c",
+        "//third_party/elfutils/libelf/elf_flagelf.c",
+        "//third_party/elfutils/libelf/elf_flagphdr.c",
+        "//third_party/elfutils/libelf/elf_flagscn.c",
+        "//third_party/elfutils/libelf/elf_flagshdr.c",
+        "//third_party/elfutils/libelf/elf_getarhdr.c",
+        "//third_party/elfutils/libelf/elf_getaroff.c",
+        "//third_party/elfutils/libelf/elf_getarsym.c",
+        "//third_party/elfutils/libelf/elf_getbase.c",
+        "//third_party/elfutils/libelf/elf_getdata.c",
+        "//third_party/elfutils/libelf/elf_getdata_rawchunk.c",
+        "//third_party/elfutils/libelf/elf_getident.c",
+        "//third_party/elfutils/libelf/elf_getphdrnum.c",
+        "//third_party/elfutils/libelf/elf_getscn.c",
+        "//third_party/elfutils/libelf/elf_getshdrnum.c",
+        "//third_party/elfutils/libelf/elf_getshdrstrndx.c",
+        "//third_party/elfutils/libelf/elf_gnu_hash.c",
+        "//third_party/elfutils/libelf/elf_hash.c",
+        "//third_party/elfutils/libelf/elf_kind.c",
+        "//third_party/elfutils/libelf/elf_memory.c",
+        "//third_party/elfutils/libelf/elf_ndxscn.c",
+        "//third_party/elfutils/libelf/elf_newdata.c",
+        "//third_party/elfutils/libelf/elf_newscn.c",
+        "//third_party/elfutils/libelf/elf_next.c",
+        "//third_party/elfutils/libelf/elf_nextscn.c",
+        "//third_party/elfutils/libelf/elf_rand.c",
+        "//third_party/elfutils/libelf/elf_rawdata.c",
+        "//third_party/elfutils/libelf/elf_rawfile.c",
+        "//third_party/elfutils/libelf/elf_readall.c",
+        "//third_party/elfutils/libelf/elf_scnshndx.c",
+        # "//third_party/elfutils/libelf/elf_strptr.c",
+        "libelf/elf_strptr.c",
+        "//third_party/elfutils/libelf/elf_update.c",
+        "//third_party/elfutils/libelf/elf_version.c",
+        "//third_party/elfutils/libelf/gelf_checksum.c",
+        "//third_party/elfutils/libelf/gelf_fsize.c",
+        "//third_party/elfutils/libelf/gelf_getauxv.c",
+        "//third_party/elfutils/libelf/gelf_getchdr.c",
+        "//third_party/elfutils/libelf/gelf_getclass.c",
+        "//third_party/elfutils/libelf/gelf_getdyn.c",
+        "//third_party/elfutils/libelf/gelf_getehdr.c",
+        "//third_party/elfutils/libelf/gelf_getlib.c",
+        "//third_party/elfutils/libelf/gelf_getmove.c",
+        "//third_party/elfutils/libelf/gelf_getnote.c",
+        "//third_party/elfutils/libelf/gelf_getphdr.c",
+        "//third_party/elfutils/libelf/gelf_getrela.c",
+        "//third_party/elfutils/libelf/gelf_getrel.c",
+        "//third_party/elfutils/libelf/gelf_getshdr.c",
+        "//third_party/elfutils/libelf/gelf_getsym.c",
+        "//third_party/elfutils/libelf/gelf_getsyminfo.c",
+        "//third_party/elfutils/libelf/gelf_getsymshndx.c",
+        "//third_party/elfutils/libelf/gelf_getverdaux.c",
+        "//third_party/elfutils/libelf/gelf_getverdef.c",
+        "//third_party/elfutils/libelf/gelf_getvernaux.c",
+        "//third_party/elfutils/libelf/gelf_getverneed.c",
+        "//third_party/elfutils/libelf/gelf_getversym.c",
+        "//third_party/elfutils/libelf/gelf_newehdr.c",
+        "//third_party/elfutils/libelf/gelf_newphdr.c",
+        "//third_party/elfutils/libelf/gelf_offscn.c",
+        "//third_party/elfutils/libelf/gelf_update_auxv.c",
+        "//third_party/elfutils/libelf/gelf_update_dyn.c",
+        "//third_party/elfutils/libelf/gelf_update_ehdr.c",
+        "//third_party/elfutils/libelf/gelf_update_lib.c",
+        "//third_party/elfutils/libelf/gelf_update_move.c",
+        "//third_party/elfutils/libelf/gelf_update_phdr.c",
+        "//third_party/elfutils/libelf/gelf_update_rela.c",
+        "//third_party/elfutils/libelf/gelf_update_rel.c",
+        "//third_party/elfutils/libelf/gelf_update_shdr.c",
+        "//third_party/elfutils/libelf/gelf_update_sym.c",
+        "//third_party/elfutils/libelf/gelf_update_syminfo.c",
+        "//third_party/elfutils/libelf/gelf_update_symshndx.c",
+        "//third_party/elfutils/libelf/gelf_update_verdaux.c",
+        "//third_party/elfutils/libelf/gelf_update_verdef.c",
+        "//third_party/elfutils/libelf/gelf_update_vernaux.c",
+        "//third_party/elfutils/libelf/gelf_update_verneed.c",
+        "//third_party/elfutils/libelf/gelf_update_versym.c",
+        "//third_party/elfutils/libelf/gelf_xlate.c",
+        "//third_party/elfutils/libelf/gelf_xlatetof.c",
+        "//third_party/elfutils/libelf/gelf_xlatetom.c",
+        "//third_party/elfutils/libelf/libelf_crc32.c",
+        "//third_party/elfutils/libelf/libelf_next_prime.c",
+        "//third_party/elfutils/libelf/nlist.c",
+  ]
+ 
+  deps = [
+    "//third_party/zlib:libz",
+  ]
+
+  public_deps = []
+  install_images = [
+    "vendor",
+    "updater",
+  ]
+  relative_install_dir = "chipsetsdk"
+  part_name = "x86_general"
+}

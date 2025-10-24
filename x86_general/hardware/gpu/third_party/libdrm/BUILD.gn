@@ -1,0 +1,166 @@
+# Copyright (c) 2024 Diemit <598757652@qq.com>
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+config("libdrm_config") {
+  visibility = [ ":*" ]
+
+  include_dirs = []
+
+  cflags = [
+    "-Wno-deprecated-declarations",
+    "-Wno-enum-conversion",
+    "-DMAJOR_IN_SYSMACROS=1",
+  ]
+}
+
+config("libdrm_public_config") {
+  include_dirs = [
+    "//third_party/libdrm/",
+    "//third_party/libdrm/include",
+    "//third_party/libdrm/include/drm",
+  ]
+
+  cflags = []
+}
+
+ohos_prebuilt_etc("amdgpu.ids") {
+  source = "//third_party/libdrm/data/amdgpu.ids"
+  install_enable = true
+  install_images = [ vendor_base_dir ]
+  module_install_dir = "lib64/chipsetsdk/"
+  part_name = "x86_general"
+}
+
+ohos_shared_library("libdrm_radeon") {
+  output_prefix_override = true
+  output_name = "libdrm_radeon"
+  output_extension = "so"
+
+  include_dirs = [
+    "//third_party/libdrm/radeon",
+  ]
+
+  sources = [
+    "//third_party/libdrm/radeon/radeon_bo_gem.c",
+    "//third_party/libdrm/radeon/radeon_cs_gem.c",
+    "//third_party/libdrm/radeon/radeon_cs_space.c",
+    "//third_party/libdrm/radeon/radeon_bo.c",
+    "//third_party/libdrm/radeon/radeon_cs.c",
+    "//third_party/libdrm/radeon/radeon_surface.c",
+  ]
+
+  cflags = [
+    "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES",
+  ]
+
+  configs = [ ":libdrm_config" ]
+
+  public_configs = [ ":libdrm_public_config" ]
+
+  deps = [
+    "//third_party/libdrm:libdrm",
+    ":amdgpu.ids",
+  ]
+
+  public_deps = []
+  install_images = [
+    "vendor",
+    "updater",
+  ]
+  relative_install_dir = "chipsetsdk"
+  part_name = "x86_general"
+}
+
+ohos_shared_library("libdrm_amdgpu") {
+  output_prefix_override = true
+  output_name = "libdrm_amdgpu"
+  output_extension = "so"
+
+  include_dirs = [
+    "//third_party/libdrm/amdgpu",
+  ]
+
+  sources = [
+    "//third_party/libdrm/amdgpu/amdgpu_asic_id.c",
+    "//third_party/libdrm/amdgpu/amdgpu_bo.c",
+    "//third_party/libdrm/amdgpu/amdgpu_cs.c",
+    "//third_party/libdrm/amdgpu/amdgpu_device.c",
+    "//third_party/libdrm/amdgpu/amdgpu_gpu_info.c",
+    "//third_party/libdrm/amdgpu/amdgpu_vamgr.c",
+    "//third_party/libdrm/amdgpu/amdgpu_vm.c",
+    "//third_party/libdrm/amdgpu/handle_table.c",
+  ]
+
+  cflags = [
+    "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES",
+    "-DAMDGPU_ASIC_ID_TABLE=\"/vendor/lib64/chipsetsdk/amdgpu.ids\"",
+  ]
+
+  configs = [ ":libdrm_config" ]
+
+  public_configs = [ ":libdrm_public_config" ]
+
+  deps = [
+    "//third_party/libdrm:libdrm",
+    ":amdgpu.ids",
+    ":libdrm_radeon",
+  ]
+
+  public_deps = []
+  install_images = [
+    "vendor",
+    "updater",
+  ]
+  relative_install_dir = "chipsetsdk"
+  part_name = "x86_general"
+}
+
+ohos_shared_library("libdrm_nouveau") {
+  output_prefix_override = true
+  output_name = "libdrm_nouveau"
+  output_extension = "so"
+
+  include_dirs = [
+    "//third_party/libdrm/nouveau",
+  ]
+
+  sources = [
+    "//third_party/libdrm/nouveau/nouveau.c",
+    "//third_party/libdrm/nouveau/pushbuf.c",
+    "//third_party/libdrm/nouveau/bufctx.c",
+    "//third_party/libdrm/nouveau/abi16.c",
+  ]
+
+  cflags = [
+    "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES",
+    "-Wno-gnu-variable-sized-type-not-at-end"
+  ]
+
+  configs = [ ":libdrm_config" ]
+
+  public_configs = [ ":libdrm_public_config" ]
+
+  deps = [
+    "//third_party/libdrm:libdrm",
+  ]
+
+  public_deps = []
+  install_images = [
+    "vendor",
+    "updater",
+  ]
+  relative_install_dir = "chipsetsdk"
+  part_name = "x86_general"
+}
