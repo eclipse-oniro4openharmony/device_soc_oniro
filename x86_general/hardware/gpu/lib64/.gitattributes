@@ -1,0 +1,2 @@
+x86_general/hardware/gpu/lib64/libvulkan_radeon.so filter=lfs diff=lfs merge=lfs -text
+x86_general/hardware/gpu/lib64/libgallium_dri.so filter=lfs diff=lfs merge=lfs -text

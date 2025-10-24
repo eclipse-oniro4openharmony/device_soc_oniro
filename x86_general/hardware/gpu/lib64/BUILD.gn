@@ -1,0 +1,119 @@
+# Copyright (c) 2024 Diemit <598757652@qq.com>
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+ohos_prebuilt_shared_library("mesa_egl") {
+    source = "libEGL.so.1.0.0"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "libEGL_impl.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("mesa_gbm") {
+    source = "libgbm.so.1.0.0"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "libgbm.so.1",
+        "libgbm.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("mesa_glapi") {
+    source = "libglapi.so.0.0.0"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "libglapi.so.0",
+        "libglapi.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("mesa_glesv1") {
+    source = "libGLESv1_CM.so.1.1.0"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "libGLESv1_impl.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("mesa_glesv2") {
+    source = "libGLESv2.so.2.0.0"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "libGLESv2_impl.so",
+        "libGLESv3_impl.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("libgallium_dri") {
+    source = "libgallium_dri.so"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+    symlink_target_name = [
+        "iris_dri.so",
+        "crocus_dri.so",
+        "radeonsi_dri.so",
+        "nouveau_dri.so",
+        "swrast_dri.so",
+        "kms_swrast_dri.so",
+        "virtio_gpu_dri.so",
+    ]
+}
+
+ohos_prebuilt_shared_library("libvulkan_radeon") {
+    source = "libvulkan_radeon.so"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    relative_install_dir = "chipsetsdk"
+}
+
+ohos_prebuilt_etc("radeon_icd.x86_64") {
+    source = "radeon_icd.x86_64.json"
+    install_enable = true
+    part_name = "x86_general"
+    install_images = [ vendor_base_dir ]
+    module_install_dir = "etc/vulkan/icd.d"
+}
+
+
+group("mesa3d-lib") {
+    deps = [
+        ":mesa_egl",
+        ":mesa_gbm",
+        ":mesa_glapi",
+        ":mesa_glesv1",
+        ":mesa_glesv2",
+        ":libgallium_dri",
+        ":libvulkan_radeon",
+        ":radeon_icd.x86_64",
+    ]
+}
