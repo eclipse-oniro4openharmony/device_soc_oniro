@@ -152,6 +152,7 @@ ohos_shared_library("libelf") {
         "//third_party/elfutils/libelf/libelf_crc32.c",
         "//third_party/elfutils/libelf/libelf_next_prime.c",
         "//third_party/elfutils/libelf/nlist.c",
+        "//third_party/elfutils/lib/eu-search.c",
   ]
  
   deps = [
