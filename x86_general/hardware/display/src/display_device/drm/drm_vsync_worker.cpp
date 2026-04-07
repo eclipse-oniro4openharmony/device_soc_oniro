@@ -15,6 +15,8 @@
 
 #include "drm_vsync_worker.h"
 #include <chrono>
+#include <time.h>
+#include <unistd.h>
 #include "display_common.h"
 #include "drm_device.h"
 
@@ -84,8 +86,18 @@ uint64_t DrmVsyncWorker::WaitNextVBlank(unsigned int &sq)
             }
     };
     int ret = drmWaitVBlank(mDrmFd, &vblank);
-    DISPLAY_CHK_RETURN((ret < 0), 0,
-        DISPLAY_LOGE("wait vblank failed ret :　%{public}d　errno %{public}d", ret, errno));
+    if (ret < 0) {
+        DISPLAY_LOGE("wait vblank failed ret : %{public}d errno %{public}d, falling back to software vsync",
+            ret, errno);
+        // Fallback to ~60 Hz software vsync to avoid busy-waiting when the DRM
+        // driver does not support vblank waits (e.g. virtio-gpu in QEMU).
+        constexpr unsigned int SIXTY_HZ_USEC = 16666;
+        usleep(SIXTY_HZ_USEC);
+        sq = 0;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec * SEC_TO_NSEC + ts.tv_nsec);
+    }
     sq = vblank.reply.sequence;
     return static_cast<uint64_t>(vblank.reply.tval_sec * SEC_TO_NSEC + vblank.reply.tval_usec * USEC_TO_NSEC);
 #else
