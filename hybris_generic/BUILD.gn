@@ -3,5 +3,7 @@ import("//build/ohos.gni")
 group("hybris_generic_soc_group") {
   deps = [
     "hardware/display:display_composer_model",
+    "hardware/display:display_buffer_model",
+    "hardware/gpu:hybris-gpu-libs",
   ]
 }
