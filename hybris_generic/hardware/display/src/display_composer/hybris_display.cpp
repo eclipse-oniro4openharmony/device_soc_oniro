@@ -78,8 +78,22 @@ int32_t HybrisDisplay::CreateLayer(const LayerInfo& info, uint32_t& layerId)
     layerId = nextLayerId_++;
     auto layer = std::make_unique<HybrisLayer>(hwc2Layer, layerId);
 
-    /* Apply initial composition type based on layer type hint */
-    CompositionType compType = COMPOSITION_DEVICE;
+    /*
+     * Start all layers as CLIENT composition.
+     *
+     * Bug 8.16: the MTK HAL often accepts DEVICE for newly created overlay
+     * layers (status bar, nav bar) even though they need alpha blending that
+     * only works correctly with GPU composition.  When the HAL presents these
+     * layers in DEVICE mode, they may be invisible or incorrectly composited
+     * until the HAL eventually requests CLIENT on a later frame (which may
+     * require a touch interaction or several seconds).
+     *
+     * By starting all layers as CLIENT and immediately adding them to the
+     * sticky set, GPU composition is guaranteed from the first frame.  The
+     * HAL sees CLIENT, agrees (numTypes=0), and the client target always
+     * contains the correctly blended result.
+     */
+    CompositionType compType = COMPOSITION_CLIENT;
     if (info.type == LAYER_TYPE_CURSOR) {
         compType = COMPOSITION_CURSOR;
     }
@@ -95,7 +109,12 @@ int32_t HybrisDisplay::CreateLayer(const LayerInfo& info, uint32_t& layerId)
     }
 
     layers_[layerId] = std::move(layer);
-    DISPLAY_LOGI("Created layer %u on display %u", layerId, devId_);
+
+    /* Add to sticky set so PrepareDisplayLayers forces CLIENT before every
+     * validateDisplay call.  See Bug 8.16 comment above. */
+    stickyClientLayers_[layerId] = static_cast<int32_t>(HWC2::Composition::Client);
+    DISPLAY_LOGI("Created layer %u on display %u (sticky CLIENT, %zu total)",
+        layerId, devId_, stickyClientLayers_.size());
     return HDF_SUCCESS;
 }
 
