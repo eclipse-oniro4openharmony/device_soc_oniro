@@ -52,6 +52,8 @@ public:
     int32_t SetLayerBlendType(BlendType type);
     int32_t SetLayerColor(const LayerColor& color);
 
+    CompositionType GetCompositionType() const { return compType_; }
+
 private:
     hwc2_compat_layer_t* layer_{nullptr};
     uint32_t id_{0};

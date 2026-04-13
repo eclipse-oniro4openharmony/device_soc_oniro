@@ -117,7 +117,12 @@ void HybrisComposerVdiImpl::InitHwc2Device()
 void HybrisComposerVdiImpl::OnHotplug(HWC2EventListener* /*self*/, int32_t /*seq*/,
     hwc2_display_t display, bool connected, bool /*primary*/)
 {
-    GetVdiInstance().HandleHotplug(display, connected);
+    DISPLAY_LOGI("OnHotplug received from HWC2: display=%llu, connected=%d",
+        (unsigned long long)display, connected);
+        
+    auto& inst = GetVdiInstance();
+    hwc2_compat_device_on_hotplug(inst.device_, display, connected);
+    inst.HandleHotplug(display, connected);
 }
 
 void HybrisComposerVdiImpl::OnVsync(HWC2EventListener* /*self*/, int32_t /*seq*/,
@@ -126,9 +131,7 @@ void HybrisComposerVdiImpl::OnVsync(HWC2EventListener* /*self*/, int32_t /*seq*/
     auto& inst = GetVdiInstance();
     std::lock_guard<std::mutex> lock(inst.mutex_);
     for (auto& kv : inst.displays_) {
-        /* Match by hwc2 display id stored in HybrisDisplay */
-        if (kv.second->GetHwc2Display() ==
-            hwc2_compat_device_get_display_by_id(inst.device_, display)) {
+        if (kv.second->GetHwc2DisplayId() == display) {
             kv.second->OnVsync(timestamp);
             break;
         }
@@ -155,7 +158,7 @@ void HybrisComposerVdiImpl::HandleHotplug(hwc2_display_t hwc2Id, bool connected)
         }
 
         uint32_t devId = nextDevId_++;
-        displays_[devId] = std::make_unique<HybrisDisplay>(devId, hwc2Disp);
+        displays_[devId] = std::make_unique<HybrisDisplay>(devId, hwc2Disp, hwc2Id);
 
         DISPLAY_LOGI("Display %u connected (hwc2 id=%llu)", devId,
             (unsigned long long)hwc2Id);
@@ -166,9 +169,7 @@ void HybrisComposerVdiImpl::HandleHotplug(hwc2_display_t hwc2Id, bool connected)
     } else {
         /* Find the devId that corresponds to this hwc2 display */
         for (auto it = displays_.begin(); it != displays_.end(); ++it) {
-            hwc2_compat_display_t* candidate =
-                hwc2_compat_device_get_display_by_id(device_, hwc2Id);
-            if (it->second->GetHwc2Display() == candidate) {
+            if (it->second->GetHwc2DisplayId() == hwc2Id) {
                 uint32_t devId = it->first;
                 DISPLAY_LOGI("Display %u disconnected", devId);
                 if (hotplugCb_) {
@@ -229,22 +230,10 @@ int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data
     if (needRegister) {
         /*
          * hwc2_compat_device_register_callback fires onHotplug synchronously
-         * via the HIDL callback bridge, which calls our HandleHotplug.
-         * HandleHotplug calls hwc2_compat_device_get_display_by_id, which
-         * looks in HWC2::Device::mDisplays.  That map is populated only by
-         * Device::onHotplug(), which is NOT called by the HIDL bridge path —
-         * so getDisplayById would return nullptr and HandleHotplug returns
-         * early without registering the display.
-         *
-         * Fix: call hwc2_compat_device_on_hotplug BEFORE registerCallback.
-         * This invokes Device::onHotplug(0, true) directly, which queries
-         * getDisplayType() and inserts display 0 into mDisplays — but fires
-         * no listener because no callback is registered yet.  Then when
-         * registerCallback fires the initial hotplug, HandleHotplug finds
-         * the display in mDisplays, creates the HybrisDisplay object, and
-         * calls hotplugCb_ to notify upper layers.
+         * via the HIDL callback bridge. Our OnHotplug callback now correctly
+         * calls hwc2_compat_device_on_hotplug with the actual display ID
+         * before calling HandleHotplug.
          */
-        hwc2_compat_device_on_hotplug(device_, 0, true);
         hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
     }
 
