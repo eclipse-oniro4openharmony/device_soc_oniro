@@ -5,5 +5,6 @@ group("hybris_generic_soc_group") {
     "hardware/display:display_composer_model",
     "hardware/display:display_buffer_model",
     "hardware/gpu:hybris-gpu-libs",
+    "hardware/wlan:wifi_hal_default",
   ]
 }

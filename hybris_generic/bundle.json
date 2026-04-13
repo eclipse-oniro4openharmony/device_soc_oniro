@@ -14,11 +14,13 @@
         "components": [
           "hilog",
           "drivers_interface_display",
+          "drivers_interface_wlan",
           "graphic_surface",
           "hdf_core",
           "c_utils",
           "libhybris",
-          "ipc"
+          "ipc",
+          "libnl"
         ],
         "third_party": [
           "libhybris",
