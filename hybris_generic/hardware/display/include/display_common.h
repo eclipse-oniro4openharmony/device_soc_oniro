@@ -74,6 +74,34 @@ extern "C" {
     } while (0)
 #endif
 
+/*
+ * Bytes-per-pixel for a given OHOS PixelFormat.
+ *
+ * OHOS's BufferHandle::stride is in BYTES (see reference gralloc at
+ * drivers/peripheral/display/hal/default_standard/src/display_gralloc/
+ * allocator.cpp:166).  Android gralloc's hybris_gralloc_allocate returns
+ * stride in PIXELS.  Both the buffer VDI (to convert pixel→byte stride on
+ * allocation) and the composer VDI (to convert byte→pixel stride when
+ * forwarding buffers to ANativeWindowBuffer) need this lookup, which is
+ * why it lives in the shared display_common.h.
+ *
+ * Returns 0 for planar/sub-byte/unknown formats; callers treat that as "use
+ * the pixel stride unchanged" to avoid breaking YUV camera buffers.
+ */
+static inline uint32_t HybrisBytesPerPixelOhos(uint32_t ohosFormat)
+{
+    switch (ohosFormat) {
+        case 3:  /* RGB_565   */ return 2;
+        case 11: /* RGBX_8888 */ return 4;
+        case 12: /* RGBA_8888 */ return 4;
+        case 13: /* RGB_888   */ return 3;
+        case 14: /* BGR_565   */ return 2;
+        case 19: /* BGRX_8888 */ return 4;
+        case 20: /* BGRA_8888 */ return 4;
+        default: /* YUV / sub-byte */ return 0;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -229,13 +229,28 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
     }
     memset(bh, 0, totalSize);
 
+    /*
+     * Convert Android pixel stride → OHOS byte stride.
+     *
+     * OHOS consumers (e.g. wmserver/surface_draw.cpp DoDrawCustomStartingWindow
+     * and DoDrawImageRect) compute their bitmap width as
+     *   alignWidth = buffer->GetStride() / IMAGE_BYTES_STRIDE  (=4)
+     * which assumes stride is in BYTES.  The reference OHOS gralloc at
+     * drivers/peripheral/display/hal/default_standard/src/display_gralloc/
+     * allocator.cpp:166 also stores bytes.  Storing the raw Android pixel
+     * stride here caused the launcher starting window to render its bitmap
+     * into ~25% of the surface with the remainder left transparent.
+     */
+    uint32_t bpp = HybrisBytesPerPixelOhos(info.format);
+    uint32_t byteStride = (bpp > 0) ? (stride * bpp) : stride;
+
     bh->fd          = (nh->numFds > 0) ? nh->data[0] : -1;
     bh->width       = static_cast<int32_t>(info.width);
     bh->height      = static_cast<int32_t>(info.height);
-    bh->stride      = static_cast<int32_t>(stride);
+    bh->stride      = static_cast<int32_t>(byteStride);
     bh->format      = static_cast<int32_t>(info.format); /* keep OHOS format for upper layers */
     bh->usage       = info.usage;
-    bh->size        = static_cast<int32_t>(stride * info.height * 4); /* approximate */
+    bh->size        = static_cast<int32_t>(byteStride * info.height); /* total bytes */
     bh->virAddr     = nullptr;
     bh->phyAddr     = 0;
     bh->reserveFds  = reserveFds;
@@ -252,8 +267,9 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
     /* Store the native handle pointer in the last kPtrSlots slots */
     StoreNativeHandle(bh, nativeHandle);
 
-    DISPLAY_LOGI("AllocMem: %{public}ux%{public}u fmt=%{public}d stride=%{public}u fd=%{public}d",
-                 info.width, info.height, info.format, stride, bh->fd);
+    DISPLAY_LOGI("AllocMem: %{public}ux%{public}u fmt=%{public}d "
+                 "pixStride=%{public}u byteStride=%{public}u size=%{public}d fd=%{public}d",
+                 info.width, info.height, info.format, stride, byteStride, bh->size, bh->fd);
 
     handle = bh;
     return HDF_SUCCESS;
