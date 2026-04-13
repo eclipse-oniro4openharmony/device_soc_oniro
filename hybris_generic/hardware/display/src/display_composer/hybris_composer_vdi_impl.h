@@ -93,6 +93,24 @@ public:
     int32_t SetLayerMaskInfo(uint32_t devId, uint32_t layerId, const MaskInfo maskInfo) override;
     int32_t SetLayerColor(uint32_t devId, uint32_t layerId, const LayerColor& layerColor) override;
 
+    /*
+     * Write the panel backlight via kernel sysfs.  `level` is 0..255 (OHOS HDI
+     * contract); the value is scaled to the kernel `max_brightness` range
+     * transparently.  Thread-safe; lazily probes the sysfs node on first call.
+     * Returns HDF_SUCCESS on success or if no sysfs node was found (so that
+     * missing hardware support does not cascade into user-visible errors);
+     * HDF_FAILURE only when the write to a found node actually fails.
+     *
+     * Exposed as a static so HybrisDisplay::SetDisplayPowerStatus can force
+     * the backlight to 0 when the HWC2 power mode is set to OFF (belt-and-
+     * braces: the OHOS brightness path is independent of the panel power path,
+     * so a standalone sysfs write here guarantees the display fully blanks).
+     */
+    static int32_t WriteBacklight(uint32_t level);
+
+    /* Return the last-written backlight level (0..255). */
+    static uint32_t GetLastBacklight();
+
 private:
     /* Lookup helpers — return nullptr on failure */
     HybrisDisplay* GetDisplay(uint32_t devId);
