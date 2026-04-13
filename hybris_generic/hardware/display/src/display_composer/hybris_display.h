@@ -88,6 +88,39 @@ private:
     /* Whether PrepareDisplayLayers found any CLIENT layers requiring flush */
     bool needsClientComposition_{false};
 
+    /*
+     * Layers the HAL requested as CLIENT this frame, populated by
+     * getChangedCompositionTypes (if available) after acceptChanges.
+     * Maps our OHOS layer ID → HWC2::Composition (as int32_t).
+     * Empty when the full-CLIENT fallback is used instead.
+     */
+    std::unordered_map<uint32_t, int32_t> pendingClientLayers_;
+
+    /*
+     * Layers that are permanently CLIENT.
+     *
+     * The MTK HAL persistently requests CLIENT for certain layers (e.g. the
+     * status bar, nav bar) on most frames.  When we report them as CLIENT via
+     * GetDisplayCompChange, render_service destroys their DEVICE EGL window
+     * surfaces and switches them to GPU composite mode.  On the NEXT frame,
+     * if numTypes==0, the old code cleared pendingClientLayers_ and returned
+     * empty from GetDisplayCompChange — causing render_service to transition
+     * those layers BACK to DEVICE, which recreates DEVICE EGL surfaces.  The
+     * HAL then requests CLIENT again next frame, destroying those surfaces while
+     * RSRenderThread may be mid-eglSwapBuffers: the DEVICE↔CLIENT oscillation is
+     * the root cause of the status-bar / nav-bar flicker.
+     *
+     * Fix: once a layer is observed as HAL-requested CLIENT, add it to
+     * stickyClientLayers_ and keep reporting it as CLIENT on every subsequent
+     * frame (even when numTypes==0).  render_service never transitions it back to
+     * DEVICE, the HAL always sees CLIENT for it (numTypes==0), and the EGL
+     * surface lifecycle stabilises: one DEVICE→CLIENT transition per session
+     * (acceptable), zero ongoing oscillations (flicker eliminated).
+     *
+     * Entries are removed when the layer is destroyed (DestroyLayer).
+     */
+    std::unordered_map<uint32_t, int32_t> stickyClientLayers_;
+
     /* Out-fences from last present — released after Commit returns */
     hwc2_compat_out_fences_t* pendingFences_{nullptr};
 
