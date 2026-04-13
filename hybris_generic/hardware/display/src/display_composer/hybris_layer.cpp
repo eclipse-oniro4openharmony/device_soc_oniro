@@ -66,6 +66,12 @@ struct HybrisNativeBuffer {
     }
 };
 
+HybrisLayer::~HybrisLayer()
+{
+    delete currentLayerBuffer_;
+    currentLayerBuffer_ = nullptr;
+}
+
 static HybrisNativeBuffer* BuildNativeBuffer(const BufferHandle& bh)
 {
     int numFds = 1 + bh.reserveFds;
@@ -180,7 +186,16 @@ int32_t HybrisLayer::SetLayerBuffer(const BufferHandle& buffer, int32_t fence)
     }
 
     hwc2_error_t err = hwc2_compat_layer_set_buffer(layer_, 0, &nb->buf, fence);
-    delete nb;
+
+    /*
+     * Keep nb alive until the NEXT SetLayerBuffer call.  The Android HWC2 HAL
+     * stores a raw pointer to nb->buf.handle and reads it during
+     * Composer::execute() (validateDisplay / presentDisplay).  Deleting nb here
+     * would free native_handle_t while the HAL still holds the pointer, causing
+     * the SIGABRT in writeNativeHandleNoDup seen in composer_host.
+     */
+    delete currentLayerBuffer_;
+    currentLayerBuffer_ = nb;
 
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
         DISPLAY_LOGE("hwc2_compat_layer_set_buffer failed: %d", err));
