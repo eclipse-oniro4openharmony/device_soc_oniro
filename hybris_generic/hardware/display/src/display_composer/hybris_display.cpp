@@ -100,7 +100,7 @@ HybrisLayer* HybrisDisplay::GetLayer(uint32_t layerId)
 int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
 {
     info.name = "hybris-hwc2-display";
-    info.type = DISP_INTF_HDMI; /* closest generic type */
+    info.type = DISP_INTF_MIPI; /* Volla X23 has an internal MIPI DSI panel */
     info.supportLayers = 16;
     info.virtualDispCount = 0;
     info.supportWriteBack = false;
