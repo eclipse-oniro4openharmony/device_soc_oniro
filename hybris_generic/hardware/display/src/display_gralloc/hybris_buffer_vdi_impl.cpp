@@ -272,23 +272,106 @@ void HybrisBufferVdiImpl::FreeMem(const BufferHandle& handle) const
 
 /* ─── Mmap ───────────────────────────────────────────────────────────────── */
 
+/*
+ * Build a native_handle_t from the fds and ints serialised in a BufferHandle.
+ *
+ * AllocMem stores a raw process-local buffer_handle_t pointer in the last two
+ * reserve[] slots.  That pointer is meaningless once the BufferHandle has been
+ * marshalled across an IPC boundary (the fds are dup'd, the ints are copied
+ * verbatim, but the pointer addresses are from the allocating process).
+ *
+ * This helper reconstructs a valid native_handle_t from the portable fd/int
+ * data so it can be imported with hybris_gralloc_import_buffer.
+ */
+static native_handle_t* ReconstructNativeHandle(const BufferHandle& handle)
+{
+    int numFds  = (handle.fd >= 0 ? 1 : 0) + static_cast<int>(handle.reserveFds);
+    int numInts = static_cast<int>(handle.reserveInts) > static_cast<int>(kPtrSlots)
+                      ? static_cast<int>(handle.reserveInts) - static_cast<int>(kPtrSlots)
+                      : 0;
+
+    native_handle_t* nh = native_handle_create(numFds, numInts);
+    if (!nh) {
+        return nullptr;
+    }
+
+    int fdIdx = 0;
+    if (handle.fd >= 0) {
+        nh->data[fdIdx++] = handle.fd;
+    }
+    for (int i = 0; i < static_cast<int>(handle.reserveFds); i++) {
+        nh->data[fdIdx++] = handle.reserve[i];
+    }
+    for (int i = 0; i < numInts; i++) {
+        nh->data[numFds + i] = handle.reserve[handle.reserveFds + i];
+    }
+    return nh;
+}
+
 void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 {
+    /*
+     * CPU lock usage flags common to both code paths below.
+     */
+    static const int kLockUsage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
+
+    /*
+     * Try the stored native-handle pointer first.  If AllocMem and Mmap are
+     * called in the same process (e.g. the allocator service self-mapping),
+     * the pointer is valid and hybris_gralloc_lock will succeed directly.
+     *
+     * After IPC marshalling (render_service's mapper calling Mmap with a handle
+     * that was allocated in composer_host), the stored pointer is from the
+     * allocating process's virtual address space and is invalid here.
+     * hybris_gralloc_lock returns EINVAL (2) in that case rather than
+     * crashing because the Android gralloc HAL validates the handle.
+     * We then fall through to the cross-process import path.
+     */
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    if (!nativeHandle) {
-        DISPLAY_LOGE("Mmap: null native handle");
+    if (nativeHandle) {
+        void* vaddr = nullptr;
+        int ret = hybris_gralloc_lock(nativeHandle, kLockUsage, 0, 0,
+                                      handle.width, handle.height, &vaddr);
+        if (ret == 0 && vaddr) {
+            const_cast<BufferHandle&>(handle).virAddr = vaddr;
+            return vaddr;
+        }
+        /* Fall through: same-process lock failed or handle is cross-process stale. */
+    }
+
+    /*
+     * Cross-process import path.
+     *
+     * Reconstruct a native_handle_t from the portable fd/int data, import it
+     * into this process via hybris_gralloc_import_buffer, then lock it.
+     * The imported handle is written back to reserve[] so that subsequent
+     * Unmap / FlushCache calls (via LoadNativeHandle) use the correct pointer.
+     */
+    native_handle_t* rawNh = ReconstructNativeHandle(handle);
+    if (!rawNh) {
+        DISPLAY_LOGE("Mmap: ReconstructNativeHandle failed");
+        return nullptr;
+    }
+
+    buffer_handle_t importedHandle = nullptr;
+    int ret = hybris_gralloc_import_buffer(rawNh, &importedHandle);
+    native_handle_delete(rawNh); /* always free the temporary wrapper */
+    if (ret != 0 || !importedHandle) {
+        DISPLAY_LOGE("Mmap: hybris_gralloc_import_buffer failed ret=%{public}d", ret);
         return nullptr;
     }
 
     void* vaddr = nullptr;
-    int usage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
-    int ret = hybris_gralloc_lock(nativeHandle, usage, 0, 0,
-                                  handle.width, handle.height, &vaddr);
+    ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
+                              handle.width, handle.height, &vaddr);
     if (ret != 0 || !vaddr) {
-        DISPLAY_LOGE("Mmap: hybris_gralloc_lock failed ret=%{public}d", ret);
+        DISPLAY_LOGE("Mmap: hybris_gralloc_lock failed after import ret=%{public}d", ret);
+        hybris_gralloc_release(importedHandle, 0 /* not allocated here */);
         return nullptr;
     }
 
+    /* Store the imported handle so Unmap/FlushCache can use LoadNativeHandle. */
+    StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle);
     const_cast<BufferHandle&>(handle).virAddr = vaddr;
     return vaddr;
 }
@@ -307,6 +390,16 @@ int32_t HybrisBufferVdiImpl::Unmap(const BufferHandle& handle) const
     if (ret != 0) {
         DISPLAY_LOGW("Unmap: hybris_gralloc_unlock returned %{public}d", ret);
     }
+
+    /*
+     * If this handle was imported cross-process in Mmap (stored via
+     * StoreNativeHandle), release the import reference now.  FreeMem in
+     * the allocating process will release the allocation separately.
+     * We clear the stored pointer so a subsequent Mmap will re-import.
+     */
+    hybris_gralloc_release(nativeHandle, 0 /* not allocated here, just imported */);
+    static constexpr buffer_handle_t kNullHandle = nullptr;
+    StoreNativeHandle(const_cast<BufferHandle*>(&handle), kNullHandle);
     const_cast<BufferHandle&>(handle).virAddr = nullptr;
     return HDF_SUCCESS;
 }
