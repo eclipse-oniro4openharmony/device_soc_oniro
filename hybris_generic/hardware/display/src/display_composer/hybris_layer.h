@@ -28,6 +28,9 @@ namespace DISPLAY {
 
 using namespace OHOS::HDI::Display::Composer::V1_0;
 
+/* Forward declaration — full definition is in hybris_layer.cpp */
+struct HybrisNativeBuffer;
+
 /*
  * HybrisLayer wraps a single hwc2_compat_layer_t and stores per-layer
  * state needed to drive the Android HWC2 HAL.
@@ -35,7 +38,7 @@ using namespace OHOS::HDI::Display::Composer::V1_0;
 class HybrisLayer {
 public:
     explicit HybrisLayer(hwc2_compat_layer_t* layer, uint32_t id);
-    ~HybrisLayer() = default;
+    ~HybrisLayer();
 
     uint32_t GetId() const { return id_; }
     hwc2_compat_layer_t* GetHwc2Layer() const { return layer_; }
@@ -60,6 +63,15 @@ private:
 
     /* Compose type reported back during GetDisplayCompChange */
     CompositionType compType_{COMPOSITION_CLIENT};
+
+    /*
+     * Keep the last HybrisNativeBuffer alive until the next SetLayerBuffer call.
+     * hwc2_compat_layer_set_buffer stores a pointer to the ANativeWindowBuffer; the
+     * Android HWC2 HAL reads the native_handle_t inside during Composer::execute()
+     * (validateDisplay / presentDisplay).  Deleting the buffer immediately after
+     * hwc2_compat_layer_set_buffer would free the handle before execute() runs.
+     */
+    struct HybrisNativeBuffer* currentLayerBuffer_{nullptr};
 
     static int32_t OhosToHwc2CompositionType(CompositionType type);
     static int32_t OhosToHwc2BlendMode(BlendType type);
