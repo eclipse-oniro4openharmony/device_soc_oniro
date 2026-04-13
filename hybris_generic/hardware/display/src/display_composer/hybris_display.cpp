@@ -25,8 +25,8 @@ namespace OHOS {
 namespace HDI {
 namespace DISPLAY {
 
-HybrisDisplay::HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display)
-    : devId_(devId), display_(display)
+HybrisDisplay::HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display, hwc2_display_t hwc2Id)
+    : devId_(devId), display_(display), hwc2DisplayId_(hwc2Id)
 {
     /* Turn on vsync immediately so we get timing from the start */
     hwc2_compat_display_set_vsync_enabled(display_, HWC2_VSYNC_ENABLE);
@@ -166,6 +166,7 @@ int32_t HybrisDisplay::GetDisplayPowerStatus(DispPowerStatus& status)
 
 int32_t HybrisDisplay::SetDisplayPowerStatus(DispPowerStatus status)
 {
+    DISPLAY_LOGI("HybrisDisplay::SetDisplayPowerStatus devId=%u status=%d", devId_, status);
     int hwc2Mode = OhosToHwc2PowerMode(status);
     hwc2_error_t err = hwc2_compat_display_set_power_mode(display_, hwc2Mode);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
@@ -178,6 +179,7 @@ int32_t HybrisDisplay::SetDisplayPowerStatus(DispPowerStatus status)
 
 int32_t HybrisDisplay::SetDisplayVsyncEnabled(bool enabled)
 {
+    DISPLAY_LOGI("HybrisDisplay::SetDisplayVsyncEnabled devId=%u enabled=%d", devId_, enabled);
     int hwc2Enabled = enabled ? HWC2_VSYNC_ENABLE : HWC2_VSYNC_DISABLE;
     hwc2_error_t err = hwc2_compat_display_set_vsync_enabled(display_, hwc2Enabled);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
@@ -213,7 +215,7 @@ int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
      * composite CLIENT layers into the client target buffer.
      */
     if (err == HWC2_ERROR_HAS_CHANGES || err == HWC2_ERROR_NONE) {
-        needFlushFb = (numTypes > 0) || needsClientComposition_;
+        needFlushFb = (numTypes > 0);
         needsClientComposition_ = needFlushFb;
         return HDF_SUCCESS;
     }
@@ -226,13 +228,20 @@ int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
 int32_t HybrisDisplay::GetDisplayCompChange(std::vector<uint32_t>& layerIds,
     std::vector<int32_t>& types)
 {
-    /*
-     * After validate, HWC2 may have changed composition types for some layers.
-     * The hwc2_compat API doesn't expose getChangedCompositionTypes directly,
-     * so we report an empty list — RenderService will use whatever types it set.
-     */
-    layerIds.clear();
-    types.clear();
+    if (needsClientComposition_) {
+        DISPLAY_LOGW("HWC2 requested composition changes! Forcing all layers to COMPOSITION_CLIENT.");
+        for (const auto& kv : layers_) {
+            // Only report layers that are not already CLIENT
+            if (kv.second->GetCompositionType() != COMPOSITION_CLIENT) {
+                layerIds.push_back(kv.first);
+                types.push_back(COMPOSITION_CLIENT);
+                DISPLAY_LOGW("Forcing layer %u to CLIENT", kv.first);
+            }
+        }
+    } else {
+        layerIds.clear();
+        types.clear();
+    }
     return HDF_SUCCESS;
 }
 
@@ -243,7 +252,8 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
      * it to hwc2_compat_display_set_client_target.
      */
     int numFds = 1 + buffer.reserveFds;
-    int numInts = buffer.reserveInts;
+    /* We added 2 ints (kPtrSlots) for the native pointer in our buffer VDI. Exclude them for HWC2. */
+    int numInts = (buffer.reserveInts >= 2) ? (buffer.reserveInts - 2) : buffer.reserveInts;
 
     native_handle_t* nh = native_handle_create(numFds, numInts);
     DISPLAY_CHK_RETURN(nh == nullptr, HDF_FAILURE,
@@ -253,8 +263,8 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
     for (uint32_t i = 0; i < buffer.reserveFds; i++) {
         nh->data[1 + i] = buffer.reserve[i];
     }
-    for (uint32_t i = 0; i < buffer.reserveInts; i++) {
-        nh->data[numFds + static_cast<int>(i)] = buffer.reserve[buffer.reserveFds + i];
+    for (int i = 0; i < numInts; i++) {
+        nh->data[numFds + i] = buffer.reserve[buffer.reserveFds + i];
     }
 
     ANativeWindowBuffer nb;
@@ -272,7 +282,8 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
     hwc2_error_t err = hwc2_compat_display_set_client_target(display_,
         0, &nb, fence, HAL_DATASPACE_UNKNOWN);
 
-    native_handle_close(nh);
+    // DO NOT call native_handle_close(nh). The FDs inside belong to the OHOS
+    // BufferHandle and are still in use.
     native_handle_delete(nh);
 
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
@@ -320,6 +331,7 @@ int32_t HybrisDisplay::Commit(int32_t& fence)
 
     int32_t presentFence = -1;
     err = hwc2_compat_display_present(display_, &presentFence);
+    DISPLAY_LOGI("HybrisDisplay::Commit devId=%u presentFence=%d err=%d", devId_, presentFence, err);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
         DISPLAY_LOGE("hwc2_compat_display_present failed: %d", err));
 

@@ -58,7 +58,8 @@ struct HybrisNativeBuffer {
     ~HybrisNativeBuffer()
     {
         if (handle) {
-            native_handle_close(handle);
+            // DO NOT call native_handle_close(handle). The FDs inside belong to the OHOS
+            // BufferHandle and are still in use. Closing them here breaks the caller!
             native_handle_delete(handle);
             handle = nullptr;
         }
@@ -68,7 +69,8 @@ struct HybrisNativeBuffer {
 static HybrisNativeBuffer* BuildNativeBuffer(const BufferHandle& bh)
 {
     int numFds = 1 + bh.reserveFds;
-    int numInts = bh.reserveInts;
+    /* We added 2 ints (kPtrSlots) for the native pointer in our buffer VDI. Exclude them for HWC2. */
+    int numInts = (bh.reserveInts >= 2) ? (bh.reserveInts - 2) : bh.reserveInts;
 
     native_handle_t* nh = native_handle_create(numFds, numInts);
     if (!nh) {
@@ -83,8 +85,8 @@ static HybrisNativeBuffer* BuildNativeBuffer(const BufferHandle& bh)
         nh->data[1 + static_cast<int>(i)] = bh.reserve[i];
     }
     /* Reserve ints */
-    for (uint32_t i = 0; i < bh.reserveInts; i++) {
-        nh->data[numFds + static_cast<int>(i)] = bh.reserve[bh.reserveFds + i];
+    for (int i = 0; i < numInts; i++) {
+        nh->data[numFds + i] = bh.reserve[bh.reserveFds + i];
     }
 
     auto* nb = new HybrisNativeBuffer();
@@ -170,6 +172,7 @@ int32_t HybrisLayer::SetLayerDirtyRegion(const std::vector<IRect>& rects)
 
 int32_t HybrisLayer::SetLayerBuffer(const BufferHandle& buffer, int32_t fence)
 {
+    DISPLAY_LOGI("HybrisLayer::SetLayerBuffer layerId=%u fence=%d", id_, fence);
     HybrisNativeBuffer* nb = BuildNativeBuffer(buffer);
     if (!nb) {
         DISPLAY_LOGE("BuildNativeBuffer failed for layer %u", id_);

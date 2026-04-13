@@ -38,11 +38,12 @@ using namespace OHOS::HDI::Display::Composer::V1_0;
  */
 class HybrisDisplay {
 public:
-    HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display);
+    HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display, hwc2_display_t hwc2Id);
     ~HybrisDisplay();
 
     uint32_t GetDevId() const { return devId_; }
     hwc2_compat_display_t* GetHwc2Display() const { return display_; }
+    hwc2_display_t GetHwc2DisplayId() const { return hwc2DisplayId_; }
 
     /* Layer management */
     int32_t CreateLayer(const LayerInfo& info, uint32_t& layerId);
@@ -72,6 +73,7 @@ public:
 private:
     uint32_t devId_{0};
     hwc2_compat_display_t* display_{nullptr};
+    hwc2_display_t hwc2DisplayId_{0};
     std::unordered_map<uint32_t, std::unique_ptr<HybrisLayer>> layers_;
     uint32_t nextLayerId_{1};
 
@@ -84,7 +86,7 @@ private:
     uint32_t vsyncSeq_{0};
 
     /* Whether PrepareDisplayLayers found any CLIENT layers requiring flush */
-    bool needsClientComposition_{true};
+    bool needsClientComposition_{false};
 
     /* Out-fences from last present — released after Commit returns */
     hwc2_compat_out_fences_t* pendingFences_{nullptr};
