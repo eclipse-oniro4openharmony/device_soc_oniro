@@ -266,6 +266,29 @@ int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
 {
     uint32_t numTypes = 0;
     uint32_t numRequests = 0;
+
+    /*
+     * Force all sticky CLIENT layers to CLIENT on the HAL before validateDisplay.
+     *
+     * render_service calls SetLayerCompositionType(DEVICE) for every layer at
+     * the start of each frame (its default).  If validateDisplay sees DEVICE for
+     * a sticky CLIENT layer, the MTK HAL may accept it (numTypes=0) →
+     * acceptDisplayChanges commits DEVICE → presentDisplay ignores the client
+     * target, scanning out raw layer buffers instead → status bar / nav bar
+     * disappear on every other frame (the frames where the HAL accepted DEVICE
+     * rather than requesting CLIENT).
+     *
+     * By setting CLIENT on sticky layers before validate, the HAL always sees
+     * CLIENT for them → numTypes=0 (no disagreement) → acceptDisplayChanges
+     * commits CLIENT → presentDisplay always uses the GPU client target.
+     */
+    for (const auto& kv : stickyClientLayers_) {
+        auto it = layers_.find(kv.first);
+        if (it != layers_.end()) {
+            it->second->SetLayerCompositionType(COMPOSITION_CLIENT);
+        }
+    }
+
     hwc2_error_t err = hwc2_compat_display_validate(display_, &numTypes, &numRequests);
 
     if (err != HWC2_ERROR_HAS_CHANGES && err != HWC2_ERROR_NONE) {
