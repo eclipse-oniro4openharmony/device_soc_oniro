@@ -106,15 +106,15 @@ int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
     info.supportWriteBack = false;
     info.propertyCount = 0;
 
-    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
-    if (cfg) {
-        info.phyWidth = static_cast<uint32_t>(cfg->width);
-        info.phyHeight = static_cast<uint32_t>(cfg->height);
-        free(cfg);
-    } else {
-        info.phyWidth = 720;
-        info.phyHeight = 1560;
-    }
+    /*
+     * phyWidth / phyHeight are the physical screen dimensions in millimetres.
+     * AbstractDisplay::CalculateXYDpi() uses them to compute xDpi/yDpi:
+     *   xDpi = pixelWidth * 25.4 / phyWidth_mm
+     * Volla X23: 6.3" diagonal, 720×1560 → ~67 mm × 145 mm → ~272 DPI.
+     * (The pixel resolution from the active HWC2 config is NOT used here.)
+     */
+    info.phyWidth  = 65;   /* mm */
+    info.phyHeight = 141;  /* mm */
     return HDF_SUCCESS;
 }
 
