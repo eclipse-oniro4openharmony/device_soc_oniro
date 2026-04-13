@@ -71,3 +71,56 @@ ohos_shared_library("libdisplay_composer_vdi_impl") {
   innerapi_tags = [ "passthrough" ]
   part_name = "hybris_generic_soc"
 }
+
+# ─── Display Buffer VDI (libhybris gralloc wrapper) ─────────────────────────
+
+group("display_buffer_model") {
+  deps = [ ":libdisplay_buffer_vdi_impl" ]
+}
+
+ohos_shared_library("libdisplay_buffer_vdi_impl") {
+  sources = [
+    "src/display_gralloc/hybris_buffer_vdi_impl.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "src/display_gralloc",
+    "//third_party/libhybris/hybris/include",
+    "//third_party/android-headers",
+    "//drivers/peripheral/display/utils/include",
+    "//drivers/peripheral/display/buffer/hdi_service/include",
+    "//drivers/interface/display/buffer",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/gralloc:libgralloc",
+    "//third_party/libhybris/hybris/hardware:libhardware",
+    "//third_party/libhybris/hybris/common:libhybris-common",
+  ]
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_display:display_buffer_idl_headers",
+    "graphic_surface:buffer_handle",
+    "hdf_core:libhdf_utils",
+    "hilog:libhilog",
+    "ipc:ipc_single",
+  ]
+
+  defines = [
+    "ANDROID_VERSION_MAJOR=12",
+    "HAS_GRALLOC1_HEADER=1",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=#warnings",
+  ]
+
+  output_name = "libdisplay_buffer_vdi_impl"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  innerapi_tags = [ "passthrough" ]
+  part_name = "hybris_generic_soc"
+}
