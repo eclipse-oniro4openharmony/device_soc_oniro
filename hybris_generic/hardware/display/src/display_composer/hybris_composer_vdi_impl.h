@@ -119,6 +119,7 @@ private:
     hwc2_compat_device_t* device_{nullptr};
     HWC2EventListener eventListener_{};
     int composerSeq_{0};
+    bool hwc2CallbackRegistered_{false};
 
     std::mutex mutex_;
     std::unordered_map<uint32_t, std::unique_ptr<HybrisDisplay>> displays_;
