@@ -190,17 +190,25 @@ HybrisLayer* HybrisComposerVdiImpl::GetLayer(uint32_t devId, uint32_t layerId)
 
 int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    hotplugCb_ = cb;
-    hotplugData_ = data;
+    bool needRegister = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hotplugCb_ = cb;
+        hotplugData_ = data;
 
-    /*
-     * Register the HWC2 callback now that the static singleton is fully
-     * constructed. The Android composer fires hotplug synchronously inside
-     * registerCallback, so OnHotplug→GetVdiInstance() is safe at this point.
-     */
-    if (!hwc2CallbackRegistered_ && device_) {
-        hwc2CallbackRegistered_ = true;
+        /*
+         * Defer the actual hwc2 callback registration until AFTER releasing
+         * mutex_, because hwc2_compat_device_register_callback fires onHotplug
+         * synchronously on the same thread, which calls HandleHotplug which
+         * also tries to acquire mutex_ — causing a deadlock with std::mutex.
+         */
+        if (!hwc2CallbackRegistered_ && device_) {
+            hwc2CallbackRegistered_ = true;
+            needRegister = true;
+        }
+    }
+
+    if (needRegister) {
         hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
         /*
          * Trigger the hotplug callback for display 0 (primary) so that the
@@ -210,7 +218,8 @@ int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data
         hwc2_compat_device_on_hotplug(device_, 0, true);
     }
 
-    /* Re-fire for any already-connected displays */
+    /* Re-fire for any already-connected displays (mutex needed for displays_ access) */
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto& kv : displays_) {
         cb(kv.first, true, data);
     }
