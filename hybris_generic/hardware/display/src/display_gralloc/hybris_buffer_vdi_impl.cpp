@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include "display_common.h"
 #include "hdf_base.h"
@@ -101,9 +102,11 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
     if (ohosUsage & (1ULL << 14)) androidUsage |= GRALLOC_USAGE_HW_VIDEO_ENCODER; /* HBM_USE_VIDEO_ENCODER */
     if (ohosUsage & (1ULL << 16)) androidUsage |= GRALLOC_USAGE_SW_READ_OFTEN;    /* HBM_USE_CPU_READ_OFTEN */
 
-    /* Ensure GPU-renderable buffers always have at least HW_RENDER | HW_TEXTURE */
+    /* Ensure GPU-renderable buffers have HW access and SW_READ/WRITE so the
+     * OHOS buffer queue can CPU-map them via hybris_gralloc_lock in Mmap. */
     if (androidUsage & (GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER)) {
-        androidUsage |= GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+        androidUsage |= GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE
+                     | GRALLOC_USAGE_SW_READ_RARELY | GRALLOC_USAGE_SW_WRITE_RARELY;
     }
 
     /* Default: if nothing is set, provide a sane baseline */
@@ -310,23 +313,9 @@ static native_handle_t* ReconstructNativeHandle(const BufferHandle& handle)
 
 void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 {
-    /*
-     * CPU lock usage flags common to both code paths below.
-     */
     static const int kLockUsage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
 
-    /*
-     * Try the stored native-handle pointer first.  If AllocMem and Mmap are
-     * called in the same process (e.g. the allocator service self-mapping),
-     * the pointer is valid and hybris_gralloc_lock will succeed directly.
-     *
-     * After IPC marshalling (render_service's mapper calling Mmap with a handle
-     * that was allocated in composer_host), the stored pointer is from the
-     * allocating process's virtual address space and is invalid here.
-     * hybris_gralloc_lock returns EINVAL (2) in that case rather than
-     * crashing because the Android gralloc HAL validates the handle.
-     * We then fall through to the cross-process import path.
-     */
+    /* Path 1: same-process — stored native handle pointer is valid directly. */
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
     if (nativeHandle) {
         void* vaddr = nullptr;
@@ -336,44 +325,46 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
             const_cast<BufferHandle&>(handle).virAddr = vaddr;
             return vaddr;
         }
-        /* Fall through: same-process lock failed or handle is cross-process stale. */
+        /* Fall through: cross-process stale pointer. */
     }
 
-    /*
-     * Cross-process import path.
-     *
-     * Reconstruct a native_handle_t from the portable fd/int data, import it
-     * into this process via hybris_gralloc_import_buffer, then lock it.
-     * The imported handle is written back to reserve[] so that subsequent
-     * Unmap / FlushCache calls (via LoadNativeHandle) use the correct pointer.
-     */
+    /* Path 2: cross-process import — reconstruct handle from portable fd/int
+     * data, import via gralloc, then lock. */
     native_handle_t* rawNh = ReconstructNativeHandle(handle);
-    if (!rawNh) {
-        DISPLAY_LOGE("Mmap: ReconstructNativeHandle failed");
-        return nullptr;
+    if (rawNh) {
+        buffer_handle_t importedHandle = nullptr;
+        int ret = hybris_gralloc_import_buffer(rawNh, &importedHandle);
+        native_handle_delete(rawNh);
+        if (ret == 0 && importedHandle) {
+            void* vaddr = nullptr;
+            ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
+                                      handle.width, handle.height, &vaddr);
+            if (ret == 0 && vaddr) {
+                StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle);
+                const_cast<BufferHandle&>(handle).virAddr = vaddr;
+                return vaddr;
+            }
+            hybris_gralloc_release(importedHandle, 0);
+        }
+        DISPLAY_LOGW("Mmap: gralloc import/lock failed, using fd mmap fallback");
     }
 
-    buffer_handle_t importedHandle = nullptr;
-    int ret = hybris_gralloc_import_buffer(rawNh, &importedHandle);
-    native_handle_delete(rawNh); /* always free the temporary wrapper */
-    if (ret != 0 || !importedHandle) {
-        DISPLAY_LOGE("Mmap: hybris_gralloc_import_buffer failed ret=%{public}d", ret);
-        return nullptr;
+    /* Path 3: direct DMA-BUF fd mmap — bypasses gralloc HAL entirely.
+     * Works for any buffer allocated with a DMA-BUF fd regardless of usage. */
+    if (handle.fd >= 0 && handle.size > 0) {
+        void* mmapAddr = ::mmap(nullptr, static_cast<size_t>(handle.size),
+                                PROT_READ | PROT_WRITE, MAP_SHARED, handle.fd, 0);
+        if (mmapAddr != MAP_FAILED) {
+            DISPLAY_LOGI("Mmap: fd mmap fd=%{public}d size=%{public}d addr=%{public}p",
+                         handle.fd, handle.size, mmapAddr);
+            const_cast<BufferHandle&>(handle).virAddr = mmapAddr;
+            return mmapAddr;
+        }
+        DISPLAY_LOGE("Mmap: fd mmap failed: %{public}s", strerror(errno));
     }
-
-    void* vaddr = nullptr;
-    ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
-                              handle.width, handle.height, &vaddr);
-    if (ret != 0 || !vaddr) {
-        DISPLAY_LOGE("Mmap: hybris_gralloc_lock failed after import ret=%{public}d", ret);
-        hybris_gralloc_release(importedHandle, 0 /* not allocated here */);
-        return nullptr;
-    }
-
-    /* Store the imported handle so Unmap/FlushCache can use LoadNativeHandle. */
-    StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle);
-    const_cast<BufferHandle&>(handle).virAddr = vaddr;
-    return vaddr;
+    DISPLAY_LOGE("Mmap: all paths failed %{public}dx%{public}d fd=%{public}d",
+                 handle.width, handle.height, handle.fd);
+    return nullptr;
 }
 
 /* ─── Unmap ──────────────────────────────────────────────────────────────── */
@@ -382,6 +373,12 @@ int32_t HybrisBufferVdiImpl::Unmap(const BufferHandle& handle) const
 {
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
     if (!nativeHandle) {
+        /* Buffer was mapped via direct fd mmap — no gralloc unlock needed. */
+        if (handle.virAddr && handle.size > 0) {
+            ::munmap(handle.virAddr, static_cast<size_t>(handle.size));
+            const_cast<BufferHandle&>(handle).virAddr = nullptr;
+            return HDF_SUCCESS;
+        }
         DISPLAY_LOGE("Unmap: null native handle");
         return HDF_FAILURE;
     }
@@ -414,7 +411,10 @@ int32_t HybrisBufferVdiImpl::FlushCache(const BufferHandle& handle) const
      * This matches the semantics expected by the OHOS buffer layer.
      */
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    if (!nativeHandle) return HDF_FAILURE;
+    /* fd-mapped buffers: kernel DMA-BUF coherency, no gralloc flush needed. */
+    if (!nativeHandle) {
+        return HDF_SUCCESS;
+    }
 
     hybris_gralloc_unlock(nativeHandle);
 
@@ -432,7 +432,10 @@ int32_t HybrisBufferVdiImpl::InvalidateCache(const BufferHandle& handle) const
 {
     /* Re-locking invalidates the cache for subsequent CPU reads. */
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    if (!nativeHandle) return HDF_FAILURE;
+    /* fd-mapped buffers: kernel DMA-BUF coherency, no gralloc flush needed. */
+    if (!nativeHandle) {
+        return HDF_SUCCESS;
+    }
 
     hybris_gralloc_unlock(nativeHandle);
 
