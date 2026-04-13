@@ -1,0 +1,345 @@
+/*
+ * Copyright (c) 2024 Oniro Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "hybris_display.h"
+#include <hdf_base.h>
+#include <cstring>
+#include "display_common.h"
+#include <hardware/hwcomposer2.h>
+#include <system/window.h>
+#include <cutils/native_handle.h>
+
+namespace OHOS {
+namespace HDI {
+namespace DISPLAY {
+
+HybrisDisplay::HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display)
+    : devId_(devId), display_(display)
+{
+    /* Turn on vsync immediately so we get timing from the start */
+    hwc2_compat_display_set_vsync_enabled(display_, HWC2_VSYNC_ENABLE);
+    hwc2_compat_display_set_power_mode(display_, HWC2_POWER_MODE_ON);
+}
+
+HybrisDisplay::~HybrisDisplay()
+{
+    if (pendingFences_) {
+        hwc2_compat_out_fences_destroy(pendingFences_);
+        pendingFences_ = nullptr;
+    }
+    /* Layers are owned by unique_ptr — destroyed automatically */
+}
+
+/* ── Layer management ─────────────────────────────────────────────────────── */
+
+int32_t HybrisDisplay::CreateLayer(const LayerInfo& info, uint32_t& layerId)
+{
+    hwc2_compat_layer_t* hwc2Layer = hwc2_compat_display_create_layer(display_);
+    DISPLAY_CHK_RETURN(hwc2Layer == nullptr, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_create_layer failed for display %u", devId_));
+
+    layerId = nextLayerId_++;
+    auto layer = std::make_unique<HybrisLayer>(hwc2Layer, layerId);
+
+    /* Apply initial composition type based on layer type hint */
+    CompositionType compType = COMPOSITION_DEVICE;
+    if (info.type == LAYER_TYPE_CURSOR) {
+        compType = COMPOSITION_CURSOR;
+    }
+    layer->SetLayerCompositionType(compType);
+
+    /* Initial display frame covering the whole display */
+    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
+    if (cfg) {
+        IRect region = {0, 0, cfg->width, cfg->height};
+        layer->SetLayerRegion(region);
+        layer->SetLayerCrop(region);
+        free(cfg);
+    }
+
+    layers_[layerId] = std::move(layer);
+    DISPLAY_LOGI("Created layer %u on display %u", layerId, devId_);
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::DestroyLayer(uint32_t layerId)
+{
+    auto it = layers_.find(layerId);
+    DISPLAY_CHK_RETURN(it == layers_.end(), HDF_FAILURE,
+        DISPLAY_LOGE("Layer %u not found on display %u", layerId, devId_));
+
+    hwc2_compat_display_destroy_layer(display_, it->second->GetHwc2Layer());
+    layers_.erase(it);
+    DISPLAY_LOGI("Destroyed layer %u on display %u", layerId, devId_);
+    return HDF_SUCCESS;
+}
+
+HybrisLayer* HybrisDisplay::GetLayer(uint32_t layerId)
+{
+    auto it = layers_.find(layerId);
+    if (it == layers_.end()) {
+        return nullptr;
+    }
+    return it->second.get();
+}
+
+/* ── Display capability / mode queries ───────────────────────────────────── */
+
+int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
+{
+    info.name = "hybris-hwc2-display";
+    info.type = DISP_INTF_HDMI; /* closest generic type */
+    info.supportLayers = 16;
+    info.virtualDispCount = 0;
+    info.supportWriteBack = false;
+    info.propertyCount = 0;
+
+    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
+    if (cfg) {
+        info.phyWidth = static_cast<uint32_t>(cfg->width);
+        info.phyHeight = static_cast<uint32_t>(cfg->height);
+        free(cfg);
+    } else {
+        info.phyWidth = 720;
+        info.phyHeight = 1560;
+    }
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::GetDisplaySupportedModes(std::vector<DisplayModeInfo>& modes)
+{
+    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
+    if (!cfg) {
+        DISPLAY_LOGE("No active config for display %u", devId_);
+        return HDF_FAILURE;
+    }
+
+    DisplayModeInfo mode;
+    mode.width = cfg->width;
+    mode.height = cfg->height;
+    /* vsyncPeriod is in nanoseconds; convert to Hz */
+    mode.freshRate = (cfg->vsyncPeriod > 0) ?
+        static_cast<uint32_t>(1000000000LL / cfg->vsyncPeriod) : 60u;
+    mode.id = static_cast<int32_t>(cfg->id);
+
+    modes.push_back(mode);
+    free(cfg);
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::GetDisplayMode(uint32_t& modeId)
+{
+    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
+    DISPLAY_CHK_RETURN(cfg == nullptr, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_get_active_config failed"));
+    modeId = static_cast<uint32_t>(cfg->id);
+    free(cfg);
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::SetDisplayMode(uint32_t modeId)
+{
+    /* HWC2 compat layer doesn't expose setActiveConfig; mode changes are
+     * not supported in this bring-up implementation. */
+    DISPLAY_UNUSED(modeId);
+    DISPLAY_LOGW("SetDisplayMode not supported in hybris VDI");
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::GetDisplayPowerStatus(DispPowerStatus& status)
+{
+    status = powerStatus_;
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::SetDisplayPowerStatus(DispPowerStatus status)
+{
+    int hwc2Mode = OhosToHwc2PowerMode(status);
+    hwc2_error_t err = hwc2_compat_display_set_power_mode(display_, hwc2Mode);
+    DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_set_power_mode failed: %d", err));
+    powerStatus_ = status;
+    return HDF_SUCCESS;
+}
+
+/* ── Vsync ────────────────────────────────────────────────────────────────── */
+
+int32_t HybrisDisplay::SetDisplayVsyncEnabled(bool enabled)
+{
+    int hwc2Enabled = enabled ? HWC2_VSYNC_ENABLE : HWC2_VSYNC_DISABLE;
+    hwc2_error_t err = hwc2_compat_display_set_vsync_enabled(display_, hwc2Enabled);
+    DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_set_vsync_enabled failed: %d", err));
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::RegDisplayVBlankCallback(VBlankCallback cb, void* data)
+{
+    vblankCb_ = cb;
+    vblankData_ = data;
+    return HDF_SUCCESS;
+}
+
+void HybrisDisplay::OnVsync(int64_t timestampNs)
+{
+    if (vblankCb_) {
+        vblankCb_(vsyncSeq_++, static_cast<uint64_t>(timestampNs), vblankData_);
+    }
+}
+
+/* ── Composition ─────────────────────────────────────────────────────────── */
+
+int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
+{
+    uint32_t numTypes = 0;
+    uint32_t numRequests = 0;
+    hwc2_error_t err = hwc2_compat_display_validate(display_, &numTypes, &numRequests);
+
+    /*
+     * HWC2_ERROR_HAS_CHANGES means the HWC wants to change some composition
+     * types. We must accept them. needFlushFb = true tells RenderService to
+     * composite CLIENT layers into the client target buffer.
+     */
+    if (err == HWC2_ERROR_HAS_CHANGES || err == HWC2_ERROR_NONE) {
+        needFlushFb = (numTypes > 0) || needsClientComposition_;
+        needsClientComposition_ = needFlushFb;
+        return HDF_SUCCESS;
+    }
+
+    DISPLAY_LOGE("hwc2_compat_display_validate failed: %d", err);
+    needFlushFb = true;
+    return HDF_FAILURE;
+}
+
+int32_t HybrisDisplay::GetDisplayCompChange(std::vector<uint32_t>& layerIds,
+    std::vector<int32_t>& types)
+{
+    /*
+     * After validate, HWC2 may have changed composition types for some layers.
+     * The hwc2_compat API doesn't expose getChangedCompositionTypes directly,
+     * so we report an empty list — RenderService will use whatever types it set.
+     */
+    layerIds.clear();
+    types.clear();
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_t fence)
+{
+    /*
+     * Build an ANativeWindowBuffer from the OHOS BufferHandle so we can pass
+     * it to hwc2_compat_display_set_client_target.
+     */
+    int numFds = 1 + buffer.reserveFds;
+    int numInts = buffer.reserveInts;
+
+    native_handle_t* nh = native_handle_create(numFds, numInts);
+    DISPLAY_CHK_RETURN(nh == nullptr, HDF_FAILURE,
+        DISPLAY_LOGE("native_handle_create failed for client buffer"));
+
+    nh->data[0] = buffer.fd;
+    for (uint32_t i = 0; i < buffer.reserveFds; i++) {
+        nh->data[1 + i] = buffer.reserve[i];
+    }
+    for (uint32_t i = 0; i < buffer.reserveInts; i++) {
+        nh->data[numFds + static_cast<int>(i)] = buffer.reserve[buffer.reserveFds + i];
+    }
+
+    ANativeWindowBuffer nb;
+    memset(&nb, 0, sizeof(nb));
+    nb.common.magic   = ANDROID_NATIVE_BUFFER_MAGIC;
+    nb.common.version = sizeof(ANativeWindowBuffer);
+    nb.width  = buffer.width;
+    nb.height = buffer.height;
+    nb.stride = buffer.stride;
+    nb.format = buffer.format;
+    nb.usage  = static_cast<uint64_t>(buffer.usage);
+    nb.layerCount = 1;
+    nb.handle = nh;
+
+    hwc2_error_t err = hwc2_compat_display_set_client_target(display_,
+        0, &nb, fence, HAL_DATASPACE_UNKNOWN);
+
+    native_handle_close(nh);
+    native_handle_delete(nh);
+
+    DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_set_client_target failed: %d", err));
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::GetDisplayReleaseFence(std::vector<uint32_t>& layerIds,
+    std::vector<int32_t>& fences)
+{
+    if (!pendingFences_) {
+        layerIds.clear();
+        fences.clear();
+        return HDF_SUCCESS;
+    }
+
+    for (auto& kv : layers_) {
+        int32_t fd = hwc2_compat_out_fences_get_fence(pendingFences_,
+            kv.second->GetHwc2Layer());
+        if (fd >= 0) {
+            layerIds.push_back(kv.first);
+            fences.push_back(fd);
+        }
+    }
+
+    hwc2_compat_out_fences_destroy(pendingFences_);
+    pendingFences_ = nullptr;
+    return HDF_SUCCESS;
+}
+
+int32_t HybrisDisplay::Commit(int32_t& fence)
+{
+    /* Must accept changes before presenting */
+    hwc2_compat_display_accept_changes(display_);
+
+    if (pendingFences_) {
+        hwc2_compat_out_fences_destroy(pendingFences_);
+        pendingFences_ = nullptr;
+    }
+
+    hwc2_error_t err = hwc2_compat_display_get_release_fences(display_, &pendingFences_);
+    if (err != HWC2_ERROR_NONE) {
+        DISPLAY_LOGW("hwc2_compat_display_get_release_fences failed: %d", err);
+    }
+
+    int32_t presentFence = -1;
+    err = hwc2_compat_display_present(display_, &presentFence);
+    DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
+        DISPLAY_LOGE("hwc2_compat_display_present failed: %d", err));
+
+    fence = presentFence;
+    return HDF_SUCCESS;
+}
+
+/* ── Static helpers ──────────────────────────────────────────────────────── */
+
+int32_t HybrisDisplay::OhosToHwc2PowerMode(DispPowerStatus status)
+{
+    switch (status) {
+        case POWER_STATUS_ON:      return HWC2_POWER_MODE_ON;
+        case POWER_STATUS_STANDBY: return HWC2_POWER_MODE_DOZE;
+        case POWER_STATUS_SUSPEND: return HWC2_POWER_MODE_DOZE_SUSPEND;
+        case POWER_STATUS_OFF:     return HWC2_POWER_MODE_OFF;
+        default:                   return HWC2_POWER_MODE_ON;
+    }
+}
+
+} // namespace DISPLAY
+} // namespace HDI
+} // namespace OHOS
