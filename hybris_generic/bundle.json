@@ -1,0 +1,26 @@
+{
+    "name": "@ohos/hybris_generic_soc",
+    "version": "3.1",
+    "license": "Apache License 2.0",
+    "private": false,
+    "scripts": {},
+    "dirs": [""],
+    "component": {
+      "name": "hybris_generic_soc",
+      "subsystem": "oniro_soc_products",
+      "syscap": [],
+      "features": [],
+      "deps": {
+        "components": [
+          "hilog"
+        ],
+        "third_party": []
+      },
+      "build": {
+        "sub_component": [
+          "//device/soc/oniro/hybris_generic:hybris_generic_soc_group"
+        ],
+        "test": []
+      }
+    }
+  }
