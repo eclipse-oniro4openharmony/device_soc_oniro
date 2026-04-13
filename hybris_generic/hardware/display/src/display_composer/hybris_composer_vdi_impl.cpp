@@ -78,16 +78,20 @@ void HybrisComposerVdiImpl::InitHwc2Device()
         return;
     }
 
-    hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
-
     /*
-     * Trigger the hotplug callback for display 0 (primary) so that the display
-     * is registered immediately. The HWC2 compat layer fires hotplug callbacks
-     * asynchronously, but some implementations need a manual nudge.
+     * NOTE: hwc2_compat_device_register_callback is intentionally NOT called
+     * here. The Android HWC2 HIDL composer fires the hotplug callback
+     * synchronously inside registerCallback. If registerCallback were called
+     * from the constructor, OnHotplug→GetVdiInstance() would re-enter the
+     * C++ static-local guard while it is still locked, causing:
+     *   __cxa_guard_acquire detected recursive initialization → SIGABRT
+     *
+     * Instead, registerCallback is deferred to the first RegHotPlugCallback()
+     * call, by which time the static singleton is fully constructed and
+     * GetVdiInstance() is safe to call from any callback.
      */
-    hwc2_compat_device_on_hotplug(device_, 0, true);
 
-    DISPLAY_LOGI("HWC2 device initialised");
+    DISPLAY_LOGI("HWC2 device created (callback registration deferred to RegHotPlugCallback)");
 }
 
 /* ── HWC2 event callbacks (static) ──────────────────────────────────────── */
@@ -189,6 +193,23 @@ int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data
     std::lock_guard<std::mutex> lock(mutex_);
     hotplugCb_ = cb;
     hotplugData_ = data;
+
+    /*
+     * Register the HWC2 callback now that the static singleton is fully
+     * constructed. The Android composer fires hotplug synchronously inside
+     * registerCallback, so OnHotplug→GetVdiInstance() is safe at this point.
+     */
+    if (!hwc2CallbackRegistered_ && device_) {
+        hwc2CallbackRegistered_ = true;
+        hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
+        /*
+         * Trigger the hotplug callback for display 0 (primary) so that the
+         * display is registered immediately. Some HWC2 implementations need
+         * a manual nudge after registerCallback.
+         */
+        hwc2_compat_device_on_hotplug(device_, 0, true);
+    }
+
     /* Re-fire for any already-connected displays */
     for (auto& kv : displays_) {
         cb(kv.first, true, data);
