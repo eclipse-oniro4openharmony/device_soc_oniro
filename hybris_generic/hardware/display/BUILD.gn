@@ -1,0 +1,73 @@
+# Copyright (c) 2024 Oniro Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+import("//drivers/hdf_core/adapter/uhdf2/uhdf.gni")
+
+# ─── Display Composer VDI (libhybris HWC2 wrapper) ──────────────────────────
+
+group("display_composer_model") {
+  deps = [ ":libdisplay_composer_vdi_impl" ]
+}
+
+ohos_shared_library("libdisplay_composer_vdi_impl") {
+  sources = [
+    "src/display_composer/hybris_layer.cpp",
+    "src/display_composer/hybris_display.cpp",
+    "src/display_composer/hybris_composer_vdi_impl.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "src/display_composer",
+    "//third_party/libhybris/hybris/include",
+    "//third_party/android-headers",
+    "//drivers/peripheral/display/utils/include",
+    "//drivers/interface/display/composer",
+    "//drivers/peripheral/display/composer/hdi_service/include",
+    "//drivers/interface/display/composer/hdifd_parcelable",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/hwc2:libhwc2",
+    "//third_party/libhybris/hybris/hardware:libhardware",
+    "//third_party/libhybris/hybris/common:libhybris-common",
+  ]
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_display:display_composer_idl_headers",
+    "graphic_surface:buffer_handle",
+    "hdf_core:libhdf_utils",
+    "hilog:libhilog",
+    "ipc:ipc_single",
+  ]
+
+  defines = [
+    "HAS_HWCOMPOSER2_HEADERS=1",
+    "RTLD_LAZY=1",
+    "ANDROID_VERSION_MAJOR=12",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=missing-braces",
+    "-Wno-error=#warnings",
+  ]
+
+  output_name = "libdisplay_composer_vdi_impl"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  innerapi_tags = [ "passthrough" ]
+  part_name = "hybris_generic_soc"
+}

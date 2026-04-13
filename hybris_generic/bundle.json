@@ -12,9 +12,18 @@
       "features": [],
       "deps": {
         "components": [
-          "hilog"
+          "hilog",
+          "drivers_interface_display",
+          "graphic_surface",
+          "hdf_core",
+          "c_utils",
+          "libhybris",
+          "ipc"
         ],
-        "third_party": []
+        "third_party": [
+          "libhybris",
+          "android-headers"
+        ]
       },
       "build": {
         "sub_component": [

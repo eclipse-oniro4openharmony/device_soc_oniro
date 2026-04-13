@@ -1,5 +1,7 @@
 import("//build/ohos.gni")
 
 group("hybris_generic_soc_group") {
-  deps = []
+  deps = [
+    "hardware/display:display_composer_model",
+  ]
 }
