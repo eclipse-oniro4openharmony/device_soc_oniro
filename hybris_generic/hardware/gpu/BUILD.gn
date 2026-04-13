@@ -1,0 +1,31 @@
+# Copyright (c) 2026 Oniro Project
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+# Pulls in libhybris EGL/GLES libraries which, via symlink_target_name, also
+# install libEGL_impl.so, libGLESv1_impl.so, libGLESv2_impl.so, and
+# libGLESv3_impl.so — the names expected by the OHOS opengl_wrapper when it
+# dlopen()s the GPU implementation backend.
+#
+# The actual GPU work is done by the Android Mali driver (libGLES_mali.so)
+# loaded by libhybris through the Android bionic linker. The env vars that
+# point libhybris at the Mali driver are set in
+# device/board/oniro/hybris_generic/cfg/hybris_graphic_env.cfg.
+group("hybris-gpu-libs") {
+  deps = [
+    "//third_party/libhybris/hybris/egl:libEGL",
+    "//third_party/libhybris/hybris/glesv1:libGLESv1_CM",
+    "//third_party/libhybris/hybris/glesv2:libGLESv2",
+  ]
+}
