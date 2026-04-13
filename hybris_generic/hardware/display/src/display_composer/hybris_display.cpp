@@ -492,7 +492,11 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
     nb.common.version = sizeof(ANativeWindowBuffer);
     nb.width  = buffer.width;
     nb.height = buffer.height;
-    nb.stride = buffer.stride;
+    /* OHOS stores stride in BYTES; Android ANativeWindowBuffer expects PIXELS. */
+    {
+        uint32_t bpp = HybrisBytesPerPixelOhos(static_cast<uint32_t>(buffer.format));
+        nb.stride = (bpp > 0) ? (buffer.stride / static_cast<int32_t>(bpp)) : buffer.stride;
+    }
     nb.format = buffer.format;
     nb.usage  = static_cast<uint64_t>(buffer.usage);
     nb.layerCount = 1;
