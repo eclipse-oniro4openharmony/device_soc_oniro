@@ -16,6 +16,14 @@
 #include "hybris_composer_vdi_impl.h"
 #include <hdf_base.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
 #include "display_common.h"
 
 /* android_dlopen from libhybris */
@@ -24,6 +32,174 @@ extern "C" void* android_dlopen(const char* filename, int flags);
 namespace OHOS {
 namespace HDI {
 namespace DISPLAY {
+
+/* ── Backlight sysfs helper (file-scope) ─────────────────────────────────── */
+
+/*
+ * The panel backlight on MediaTek Halium devices is NOT driven by the HWC2
+ * HAL — it is a separate LED / PWM controller exposed by the kernel via
+ * sysfs.  Bridge the OHOS HDI SetDisplayBacklight path directly to the
+ * kernel node, probing for the conventional Halium/Android path first and
+ * falling back to the generic backlight class.
+ *
+ * Sysfs is already bind-mounted into the OHOS container by the LXC config,
+ * so no mount changes are required.
+ *
+ * All state is file-scope so it can be reused by the belt-and-braces call
+ * from HybrisDisplay::SetDisplayPowerStatus without threading a pointer
+ * through the display object.
+ */
+
+namespace {
+
+std::mutex            g_backlightMutex;
+bool                  g_backlightProbed   = false;
+bool                  g_backlightWarned   = false;   /* log missing-node warning once */
+std::string           g_backlightPath;               /* empty == not found */
+uint32_t              g_backlightMax      = 255;     /* kernel max_brightness */
+uint32_t              g_backlightLast     = 255;     /* last level written (0..255, OHOS scale) */
+
+/* Probe order: MTK/Halium convention first, then generic backlight class
+ * entries for the X23 and mimir tablet panels. */
+const char* const kBacklightProbePaths[] = {
+    "/sys/class/leds/lcd-backlight/brightness",
+    "/sys/class/backlight/panel0-backlight/brightness",
+    "/sys/class/backlight/panel1-backlight/brightness",
+    nullptr,
+};
+
+/* Read an unsigned integer from a sysfs file.  Returns false on any error. */
+bool ReadSysfsUint(const char* path, uint32_t& out)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    char buf[32] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        return false;
+    }
+    buf[n] = '\0';
+    char* end = nullptr;
+    unsigned long v = strtoul(buf, &end, 10);
+    if (end == buf) {
+        return false;
+    }
+    out = static_cast<uint32_t>(v);
+    return true;
+}
+
+/* Must be called with g_backlightMutex held. */
+void ProbeBacklightLocked()
+{
+    if (g_backlightProbed) {
+        return;
+    }
+    g_backlightProbed = true;
+
+    for (int i = 0; kBacklightProbePaths[i] != nullptr; i++) {
+        const char* path = kBacklightProbePaths[i];
+        /* Need write access; O_WRONLY probe tells us immediately whether the
+         * composer_host uid/caps can actually drive the node. */
+        int fd = open(path, O_WRONLY | O_CLOEXEC);
+        if (fd < 0) {
+            continue;
+        }
+        close(fd);
+        g_backlightPath = path;
+
+        /* max_brightness lives next to the brightness node.  Derive by
+         * replacing the trailing "brightness" with "max_brightness". */
+        std::string maxPath = g_backlightPath;
+        const std::string kLeaf = "brightness";
+        if (maxPath.size() > kLeaf.size() &&
+            maxPath.compare(maxPath.size() - kLeaf.size(), kLeaf.size(), kLeaf) == 0) {
+            maxPath.replace(maxPath.size() - kLeaf.size(), kLeaf.size(), "max_brightness");
+            uint32_t maxVal = 0;
+            if (ReadSysfsUint(maxPath.c_str(), maxVal) && maxVal > 0) {
+                g_backlightMax = maxVal;
+            }
+        }
+
+        /* Seed the cached "last" with whatever the kernel currently reports so
+         * GetDisplayBacklight returns something sensible before the first
+         * SetDisplayBacklight call. */
+        uint32_t curRaw = 0;
+        if (ReadSysfsUint(g_backlightPath.c_str(), curRaw)) {
+            uint32_t curOhos = (curRaw * 255u + g_backlightMax / 2u) / g_backlightMax;
+            if (curOhos > 255u) curOhos = 255u;
+            g_backlightLast = curOhos;
+        }
+
+        DISPLAY_LOGI("Backlight sysfs node: %s (max_brightness=%u, current=%u)",
+                     g_backlightPath.c_str(), g_backlightMax, g_backlightLast);
+        return;
+    }
+
+    /* No writable node found. */
+    DISPLAY_LOGW("No writable backlight sysfs node found — brightness control disabled");
+}
+
+} // namespace
+
+int32_t HybrisComposerVdiImpl::WriteBacklight(uint32_t level)
+{
+    if (level > 255u) {
+        level = 255u;
+    }
+
+    std::lock_guard<std::mutex> lock(g_backlightMutex);
+    ProbeBacklightLocked();
+
+    if (g_backlightPath.empty()) {
+        /* Probe found nothing — cache the intended level anyway so GetDisplay-
+         * Backlight mirrors what OHOS believes it set, but return success so
+         * the caller doesn't treat missing hardware as a fatal error. */
+        if (!g_backlightWarned) {
+            DISPLAY_LOGW("WriteBacklight(%u) ignored — no backlight sysfs node", level);
+            g_backlightWarned = true;
+        }
+        g_backlightLast = level;
+        return HDF_SUCCESS;
+    }
+
+    /* Scale 0..255 OHOS level to 0..max_brightness kernel range. */
+    uint32_t raw = (level * g_backlightMax + 127u) / 255u;
+    if (raw > g_backlightMax) {
+        raw = g_backlightMax;
+    }
+
+    int fd = open(g_backlightPath.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        DISPLAY_LOGE("WriteBacklight: open(%s) failed: %s",
+                     g_backlightPath.c_str(), strerror(errno));
+        return HDF_FAILURE;
+    }
+    char buf[16];
+    int n = snprintf(buf, sizeof(buf), "%u\n", raw);
+    ssize_t w = write(fd, buf, n);
+    int writeErr = errno;
+    close(fd);
+    if (w != n) {
+        DISPLAY_LOGE("WriteBacklight: write(%s, %u) failed: %s",
+                     g_backlightPath.c_str(), raw, strerror(writeErr));
+        return HDF_FAILURE;
+    }
+
+    DISPLAY_LOGI("Backlight: level=%u -> raw=%u (max=%u)",
+                 level, raw, g_backlightMax);
+    g_backlightLast = level;
+    return HDF_SUCCESS;
+}
+
+uint32_t HybrisComposerVdiImpl::GetLastBacklight()
+{
+    std::lock_guard<std::mutex> lock(g_backlightMutex);
+    ProbeBacklightLocked();
+    return g_backlightLast;
+}
 
 /* ── Singleton ───────────────────────────────────────────────────────────── */
 
@@ -305,16 +481,16 @@ int32_t HybrisComposerVdiImpl::SetDisplayPowerStatus(uint32_t devId, DispPowerSt
 int32_t HybrisComposerVdiImpl::GetDisplayBacklight(uint32_t devId, uint32_t& level)
 {
     DISPLAY_UNUSED(devId);
-    level = 100;
+    level = GetLastBacklight();
     return HDF_SUCCESS;
 }
 
 int32_t HybrisComposerVdiImpl::SetDisplayBacklight(uint32_t devId, uint32_t level)
 {
     DISPLAY_UNUSED(devId);
-    DISPLAY_UNUSED(level);
-    /* Backlight control not available via HWC2 compat API */
-    return HDF_SUCCESS;
+    /* Panel backlight is not exposed via HWC2 on MediaTek Halium devices; we
+     * drive the kernel sysfs node directly (see WriteBacklight). */
+    return WriteBacklight(level);
 }
 
 int32_t HybrisComposerVdiImpl::GetDisplayProperty(uint32_t devId, uint32_t id, uint64_t& value)

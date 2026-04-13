@@ -14,6 +14,7 @@
  */
 
 #include "hybris_display.h"
+#include "hybris_composer_vdi_impl.h"
 #include <hdf_base.h>
 #include <cstring>
 #include <unordered_map>
@@ -218,6 +219,16 @@ int32_t HybrisDisplay::SetDisplayPowerStatus(DispPowerStatus status)
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
         DISPLAY_LOGE("hwc2_compat_display_set_power_mode failed: %d", err));
     powerStatus_ = status;
+
+    /*
+     * Belt-and-braces: HWC2's POWER_OFF blanks panel composition but does NOT
+     * drive the backlight on MediaTek Halium devices (backlight is a separate
+     * LED/PWM controller).  Force the backlight to 0 here so the display
+     * fully blanks even if the OHOS brightness path is bypassed.
+     */
+    if (status == POWER_STATUS_OFF) {
+        HybrisComposerVdiImpl::WriteBacklight(0);
+    }
     return HDF_SUCCESS;
 }
 
