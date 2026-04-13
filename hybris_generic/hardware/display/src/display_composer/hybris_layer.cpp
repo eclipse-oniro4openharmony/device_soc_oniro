@@ -103,7 +103,13 @@ static HybrisNativeBuffer* BuildNativeBuffer(const BufferHandle& bh)
     /* incRef / decRef left null — HWC2 compat layer doesn't call them */
     nb->buf.width  = bh.width;
     nb->buf.height = bh.height;
-    nb->buf.stride = bh.stride;
+    /* OHOS stores stride in BYTES; Android ANativeWindowBuffer expects PIXELS.
+     * Convert back using the format's bpp (matches the pixel stride originally
+     * returned by hybris_gralloc_allocate). */
+    {
+        uint32_t bpp = HybrisBytesPerPixelOhos(static_cast<uint32_t>(bh.format));
+        nb->buf.stride = (bpp > 0) ? (bh.stride / static_cast<int32_t>(bpp)) : bh.stride;
+    }
     nb->buf.format = bh.format; /* OHOS formats align with Android for common cases */
     nb->buf.usage  = static_cast<uint64_t>(bh.usage);
     nb->buf.layerCount = 1;
