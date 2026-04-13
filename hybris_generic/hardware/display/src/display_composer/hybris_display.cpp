@@ -16,10 +16,35 @@
 #include "hybris_display.h"
 #include <hdf_base.h>
 #include <cstring>
+#include <unordered_map>
 #include "display_common.h"
 #include <hardware/hwcomposer2.h>
 #include <system/window.h>
 #include <cutils/native_handle.h>
+extern "C" {
+#include <hybris/common/binding.h>
+}
+
+/*
+ * Forward-declare the HWC2 C++ types we need for the getChangedCompositionTypes
+ * dlsym call without pulling in the heavy HWC2.h (libui, libhardware, etc.).
+ *
+ * hwcomposer2.h defines the namespace HWC2 block only under HWC2_USE_CPP11,
+ * which is not set in our build.  We redeclare the two types we need:
+ *   - HWC2::Layer   (opaque class, used as pointer key only)
+ *   - HWC2::Composition (enum class : int32_t, values from hwc2_composition_t)
+ */
+namespace HWC2 {
+    class Layer;
+    enum class Composition : int32_t {
+        Invalid    = 0,  /* HWC2_COMPOSITION_INVALID    */
+        Client     = 1,  /* HWC2_COMPOSITION_CLIENT     */
+        Device     = 2,  /* HWC2_COMPOSITION_DEVICE     */
+        SolidColor = 3,  /* HWC2_COMPOSITION_SOLID_COLOR */
+        Cursor     = 4,  /* HWC2_COMPOSITION_CURSOR     */
+        Sideband   = 5,  /* HWC2_COMPOSITION_SIDEBAND   */
+    };
+}
 
 namespace OHOS {
 namespace HDI {
@@ -82,6 +107,8 @@ int32_t HybrisDisplay::DestroyLayer(uint32_t layerId)
 
     hwc2_compat_display_destroy_layer(display_, it->second->GetHwc2Layer());
     layers_.erase(it);
+    stickyClientLayers_.erase(layerId);
+    pendingClientLayers_.erase(layerId);
     DISPLAY_LOGI("Destroyed layer %u on display %u", layerId, devId_);
     return HDF_SUCCESS;
 }
@@ -203,44 +230,183 @@ void HybrisDisplay::OnVsync(int64_t timestampNs)
 
 /* ── Composition ─────────────────────────────────────────────────────────── */
 
+/*
+ * HWC2::Display::getChangedCompositionTypes function pointer.
+ *
+ * This C++ method exists in the prebuilt libhwc2_compat_layer.so but has no
+ * C wrapper.  We load it once via android_dlsym using its mangled name.
+ *
+ * Calling convention (ARM64 AAPCS):
+ *   x0 = this (HWC2::Display*)
+ *   x1 = outTypes (std::unordered_map<HWC2::Layer*, HWC2::Composition>*)
+ *   return x0 = HWC2::Error (int32_t, 0 = None)
+ *
+ * ABI assumption: both Android 12 and OHOS 6.1 use LLVM libc++ (std::__1).
+ * The std::__1::unordered_map internal layout is stable across LLVM versions
+ * 12–17, and libhybris hooks malloc/free so both sides share one heap.
+ */
+using GetChangedTypesFn = int32_t(*)(void* displaySelf,
+    std::unordered_map<HWC2::Layer*, HWC2::Composition>* outTypes);
+
+static GetChangedTypesFn LoadGetChangedTypesFn()
+{
+    void* handle = android_dlopen("libhwc2_compat_layer.so", RTLD_LAZY);
+    if (!handle) {
+        DISPLAY_LOGW("android_dlopen libhwc2_compat_layer.so failed");
+        return nullptr;
+    }
+    auto fn = reinterpret_cast<GetChangedTypesFn>(android_dlsym(handle,
+        "_ZN4HWC27Display26getChangedCompositionTypesEPNSt3__113unordered_mapIPNS_5LayerENS_"
+        "11CompositionENS1_4hashIS4_EENS1_8equal_toIS4_EENS1_9allocatorINS1_4pairIKS4_S5_EEEEEE"));
+    DISPLAY_LOGI("getChangedCompositionTypes symbol: %s", fn ? "FOUND" : "NOT FOUND");
+    return fn;
+}
+
 int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
 {
     uint32_t numTypes = 0;
     uint32_t numRequests = 0;
     hwc2_error_t err = hwc2_compat_display_validate(display_, &numTypes, &numRequests);
 
+    if (err != HWC2_ERROR_HAS_CHANGES && err != HWC2_ERROR_NONE) {
+        DISPLAY_LOGE("hwc2_compat_display_validate failed: %d", err);
+        needFlushFb = true;
+        return HDF_FAILURE;
+    }
+
     /*
-     * HWC2_ERROR_HAS_CHANGES means the HWC wants to change some composition
-     * types. We must accept them. needFlushFb = true tells RenderService to
-     * composite CLIENT layers into the client target buffer.
+     * Accept HAL composition changes immediately after validate, before
+     * returning to render_service.  This keeps the accept call spec-compliant:
+     * render_service's SetLayerCompositionType calls happen after accept (allowed),
+     * not between validate and accept (forbidden by HWC2 spec).
      */
-    if (err == HWC2_ERROR_HAS_CHANGES || err == HWC2_ERROR_NONE) {
-        needFlushFb = (numTypes > 0);
-        needsClientComposition_ = needFlushFb;
+    hwc2_compat_display_accept_changes(display_);
+
+    if (numTypes == 0) {
+        if (stickyClientLayers_.empty()) {
+            /* Pure DEVICE steady-state — no GPU composite needed */
+            DISPLAY_LOGI("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u (DEVICE)",
+                devId_, numRequests);
+            needFlushFb = false;
+            needsClientComposition_ = false;
+            pendingClientLayers_.clear();
+        } else {
+            /*
+             * HAL agrees with the current composition types (numTypes==0).
+             * Because render_service already set the sticky CLIENT layers to CLIENT
+             * on the previous frame, the HAL sees CLIENT for them and returns
+             * numTypes==0.  We must keep reporting them as CLIENT and keep
+             * needFlushFb=true so render_service continues to GPU-composite and
+             * call SetDisplayClientBuffer — otherwise the HAL would present a stale
+             * client target.
+             */
+            DISPLAY_LOGI("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u "
+                "(%zu sticky CLIENT layer(s) — maintaining)",
+                devId_, numRequests, stickyClientLayers_.size());
+            pendingClientLayers_ = stickyClientLayers_;
+            needsClientComposition_ = true;
+            needFlushFb = true;
+        }
         return HDF_SUCCESS;
     }
 
-    DISPLAY_LOGE("hwc2_compat_display_validate failed: %d", err);
-    needFlushFb = true;
-    return HDF_FAILURE;
+    /*
+     * numTypes > 0: HAL wants to change some layers' composition type.
+     *
+     * Use getChangedCompositionTypes (dlsym'd from the prebuilt .so) to find
+     * exactly which layers the HAL changed to CLIENT.  Add them to
+     * stickyClientLayers_ — from this point on they stay CLIENT permanently
+     * (until destroyed).  This prevents the DEVICE↔CLIENT oscillation that
+     * causes the EGL surface destruction race / status-bar flicker.
+     *
+     * Fallback (symbol unavailable): pendingClientLayers_ stays empty, which
+     * suppresses layer transitions and avoids the HAL freeze from a missing
+     * SetDisplayClientBuffer (stale client target risk, but no worse than before).
+     */
+    static GetChangedTypesFn s_fn = LoadGetChangedTypesFn();
+
+    if (s_fn) {
+        /*
+         * Read HWC2::Display* from the opaque hwc2_compat_display_t.
+         * struct hwc2_compat_display { HWC2::Display* self; } — first field.
+         */
+        void* displaySelf = *reinterpret_cast<void**>(display_);
+
+        std::unordered_map<HWC2::Layer*, HWC2::Composition> changedTypes;
+        int32_t fnErr = s_fn(displaySelf, &changedTypes);
+
+        if (fnErr == 0 /* HWC2::Error::None */) {
+            /*
+             * Reverse-map HWC2::Layer* → our layer ID.
+             * struct hwc2_compat_layer_t { HWC2::Layer* self; } — first field.
+             */
+            for (const auto& entry : changedTypes) {
+                void* hwc2LayerPtr = entry.first;
+                HWC2::Composition comp = entry.second;
+                for (const auto& kv : layers_) {
+                    void* layerSelf = *reinterpret_cast<void**>(kv.second->GetHwc2Layer());
+                    if (layerSelf == hwc2LayerPtr) {
+                        uint32_t layerId = kv.first;
+                        int32_t compInt = static_cast<int32_t>(comp);
+                        bool isNew = (stickyClientLayers_.find(layerId) == stickyClientLayers_.end());
+                        stickyClientLayers_[layerId] = compInt;
+                        DISPLAY_LOGW("PrepareDisplayLayers devId=%u: layer %u → "
+                            "composition %d (%s sticky CLIENT)",
+                            devId_, layerId, compInt, isNew ? "NEW" : "already");
+                        break;
+                    }
+                }
+            }
+            DISPLAY_LOGW("PrepareDisplayLayers devId=%u: %u HAL-changed layer(s); "
+                "%zu total sticky CLIENT layer(s)",
+                devId_, static_cast<uint32_t>(changedTypes.size()),
+                stickyClientLayers_.size());
+        } else {
+            DISPLAY_LOGW("PrepareDisplayLayers devId=%u: getChangedCompositionTypes "
+                "returned error %d", devId_, fnErr);
+        }
+    } else {
+        DISPLAY_LOGW("PrepareDisplayLayers devId=%u: %u type change(s), "
+            "getChangedCompositionTypes unavailable — suppressing layer transitions",
+            devId_, numTypes);
+    }
+
+    /* Report all sticky CLIENT layers (new ones trigger one-time transition) */
+    pendingClientLayers_ = stickyClientLayers_;
+    needsClientComposition_ = !pendingClientLayers_.empty();
+    needFlushFb = true;  /* always provide client target when numTypes > 0 */
+    return HDF_SUCCESS;
 }
 
 int32_t HybrisDisplay::GetDisplayCompChange(std::vector<uint32_t>& layerIds,
     std::vector<int32_t>& types)
 {
-    if (needsClientComposition_) {
-        DISPLAY_LOGW("HWC2 requested composition changes! Forcing all layers to COMPOSITION_CLIENT.");
-        for (const auto& kv : layers_) {
-            // Only report layers that are not already CLIENT
-            if (kv.second->GetCompositionType() != COMPOSITION_CLIENT) {
-                layerIds.push_back(kv.first);
-                types.push_back(COMPOSITION_CLIENT);
-                DISPLAY_LOGW("Forcing layer %u to CLIENT", kv.first);
-            }
+    layerIds.clear();
+    types.clear();
+
+    if (!needsClientComposition_ || pendingClientLayers_.empty()) {
+        /*
+         * Either steady-state DEVICE (numTypes==0) or fallback mode where we
+         * suppress all layer transitions to avoid the EGL surface destruction race.
+         */
+        return HDF_SUCCESS;
+    }
+
+    /*
+     * Report exactly the layers the HAL changed to CLIENT (from
+     * getChangedCompositionTypes).  render_service will call
+     * SetLayerCompositionType(CLIENT) only for these layers and
+     * GPU-composite them into the client target.  All other layers keep
+     * their DEVICE EGL window surfaces — no destruction race.
+     */
+    for (const auto& entry : pendingClientLayers_) {
+        uint32_t layerId = entry.first;
+        int32_t comp     = entry.second;
+        /* Only report CLIENT transitions — Device/Cursor etc. are already set */
+        if (comp == static_cast<int32_t>(HWC2::Composition::Client)) {
+            layerIds.push_back(layerId);
+            types.push_back(COMPOSITION_CLIENT);
         }
-    } else {
-        layerIds.clear();
-        types.clear();
     }
     return HDF_SUCCESS;
 }
@@ -316,8 +482,7 @@ int32_t HybrisDisplay::GetDisplayReleaseFence(std::vector<uint32_t>& layerIds,
 
 int32_t HybrisDisplay::Commit(int32_t& fence)
 {
-    /* Must accept changes before presenting */
-    hwc2_compat_display_accept_changes(display_);
+    /* acceptDisplayChanges was already called in PrepareDisplayLayers */
 
     if (pendingFences_) {
         hwc2_compat_out_fences_destroy(pendingFences_);
