@@ -27,10 +27,28 @@ namespace DISPLAY {
 
 /* ── Singleton ───────────────────────────────────────────────────────────── */
 
+/*
+ * File-scope static rather than function-local static.
+ *
+ * A function-local static would require __cxa_guard_acquire for thread-safe
+ * lazy initialisation.  On this target the VDI is loaded with RTLD_LAZY and
+ * libc++.so is missing from the device image (only libc++_shared.so is
+ * present).  musl silently skips the missing NEEDED library, leaving the
+ * GOT entry for __cxa_guard_acquire unresolved (stuck at the raw PLT-section
+ * offset 0xd7f0), which causes a SIGSEGV on the first call.
+ *
+ * A file-scope static is initialised via .init_array before any dlsym'd
+ * function can be called, so no guard is needed and the libc++.so dependency
+ * is never exercised for this path.
+ *
+ * Note: registerCallback is still NOT called from the constructor (see the
+ * comment in InitHwc2Device) so there is no recursive-initialisation hazard.
+ */
+static HybrisComposerVdiImpl g_vdiInstance;
+
 HybrisComposerVdiImpl& HybrisComposerVdiImpl::GetVdiInstance()
 {
-    static HybrisComposerVdiImpl instance;
-    return instance;
+    return g_vdiInstance;
 }
 
 /* ── Constructor / destructor ────────────────────────────────────────────── */
@@ -209,19 +227,39 @@ int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data
     }
 
     if (needRegister) {
-        hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
         /*
-         * Trigger the hotplug callback for display 0 (primary) so that the
-         * display is registered immediately. Some HWC2 implementations need
-         * a manual nudge after registerCallback.
+         * hwc2_compat_device_register_callback fires onHotplug synchronously
+         * via the HIDL callback bridge, which calls our HandleHotplug.
+         * HandleHotplug calls hwc2_compat_device_get_display_by_id, which
+         * looks in HWC2::Device::mDisplays.  That map is populated only by
+         * Device::onHotplug(), which is NOT called by the HIDL bridge path —
+         * so getDisplayById would return nullptr and HandleHotplug returns
+         * early without registering the display.
+         *
+         * Fix: call hwc2_compat_device_on_hotplug BEFORE registerCallback.
+         * This invokes Device::onHotplug(0, true) directly, which queries
+         * getDisplayType() and inserts display 0 into mDisplays — but fires
+         * no listener because no callback is registered yet.  Then when
+         * registerCallback fires the initial hotplug, HandleHotplug finds
+         * the display in mDisplays, creates the HybrisDisplay object, and
+         * calls hotplugCb_ to notify upper layers.
          */
         hwc2_compat_device_on_hotplug(device_, 0, true);
+        hwc2_compat_device_register_callback(device_, &eventListener_, composerSeq_++);
     }
 
-    /* Re-fire for any already-connected displays (mutex needed for displays_ access) */
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& kv : displays_) {
-        cb(kv.first, true, data);
+    /*
+     * Re-fire for any already-connected displays, but only when a subsequent
+     * render_service instance re-registers (needRegister == false).  On the
+     * first registration, registerCallback already fired HandleHotplug which
+     * called hotplugCb_ — firing again here would send a duplicate hotplug
+     * to RSScreenManager causing spurious display creation.
+     */
+    if (!needRegister) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& kv : displays_) {
+            cb(kv.first, true, data);
+        }
     }
     return HDF_SUCCESS;
 }
