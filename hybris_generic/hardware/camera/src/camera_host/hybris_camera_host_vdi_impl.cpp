@@ -5,6 +5,11 @@
 
 #include "hybris_camera_host_vdi_impl.h"
 
+#include <sstream>
+
+#include "hidl/hw_binder_client.h"
+#include "hidl/hw_camera_provider.h"
+#include "hidl/hw_service_manager.h"
 #include "hybris_camera_log.h"
 #include "v1_0/vdi_types.h"
 
@@ -22,17 +27,95 @@ HybrisCameraHostVdiImpl::~HybrisCameraHostVdiImpl()
     CAMERA_VDI_LOGI("HybrisCameraHostVdiImpl dtor");
 }
 
+bool HybrisCameraHostVdiImpl::LoadCameraIdsFromHalium()
+{
+    auto client = std::make_unique<Hidl::HwBinderClient>();
+    auto rc = client->Open("/dev/hwbinder");
+    if (rc != Hidl::HwBinderClient::Result::Ok) {
+        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: HwBinderClient::Open "
+                        "failed (%{public}s)",
+                        Hidl::HwBinderClient::ResultName(rc));
+        return false;
+    }
+
+    Hidl::HwServiceManager sm(client.get());
+    uint32_t handle = 0;
+    bool isNull = false;
+    constexpr const char *kProviderFq =
+        "android.hardware.camera.provider@2.6::ICameraProvider";
+    constexpr const char *kProviderInstance = "internal/0";
+    if (!sm.GetService(kProviderFq, kProviderInstance, &handle, &isNull) ||
+        isNull) {
+        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: GetService(%{public}s/%{public}s) "
+                        "failed (isNull=%{public}d)",
+                        kProviderFq, kProviderInstance, (int)isNull);
+        return false;
+    }
+
+    auto provider = std::make_unique<Hidl::HwCameraProvider>(client.get(),
+                                                              handle);
+    int32_t halStatus = -1;
+    std::vector<std::string> ids;
+    if (!provider->GetCameraIdList(&halStatus, &ids)) {
+        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: GetCameraIdList failed "
+                        "(halStatus=%{public}d)", halStatus);
+        return false;
+    }
+    if (halStatus != 0) {
+        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: HAL Status=%{public}d "
+                        "(non-OK)", halStatus);
+        return false;
+    }
+
+    /*
+     * Halium camera IDs come back fully-qualified, e.g.
+     *   "device@3.6/internal/0"
+     * For OHOS-side cameraId values we use the trailing token after
+     * the last '/' — the bare per-device instance name ("internal/0"
+     * → "0").  OpenCamera maps this back to the FQ name when calling
+     * IServiceManager::get again for the camera device proxy.
+     */
+    cameraIds_.clear();
+    cameraIds_.reserve(ids.size());
+    for (const auto &fq : ids) {
+        size_t slash = fq.find_last_of('/');
+        cameraIds_.push_back(slash == std::string::npos
+                                 ? fq : fq.substr(slash + 1));
+    }
+
+    std::ostringstream summary;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i) summary << ",";
+        summary << ids[i] << "→" << cameraIds_[i];
+    }
+    CAMERA_VDI_LOGI("LoadCameraIdsFromHalium: %{public}zu cameras: %{public}s",
+                    cameraIds_.size(), summary.str().c_str());
+
+    hwClient_   = std::move(client);
+    hwProvider_ = std::move(provider);
+    return true;
+}
+
 int32_t HybrisCameraHostVdiImpl::Init()
 {
     std::lock_guard<std::mutex> lock(mutex_);
+
     /*
-     * Match the HCS ability_01 template ("lcam001").  When N12.5 brings
-     * up the libhybris HIDL ICameraProvider client, this will be
-     * replaced by provider->getCameraIdList() output translated into
-     * OHOS logical camera ids.
+     * Bridge to Halium for the real list.  Falls back to the HCS
+     * "lcam001" placeholder if the libhybris transport can't reach
+     * Halium — keeps the HDF host startup non-fatal during early
+     * boot / pre-camerahalserver-ready windows.
      */
-    cameraIds_ = { "lcam001" };
-    CAMERA_VDI_LOGI("VDI registered, cameraIds=%{public}s", cameraIds_[0].c_str());
+    if (!LoadCameraIdsFromHalium()) {
+        cameraIds_ = { "lcam001" };
+        fallback_ = true;
+        CAMERA_VDI_LOGW("VDI registered with fallback cameraIds=%{public}s",
+                        cameraIds_[0].c_str());
+        return VDI::Camera::V1_0::NO_ERROR;
+    }
+
+    CAMERA_VDI_LOGI("VDI registered, %{public}zu Halium cameras",
+                    cameraIds_.size());
     return VDI::Camera::V1_0::NO_ERROR;
 }
 

@@ -26,25 +26,96 @@ group("camera_host_model") {
   deps = [
     ":binder_smoke",
     ":camera_hidl_smoke",
+    ":hidl_camera_smoke",
+    ":hidl_get_smoke",
     ":hidl_ping",
     ":libcamera_host_vdi_impl",
   ]
 }
 
+# ─── N12.5.2b — pure-musl HIDL transport library ───────────────────────────
+#
+# HwParcel + HwBinderClient + HwServiceManager.  Refactored out of the
+# N12.5.2 inline spike; intended to be reused by libcamera_host_vdi_impl
+# in N12.5.3.  No bionic, no libhybris — talks the kernel binder ABI
+# directly via the vendored uapi in src/hidl/hw_binder_abi.h.
+
+hidl_transport_sources = [
+  "src/hidl/hw_binder_client.cpp",
+  "src/hidl/hw_camera_provider.cpp",
+  "src/hidl/hw_parcel.cpp",
+  "src/hidl/hw_service_manager.cpp",
+]
+
+hidl_transport_include_dirs = [
+  "include",
+  "src",
+]
+
 # ─── N12.5.2 — pure-musl HIDL ping smoke ───────────────────────────────────
 #
-# Inline minimal HIDL transaction: BC_TRANSACTION_SG → handle 0
-# (hwservicemanager) with method code 0xff000006 (IBase::ping).  Validates
-# our hand-rolled HwParcel + binder_transaction_data_sg encoding before
-# the full transport library lands.
+# Thin demo on top of the HwBinderClient/HwServiceManager modules: opens
+# /dev/hwbinder, sends IBase::ping (HidlBase::TRANSACTION_ping, 0x0F504E47)
+# to handle 0 with descriptor "android.hidl.base@1.0::IBase", expects
+# EX_NONE.  Validates the full encoder + transact + reply parse pipeline.
 
 ohos_executable("hidl_ping") {
-  sources = [ "tools/hidl_ping.cpp" ]
+  sources = [ "tools/hidl_ping.cpp" ] + hidl_transport_sources
 
-  include_dirs = [
-    "include",
-    "src",
+  include_dirs = hidl_transport_include_dirs
+
+  external_deps = [
+    "hilog:libhilog",
   ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=invalid-offsetof",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
+# ─── N12.5.3a — IServiceManager::get() smoke ─────────────────────────────
+#
+# Resolves a HIDL service name via hwservicemanager (transaction code 1
+# on handle 0), extracts the BINDER_TYPE_HANDLE from the reply, then
+# IBase::pings the resolved handle to prove the round-trip.
+
+ohos_executable("hidl_get_smoke") {
+  sources = [ "tools/hidl_get_smoke.cpp" ] + hidl_transport_sources
+
+  include_dirs = hidl_transport_include_dirs
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=invalid-offsetof",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
+# ─── N12.5.3b — ICameraProvider::getCameraIdList smoke ───────────────────
+#
+# Resolves the camera provider via hwservicemanager and calls
+# getCameraIdList (transaction code 3) through the resolved handle.
+# Expects 3 cameras on the X23.  Validates the full hidl_vec<hidl_string>
+# reader path.
+
+ohos_executable("hidl_camera_smoke") {
+  sources = [ "tools/hidl_camera_smoke.cpp" ] + hidl_transport_sources
+
+  include_dirs = hidl_transport_include_dirs
 
   external_deps = [
     "hilog:libhilog",
@@ -123,11 +194,12 @@ ohos_executable("camera_hidl_smoke") {
 
 ohos_shared_library("libcamera_host_vdi_impl") {
   sources = [
-    "src/camera_host/hybris_camera_host_vdi_impl.cpp",
-  ]
+              "src/camera_host/hybris_camera_host_vdi_impl.cpp",
+            ] + hidl_transport_sources
 
   include_dirs = [
     "include",
+    "src",                       # for hidl/hw_*.h
     "src/camera_host",
     "//drivers/peripheral/camera/vdi_base/interfaces",
     "//drivers/peripheral/camera/vdi_base/interfaces/v1_0",

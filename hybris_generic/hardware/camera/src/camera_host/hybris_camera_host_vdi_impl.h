@@ -28,6 +28,7 @@
 #ifndef HYBRIS_CAMERA_HOST_VDI_IMPL_H
 #define HYBRIS_CAMERA_HOST_VDI_IMPL_H
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -35,6 +36,10 @@
 #include "v1_0/icamera_host_vdi.h"
 
 namespace OHOS::Camera::Hybris {
+namespace Hidl {
+class HwBinderClient;
+class HwCameraProvider;
+} // namespace Hidl
 
 using OHOS::VDI::Camera::V1_0::ICameraHostVdi;
 using OHOS::VDI::Camera::V1_0::ICameraHostVdiCallback;
@@ -59,9 +64,26 @@ public:
     int32_t CloseAllCameras() override;
 
 private:
+    /*
+     * Populate cameraIds_ via the libhybris HIDL transport — calls
+     * IServiceManager::get("android.hardware.camera.provider@2.6::"
+     * "ICameraProvider", "internal/0") and then
+     * ICameraProvider::getCameraIdList.  Sets fallback_ = true and
+     * uses the HCS "lcam001" placeholder when the bridge can't reach
+     * Halium (e.g. /dev/hwbinder absent during early boot).
+     */
+    bool LoadCameraIdsFromHalium();
+
     std::mutex                    mutex_;
     sptr<ICameraHostVdiCallback>  hostCallback_;
     std::vector<std::string>      cameraIds_;
+    bool                          fallback_ = false;
+
+    /* HIDL transport — kept alive for the lifetime of the VDI so
+     * subsequent calls (OpenCamera, SetFlashlight, …) can reuse the
+     * binder handle without re-resolving via hwservicemanager. */
+    std::unique_ptr<Hidl::HwBinderClient>    hwClient_;
+    std::unique_ptr<Hidl::HwCameraProvider>  hwProvider_;
 };
 
 } // namespace OHOS::Camera::Hybris
