@@ -72,49 +72,93 @@ const CameraProfile *FindProfile(const std::string &vendorId)
 
 /*
  * Triplets are (format, width, height).  Formats are
- * camera_format_t enum values from camera_device_ability_items.h
- *   2 = YCBCR_420_888 (preview / video)
- *   5 = JPEG          (still capture)
+ * camera_format_t enum values from camera_device_ability_items.h.
+ *
+ * **Pitfall:** the OHOS camera framework (CameraManager::metaToFwCameraFormat_)
+ * does NOT translate `OHOS_CAMERA_FORMAT_YCBCR_420_888`; it gets mapped
+ * to `CAMERA_FORMAT_INVALID`, and `createPreviewOutput` then fails with
+ * INVALID_ARGUMENT (7400101).  Use `OHOS_CAMERA_FORMAT_YCRCB_420_SP`
+ * (NV21, =3) — the framework maps this to `CAMERA_FORMAT_YUV_420_SP`
+ * (=1003), which is what the standard OHOS Camera HAP requests for its
+ * preview output.
+ *
+ *   3 = OHOS_CAMERA_FORMAT_YCRCB_420_SP (NV21) → CAMERA_FORMAT_YUV_420_SP
+ *   5 = OHOS_CAMERA_FORMAT_JPEG               → CAMERA_FORMAT_JPEG
+ *
  * Keep the count modest — the camera framework iterates every entry
  * for stream-config validation.
  */
 std::vector<int32_t> MakeBasicConfigurations(const CameraProfile &p)
 {
     return {
-        OHOS_CAMERA_FORMAT_YCBCR_420_888, 1280,         720,
-        OHOS_CAMERA_FORMAT_YCBCR_420_888, 640,          480,
+        OHOS_CAMERA_FORMAT_YCRCB_420_SP,  1280,         720,
+        OHOS_CAMERA_FORMAT_YCRCB_420_SP,  640,          480,
         OHOS_CAMERA_FORMAT_JPEG,          p.jpegW,      p.jpegH,
         OHOS_CAMERA_FORMAT_JPEG,          1280,         720,
     };
 }
 
 /*
- * Extend configuration encoding is one record per mode:
- *   [ mode, streamCount,
- *     format, w, h, fps, abilityId,  ...streamCount times..., -1,
- *     -1 ]   ← terminator after each mode
- * Modes used here: 0 = NORMAL (preview+still), 1 = VIDEO (preview+record).
- * Mirrors `ability_01` extendAvailableConfigurations in the existing HCS.
+ * Extend configuration encoding (parsed by `CameraStreamInfoParse` in
+ * the camera framework — see
+ * `camera_stream_info_parse.h::getModeInfo`):
+ *
+ *   [ modeName,
+ *       streamType,
+ *           format, width, height, fixedFps, minFps, maxFps,
+ *               [abilityId, abilityId, …],   ← optional, can be empty
+ *           ABILITY_FINISH (-1),
+ *           … more (format, w, h, …) details for this stream …
+ *           ABILITY_FINISH (-1),
+ *       STREAM_FINISH (-1),
+ *       … more streams (streamType + details + STREAM_FINISH) …
+ *       STREAM_FINISH (-1),
+ *       MODE_FINISH (-1),
+ *   ]
+ *
+ * The mode/stream/ability terminators are critical: the parser uses
+ * the triplet `[…, ABILITY_FINISH, STREAM_FINISH, MODE_FINISH]` as the
+ * mode boundary.  Getting the structure wrong silently produces an
+ * empty profile list (which surfaces as `createPreviewOutput` failing
+ * with 7400101 INVALID_ARGUMENT in the camera HAP).
+ *
+ * Stream types are `OutputCapStreamType` from camera_manager.h:
+ *   0 PREVIEW, 1 VIDEO_STREAM, 2 STILL_CAPTURE.
+ *
+ * Modes used: 0 = NORMAL (SceneMode::NORMAL — preview + still),
+ *             1 = CAPTURE (SceneMode::CAPTURE) is the alternate value
+ *             camera_manager often parses; the HAP requests NORMAL.
  */
 std::vector<int32_t> MakeExtendConfigurations(const CameraProfile &p)
 {
-    constexpr int32_t kModeNormal = 0;
-    constexpr int32_t kModeVideo  = 1;
-    constexpr int32_t kFpsAny     = 0;
-    constexpr int32_t kAbilityAny = -1;
-    constexpr int32_t kTerm       = -1;
+    constexpr int32_t kModeNormal     = 0;   /* SceneMode::NORMAL */
+    constexpr int32_t kStreamPreview  = 0;
+    constexpr int32_t kStreamStill    = 2;
+    constexpr int32_t kAbilityFinish  = -1;
+    constexpr int32_t kStreamFinish   = -1;
+    constexpr int32_t kModeFinish     = -1;
 
+    /*
+     * NORMAL mode: a single preview YUV at 1280x720 + 640x480, and
+     * the per-sensor max-resolution JPEG plus a downscaled JPEG.
+     * fixedFps=0 / minFps=15 / maxFps=30 for the preview frames;
+     * still-capture rates are 0/0/0 (capture is one-shot).
+     */
     return {
-        /* NORMAL: preview 1280x720 YUV + still <p.jpegW>x<p.jpegH> JPEG */
-        kModeNormal, 2,
-            OHOS_CAMERA_FORMAT_YCBCR_420_888, 1280, 720, kFpsAny, kAbilityAny,
-            OHOS_CAMERA_FORMAT_JPEG, p.jpegW, p.jpegH, kFpsAny, kAbilityAny,
-        kTerm,
-        /* VIDEO: preview 1280x720 YUV + record 1280x720 YUV */
-        kModeVideo, 2,
-            OHOS_CAMERA_FORMAT_YCBCR_420_888, 1280, 720, 30, kAbilityAny,
-            OHOS_CAMERA_FORMAT_YCBCR_420_888, 1280, 720, 30, kAbilityAny,
-        kTerm,
+        kModeNormal,
+            kStreamPreview,
+                OHOS_CAMERA_FORMAT_YCRCB_420_SP, 1280, 720, 0, 15, 30,
+                kAbilityFinish,
+                OHOS_CAMERA_FORMAT_YCRCB_420_SP, 640,  480, 0, 15, 30,
+                kAbilityFinish,
+            kStreamFinish,
+            kStreamStill,
+                OHOS_CAMERA_FORMAT_JPEG, p.jpegW, p.jpegH, 0, 0, 0,
+                kAbilityFinish,
+                OHOS_CAMERA_FORMAT_JPEG, 1280, 720, 0, 0, 0,
+                kAbilityFinish,
+            kStreamFinish,
+        kModeFinish,
     };
 }
 

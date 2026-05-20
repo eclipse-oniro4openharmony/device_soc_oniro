@@ -77,9 +77,9 @@ public:
 
 private:
     std::mutex                              mutex_;
-    /* Borrowed pointer; kept for N12.6+ when GetStreamOperator opens
-     * the Halium ICameraDeviceSession over the same /dev/hwbinder fd. */
-    [[maybe_unused]] Hidl::HwBinderClient  *client_;
+    /* Borrowed pointer; the stream operator (N12.6) uses this fd to
+     * talk to the Halium ICameraDeviceSession after open(). */
+    Hidl::HwBinderClient                   *client_;
     std::string                             ohosCameraId_;
     std::unique_ptr<Hidl::HwCameraDevice>   device_;
     sptr<ICameraDeviceVdiCallback>          deviceCallback_;

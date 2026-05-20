@@ -10,6 +10,7 @@
 #include "hidl/hw_binder_client.h"
 #include "hidl/hw_camera_device.h"
 #include "hybris_camera_log.h"
+#include "hybris_stream_operator_vdi_impl.h"
 #include "v1_0/vdi_types.h"
 
 namespace OHOS::Camera::Hybris {
@@ -41,12 +42,27 @@ int32_t HybrisCameraDeviceVdiImpl::GetStreamOperator(
     const sptr<IStreamOperatorVdiCallback> &callbackObj,
     sptr<IStreamOperatorVdi> &streamOperator)
 {
-    (void)callbackObj;
     streamOperator = nullptr;
-    CAMERA_VDI_LOGW("GetStreamOperator(%{public}s): not implemented yet "
-                    "— stream operator + ICameraDeviceSession bridge "
-                    "lands in N12.6", ohosCameraId_.c_str());
-    return V::METHOD_NOT_SUPPORTED;
+    if (callbackObj == nullptr) {
+        return V::INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_ || device_ == nullptr) {
+        return V::CAMERA_CLOSED;
+    }
+    /*
+     * N12.6.0: return a logging stub that accepts CreateStreams/Commit/
+     * Attach so we can see what shape the OHOS framework requests
+     * on real hardware.  Capture still returns METHOD_NOT_SUPPORTED
+     * (preview frames not delivered until N12.7 buffer interop).
+     */
+    auto op = sptr<HybrisStreamOperatorVdiImpl>::MakeSptr(
+        client_, device_.get(), ohosCameraId_, callbackObj);
+    if (op == nullptr) {
+        return V::INSUFFICIENT_RESOURCES;
+    }
+    streamOperator = op;
+    return V::NO_ERROR;
 }
 
 int32_t HybrisCameraDeviceVdiImpl::UpdateSettings(

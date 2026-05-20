@@ -196,6 +196,7 @@ ohos_executable("camera_hidl_smoke") {
 ohos_shared_library("libcamera_host_vdi_impl") {
   sources = [
               "src/camera_device/hybris_camera_device_vdi_impl.cpp",
+              "src/camera_device/hybris_stream_operator_vdi_impl.cpp",
               "src/camera_host/hybris_camera_ability.cpp",
               "src/camera_host/hybris_camera_host_vdi_impl.cpp",
             ] + hidl_transport_sources
