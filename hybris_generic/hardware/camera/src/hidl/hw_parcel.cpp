@@ -297,6 +297,44 @@ bool HwParcel::Reader::ReadHidlStringVec(std::vector<std::string> *out)
     return true;
 }
 
+bool HwParcel::Reader::ReadHidlVecUint8(std::vector<uint8_t> *out)
+{
+    /*
+     * Wire format for hidl_vec<uint8_t> in a reply parcel:
+     *   main:
+     *     [+0]   binder_buffer_object#0   PTR → HidlVec struct in SG
+     *     [+40]  binder_buffer_object#1   PTR → raw byte array, with
+     *                                     HAS_PARENT pointing into #0
+     * The kernel-fixup'd HidlVec.buffer already points at the byte
+     * array in our mmap'd SG region.
+     */
+    if (cursor_ + sizeof(binder_buffer_object) > dataSize_) return false;
+    binder_buffer_object boVec;
+    memcpy(&boVec, data_ + cursor_, sizeof(boVec));
+    cursor_ += sizeof(boVec);
+    if (boVec.hdr.type != (uint32_t)BINDER_TYPE_PTR) return false;
+    if (boVec.length != sizeof(HidlVecLayout))      return false;
+    if (boVec.buffer == 0)                           return false;
+
+    HidlVecLayout vec;
+    memcpy(&vec, reinterpret_cast<const void *>(boVec.buffer), sizeof(vec));
+
+    if (cursor_ + sizeof(binder_buffer_object) > dataSize_) return false;
+    binder_buffer_object boBytes;
+    memcpy(&boBytes, data_ + cursor_, sizeof(boBytes));
+    cursor_ += sizeof(boBytes);
+    if (boBytes.hdr.type != (uint32_t)BINDER_TYPE_PTR) return false;
+
+    out->clear();
+    if (vec.size == 0 || boBytes.buffer == 0) {
+        return true;
+    }
+    out->resize(vec.size);
+    memcpy(out->data(),
+           reinterpret_cast<const void *>(boBytes.buffer), vec.size);
+    return true;
+}
+
 bool HwParcel::Reader::ReadHidlString(std::string *out)
 {
     /*

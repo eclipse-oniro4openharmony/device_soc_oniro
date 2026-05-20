@@ -7,9 +7,12 @@
 
 #include <sstream>
 
+#include "camera_device/hybris_camera_device_vdi_impl.h"
 #include "hidl/hw_binder_client.h"
+#include "hidl/hw_camera_device.h"
 #include "hidl/hw_camera_provider.h"
 #include "hidl/hw_service_manager.h"
+#include "hybris_camera_ability.h"
 #include "hybris_camera_log.h"
 #include "v1_0/vdi_types.h"
 
@@ -72,15 +75,20 @@ bool HybrisCameraHostVdiImpl::LoadCameraIdsFromHalium()
      *   "device@3.6/internal/0"
      * For OHOS-side cameraId values we use the trailing token after
      * the last '/' — the bare per-device instance name ("internal/0"
-     * → "0").  OpenCamera maps this back to the FQ name when calling
-     * IServiceManager::get again for the camera device proxy.
+     * → "0").  OpenCamera maps this back to the FQ name (stored in
+     * haliumCameraIds_, parallel-indexed with cameraIds_) when
+     * calling ICameraProvider::getCameraDeviceInterface_V3_x for the
+     * camera device proxy.
      */
     cameraIds_.clear();
+    haliumCameraIds_.clear();
     cameraIds_.reserve(ids.size());
+    haliumCameraIds_.reserve(ids.size());
     for (const auto &fq : ids) {
         size_t slash = fq.find_last_of('/');
         cameraIds_.push_back(slash == std::string::npos
                                  ? fq : fq.substr(slash + 1));
+        haliumCameraIds_.push_back(fq);
     }
 
     std::ostringstream summary;
@@ -150,14 +158,21 @@ int32_t HybrisCameraHostVdiImpl::GetCameraAbility(const std::string &cameraId,
                                                   std::vector<uint8_t> &cameraAbility)
 {
     /*
-     * HCS supplies the static ability blob to the host service via the
-     * `ability_01` template (camera_host_config.hcs).  The VDI is only
-     * consulted when the host service needs a runtime override; for the
-     * stub we always defer to HCS.  Returning NO_ERROR with an empty
-     * blob causes the host service to fall back to HCS metadata.
+     * The cameraId we get here is the post-slash suffix of the Halium
+     * HIDL camera id (see LoadCameraIdsFromHalium): "0" for the rear
+     * primary, "1" for the front, "2" for the rear wide.  We hand back
+     * a per-camera ability blob built programmatically — see
+     * hybris_camera_ability.cpp for the X23 profile table.
+     *
+     * Long-term replacement: bridge ICameraDevice::getCameraCharacteristics
+     * over HIDL and translate the Android camera_metadata_t to OHOS
+     * format.  Hand-rolling keeps N12.5.5+ unblocked.
      */
-    (void)cameraId;
-    cameraAbility.clear();
+    if (!BuildCameraAbility(cameraId, cameraAbility)) {
+        CAMERA_VDI_LOGE("GetCameraAbility(%{public}s): no profile",
+                        cameraId.c_str());
+        return VDI::Camera::V1_0::INVALID_ARGUMENT;
+    }
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
@@ -165,11 +180,98 @@ int32_t HybrisCameraHostVdiImpl::OpenCamera(const std::string &cameraId,
                                             const sptr<ICameraDeviceVdiCallback> &callbackObj,
                                             sptr<ICameraDeviceVdi> &device)
 {
-    (void)cameraId;
-    (void)callbackObj;
     device = nullptr;
-    CAMERA_VDI_LOGW("OpenCamera(%{public}s) — N12.4 stub, real bridging in N12.7", cameraId.c_str());
-    return VDI::Camera::V1_0::METHOD_NOT_SUPPORTED;
+    if (callbackObj == nullptr) {
+        return VDI::Camera::V1_0::INVALID_ARGUMENT;
+    }
+
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    /*
+     * Map OHOS-side cameraId ("0"/"1"/"2") back to the FQ Halium
+     * camera device name we stashed in LoadCameraIdsFromHalium.
+     */
+    std::string haliumName;
+    for (size_t i = 0; i < cameraIds_.size(); ++i) {
+        if (cameraIds_[i] == cameraId) {
+            haliumName = haliumCameraIds_[i];
+            break;
+        }
+    }
+    if (haliumName.empty()) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): no Halium FQ name",
+                        cameraId.c_str());
+        return VDI::Camera::V1_0::INVALID_ARGUMENT;
+    }
+    if (hwProvider_ == nullptr || hwClient_ == nullptr) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): HIDL provider unavailable "
+                        "(fallback mode)", cameraId.c_str());
+        return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
+    }
+
+    /*
+     * Bridge to Halium ICameraProvider::getCameraDeviceInterface_V3_x.
+     * The returned binder ref is auto-BC_ACQUIRE'd by ParseReplies in
+     * HwBinderClient (see N12.5.3a gotcha #4).
+     */
+    int32_t halStatus = -1;
+    uint32_t deviceHandle = 0;
+    bool isNull = true;
+    if (!hwProvider_->GetCameraDeviceInterface(haliumName, &halStatus,
+                                               &deviceHandle, &isNull)) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): GetCameraDeviceInterface "
+                        "failed (halStatus=%{public}d)",
+                        haliumName.c_str(), halStatus);
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+    if (isNull || deviceHandle == 0) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): Halium returned null "
+                        "ICameraDevice", haliumName.c_str());
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+
+    auto hwDev = std::make_unique<Hidl::HwCameraDevice>(hwClient_.get(),
+                                                         deviceHandle);
+
+    /*
+     * Sanity-pull camera characteristics so we know the device-side
+     * binder is alive and responding before handing the wrapper to
+     * the framework.  Discard the blob — N12.5.4 already serves a
+     * hand-rolled OHOS ability via GetCameraAbility; characteristic
+     * translation lands later.
+     */
+    std::vector<uint8_t> charsBlob;
+    int32_t charsStatus = -1;
+    if (hwDev->GetCameraCharacteristics(&charsStatus, &charsBlob)) {
+        CAMERA_VDI_LOGI("OpenCamera(%{public}s): characteristics OK, "
+                        "blob=%{public}zu bytes",
+                        haliumName.c_str(), charsBlob.size());
+    } else {
+        CAMERA_VDI_LOGW("OpenCamera(%{public}s): characteristics fetch "
+                        "failed (halStatus=%{public}d) — proceeding anyway",
+                        haliumName.c_str(), charsStatus);
+    }
+
+    /*
+     * Drop the host lock before constructing the device VDI — the
+     * device VDI may take its own internal lock and we don't want to
+     * hold two simultaneously across user-visible code.
+     */
+    auto *raw = hwClient_.get();
+    lock.unlock();
+
+    auto impl = sptr<HybrisCameraDeviceVdiImpl>::MakeSptr(
+        raw, cameraId, std::move(hwDev), callbackObj);
+    if (impl == nullptr) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): VDI device alloc failed",
+                        cameraId.c_str());
+        return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
+    }
+    device = impl;
+    CAMERA_VDI_LOGI("OpenCamera(%{public}s → %{public}s): device wrapper "
+                    "constructed (halium handle=%{public}u)",
+                    cameraId.c_str(), haliumName.c_str(), deviceHandle);
+    return VDI::Camera::V1_0::NO_ERROR;
 }
 
 int32_t HybrisCameraHostVdiImpl::SetFlashlight(const std::string &cameraId, bool isEnable)

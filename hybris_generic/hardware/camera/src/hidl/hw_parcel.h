@@ -153,6 +153,14 @@ public:
          */
         bool ReadHidlStringVec(std::vector<std::string> *out);
 
+        /*
+         * Read a hidl_vec<uint8_t> at the current cursor.  Two
+         * binder_buffer_objects: HidlVec descriptor in SG, then the
+         * raw byte array also in SG.  We copy the bytes out so the
+         * result outlives Reply.
+         */
+        bool ReadHidlVecUint8(std::vector<uint8_t> *out);
+
         /* Skip n raw bytes; used by the (rare) caller that knows the
          * wire shape and just wants to seek past padding. */
         bool Skip(size_t n);

@@ -150,7 +150,35 @@ HwBinderClient::Result HwBinderClient::Transact(uint32_t handle,
                         errno);
         return Result::IoctlFailed;
     }
-    return ParseReplies(readBuf, bwr.read_consumed, reply);
+
+    /*
+     * Pump the read side until we see a terminal reply.  Mirrors
+     * AOSP IPCThreadState::waitForResponse — the first BWR may
+     * return only BR_NOOP + BR_TRANSACTION_COMPLETE if the remote
+     * end takes a while to produce the actual BR_REPLY (e.g.
+     * getCameraDeviceInterface_V3_x has to instantiate a new
+     * BnHwCameraDevice on the HAL side).  Without this loop fast
+     * RPCs work but anything that bounces through dlopen on the
+     * far side comes back as Result::Truncated.
+     */
+    for (;;) {
+        Result rc = ParseReplies(readBuf, bwr.read_consumed, reply);
+        if (rc != Result::Truncated) {
+            return rc;
+        }
+        binder_write_read bwr2 = {};
+        bwr2.read_size   = readBuf.size();
+        bwr2.read_buffer = reinterpret_cast<uintptr_t>(readBuf.data());
+        if (ioctl(fd_, BINDER_WRITE_READ, &bwr2) < 0) {
+            CAMERA_VDI_LOGE("BINDER_WRITE_READ (drain): errno=%{public}d",
+                            errno);
+            return Result::IoctlFailed;
+        }
+        if (bwr2.read_consumed == 0) {
+            return Result::Truncated;
+        }
+        bwr.read_consumed = bwr2.read_consumed;
+    }
 }
 
 HwBinderClient::Reply::Reply(Reply &&o) noexcept

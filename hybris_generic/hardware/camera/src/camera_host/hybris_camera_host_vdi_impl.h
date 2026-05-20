@@ -84,6 +84,14 @@ private:
      * binder handle without re-resolving via hwservicemanager. */
     std::unique_ptr<Hidl::HwBinderClient>    hwClient_;
     std::unique_ptr<Hidl::HwCameraProvider>  hwProvider_;
+
+    /*
+     * Halium HIDL camera IDs as returned by getCameraIdList; index
+     * matches cameraIds_.  Stored so OpenCamera can map an OHOS-side
+     * vendorId ("0"/"1"/"2") back to its FQ Halium name (e.g.
+     * "device@3.6/internal/0") for getCameraDeviceInterface_V3_x.
+     */
+    std::vector<std::string>                 haliumCameraIds_;
 };
 
 } // namespace OHOS::Camera::Hybris

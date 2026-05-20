@@ -61,6 +61,22 @@ public:
     bool GetCameraIdList(int32_t *outHalStatus,
                          std::vector<std::string> *outCameraIds);
 
+    /*
+     * ICameraProvider::getCameraDeviceInterface_V3_x(string cameraDeviceName)
+     *     generates (Status, sp<ICameraDevice>)
+     *
+     * Resolves a fully-qualified camera device name (e.g.
+     * "device@3.6/internal/0") to an `ICameraDevice` proxy.  On success
+     * `outHandle` is set to the binder handle for the camera device and
+     * BC_ACQUIRE has already been issued by the underlying Reply parser
+     * (so caller owns one strong ref; release with BC_RELEASE or by
+     * letting the HwBinderClient teardown handle it).
+     */
+    bool GetCameraDeviceInterface(const std::string &cameraDeviceName,
+                                  int32_t *outHalStatus,
+                                  uint32_t *outHandle,
+                                  bool *outIsNull);
+
     enum : uint32_t {
         TRANSACTION_setCallback                          = 1,
         TRANSACTION_getVendorTags                        = 2,
