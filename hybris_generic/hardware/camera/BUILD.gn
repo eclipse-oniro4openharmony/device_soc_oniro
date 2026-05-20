@@ -23,7 +23,102 @@ import("//drivers/hdf_core/adapter/uhdf2/uhdf.gni")
 # full design.
 
 group("camera_host_model") {
-  deps = [ ":libcamera_host_vdi_impl" ]
+  deps = [
+    ":binder_smoke",
+    ":camera_hidl_smoke",
+    ":hidl_ping",
+    ":libcamera_host_vdi_impl",
+  ]
+}
+
+# ─── N12.5.2 — pure-musl HIDL ping smoke ───────────────────────────────────
+#
+# Inline minimal HIDL transaction: BC_TRANSACTION_SG → handle 0
+# (hwservicemanager) with method code 0xff000006 (IBase::ping).  Validates
+# our hand-rolled HwParcel + binder_transaction_data_sg encoding before
+# the full transport library lands.
+
+ohos_executable("hidl_ping") {
+  sources = [ "tools/hidl_ping.cpp" ]
+
+  include_dirs = [
+    "include",
+    "src",
+  ]
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=invalid-offsetof",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
+# ─── N12.5.1 — direct hwbinder smoke test ──────────────────────────────────
+#
+# Standalone executable that opens /dev/hwbinder + /dev/binder + /dev/vndbinder
+# from an OHOS-side musl process and exercises BINDER_VERSION /
+# BINDER_SET_MAX_THREADS / mmap.  Pre-flight check for the pure-musl HIDL
+# transport path (Option ζ in phase_n12_camera.md § N12.5).  No libhybris
+# dependency.
+
+ohos_executable("binder_smoke") {
+  sources = [ "tools/binder_smoke.cpp" ]
+
+  include_dirs = [ "include" ]
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
+# ─── N12.5.0 — libhybris HIDL smoke test ───────────────────────────────────
+#
+# Standalone executable that hybris_dlopens Halium's libhidlbase and the
+# camera-provider HIDL .so from an OHOS-side process.  Pre-flight check
+# for the bionic-side shim that N12.5.1+ build on top of.  Run from device
+# shell: `camera_hidl_smoke`.
+
+ohos_executable("camera_hidl_smoke") {
+  sources = [ "tools/camera_hidl_smoke.cpp" ]
+
+  include_dirs = [
+    "include",
+    "//third_party/libhybris/hybris/include",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/common:libhybris-common",
+  ]
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
 }
 
 ohos_shared_library("libcamera_host_vdi_impl") {
