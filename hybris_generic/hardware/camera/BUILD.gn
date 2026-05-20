@@ -1,0 +1,70 @@
+# Copyright (c) 2026 Oniro Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+import("//drivers/hdf_core/adapter/uhdf2/uhdf.gni")
+
+# ─── Camera Host VDI (libhybris ICameraProvider wrapper) ────────────────────
+#
+# Loaded by the OHOS camera HDF host (libcamera_host_service_1.0.z.so) via
+# HdfLoadVdi() from the entry in
+# vendor/oniro/hybris_generic/hdf_config/uhdf/camera/hdi_impl/camera_host_config.hcs.
+# See device/board/oniro/docs/hybris_generic/phase_n12_camera.md for the
+# full design.
+
+group("camera_host_model") {
+  deps = [ ":libcamera_host_vdi_impl" ]
+}
+
+ohos_shared_library("libcamera_host_vdi_impl") {
+  sources = [
+    "src/camera_host/hybris_camera_host_vdi_impl.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "src/camera_host",
+    "//drivers/peripheral/camera/vdi_base/interfaces",
+    "//drivers/peripheral/camera/vdi_base/interfaces/v1_0",
+    "//drivers/peripheral/camera/vdi_base/common/include",
+    "//drivers/peripheral/camera/utils/event",
+    "//drivers/peripheral/camera/interfaces/include",
+    "//drivers/interface/camera/v1_0",
+    "//drivers/interface/camera/metadata/include",
+    "//drivers/hdf_core/interfaces/inner_api/host/uhdf",
+  ]
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_camera:libbuffer_producer_sequenceable_1.0",
+    "drivers_interface_camera:metadata",
+    "graphic_surface:buffer_handle",
+    "graphic_surface:surface",
+    "hdf_core:libhdf_utils",
+    "hdf_core:libhdi",
+    "hilog:libhilog",
+    "ipc:ipc_single",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=#warnings",
+  ]
+
+  output_name = "libcamera_host_vdi_impl_1.0"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  innerapi_tags = [ "passthrough" ]
+  part_name = "hybris_generic_soc"
+}
