@@ -42,6 +42,7 @@ class HwBinderClient;
 class HwBinderServer;
 class HwCameraDevice;
 class HwCameraDeviceCallback;
+class HwCameraDeviceSession;
 } // namespace Hidl
 
 using OHOS::VDI::Camera::V1_0::ICameraDeviceVdi;
@@ -106,9 +107,8 @@ private:
     std::unique_ptr<Hidl::HwBinderServer>          binderServer_;
     std::unique_ptr<Hidl::HwCameraDeviceCallback>  hwCallback_;
 
-    /* Halium ICameraDeviceSession handle (set by EnsureHaliumSessionOpen). */
-    uint32_t                                       sessionHandle_ = 0;
-    bool                                           sessionOpened_ = false;
+    /* Halium ICameraDeviceSession proxy (set by EnsureHaliumSessionOpen). */
+    std::unique_ptr<Hidl::HwCameraDeviceSession>   session_;
 };
 
 } // namespace OHOS::Camera::Hybris

@@ -45,6 +45,7 @@ hidl_transport_sources = [
   "src/hidl/hw_binder_server.cpp",
   "src/hidl/hw_camera_device.cpp",
   "src/hidl/hw_camera_device_callback.cpp",
+  "src/hidl/hw_camera_device_session.cpp",
   "src/hidl/hw_camera_provider.cpp",
   "src/hidl/hw_parcel.cpp",
   "src/hidl/hw_service_manager.cpp",

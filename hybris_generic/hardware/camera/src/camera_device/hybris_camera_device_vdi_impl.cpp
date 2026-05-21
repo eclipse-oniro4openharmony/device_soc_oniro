@@ -11,6 +11,7 @@
 #include "hidl/hw_binder_server.h"
 #include "hidl/hw_camera_device.h"
 #include "hidl/hw_camera_device_callback.h"
+#include "hidl/hw_camera_device_session.h"
 #include "hybris_camera_log.h"
 #include "hybris_stream_operator_vdi_impl.h"
 #include "v1_0/vdi_types.h"
@@ -73,7 +74,7 @@ HybrisCameraDeviceVdiImpl::~HybrisCameraDeviceVdiImpl()
 int32_t HybrisCameraDeviceVdiImpl::EnsureHaliumSessionOpen()
 {
     /* Caller holds mutex_. */
-    if (sessionOpened_) {
+    if (session_ != nullptr) {
         return V::NO_ERROR;
     }
     if (device_ == nullptr) {
@@ -85,23 +86,45 @@ int32_t HybrisCameraDeviceVdiImpl::EnsureHaliumSessionOpen()
         return V::DEVICE_ERROR;
     }
     int32_t halStatus = -1;
+    uint32_t sessionHandle = 0;
     bool isNull = true;
     if (!device_->Open(hwCallback_->Key(), &halStatus,
-                       &sessionHandle_, &isNull)) {
+                       &sessionHandle, &isNull)) {
         CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): Open failed "
                         "(halStatus=%{public}d)",
                         ohosCameraId_.c_str(), halStatus);
         return V::DEVICE_ERROR;
     }
-    if (isNull || sessionHandle_ == 0) {
+    if (isNull || sessionHandle == 0) {
         CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): null session",
                         ohosCameraId_.c_str());
         return V::DEVICE_ERROR;
     }
-    sessionOpened_ = true;
+    session_ = std::make_unique<Hidl::HwCameraDeviceSession>(client_,
+                                                              sessionHandle);
     CAMERA_VDI_LOGI("EnsureHaliumSessionOpen(%{public}s): "
                     "ICameraDeviceSession handle=%{public}u",
-                    ohosCameraId_.c_str(), sessionHandle_);
+                    ohosCameraId_.c_str(), sessionHandle);
+
+    /*
+     * Liveness check: pull a default PREVIEW request template.  This
+     * is a small constructDefaultRequestSettings call (V3.2 TX 1)
+     * that returns ~hundreds of bytes of camera_metadata_t.  If it
+     * succeeds, the session is responsive and we can attempt
+     * configureStreams_3_4 in N12.6.1b.
+     */
+    int32_t tmplStatus = -1;
+    std::vector<uint8_t> tmplBlob;
+    if (session_->ConstructDefaultRequestSettings(
+            Hidl::HwCameraDeviceSession::TEMPLATE_PREVIEW,
+            &tmplStatus, &tmplBlob)) {
+        CAMERA_VDI_LOGI("PREVIEW template: %{public}zu bytes (session live)",
+                        tmplBlob.size());
+    } else {
+        CAMERA_VDI_LOGW("PREVIEW template fetch failed (halStatus=%{public}d)",
+                        tmplStatus);
+    }
+
     return V::NO_ERROR;
 }
 
