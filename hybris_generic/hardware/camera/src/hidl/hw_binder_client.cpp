@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <utility>
 
+#include "hw_binder_server.h"
 #include "hybris_camera_log.h"
 
 namespace OHOS::Camera::Hybris::Hidl {
@@ -235,6 +236,98 @@ HwBinderClient::Result HwBinderClient::ParseReplies(
             case (uint32_t)BR_NOOP:
             case (uint32_t)BR_TRANSACTION_COMPLETE:
             case (uint32_t)BR_SPAWN_LOOPER:
+                continue;
+            case (uint32_t)BR_INCREFS: {
+                /*
+                 * Halium acquired a reference to one of our local
+                 * binder objects (the callback passed to
+                 * ICameraDevice::open()).  Acknowledge by sending
+                 * BC_INCREFS_DONE — without it the kernel keeps
+                 * delivering BR_INCREFS and the open() reply never
+                 * arrives.
+                 */
+                if (off + sizeof(binder_ptr_cookie) > consumed) {
+                    return Result::Truncated;
+                }
+                binder_ptr_cookie pc;
+                memcpy(&pc, readBuf.data() + off, sizeof(pc));
+                off += sizeof(pc);
+                struct __attribute__((packed)) {
+                    uint32_t cmd;
+                    binder_ptr_cookie pc;
+                } done = { (uint32_t)BC_INCREFS_DONE, pc };
+                binder_write_read bwrAck = {};
+                bwrAck.write_size = sizeof(done);
+                bwrAck.write_buffer = reinterpret_cast<uintptr_t>(&done);
+                ioctl(fd_, BINDER_WRITE_READ, &bwrAck);
+                continue;
+            }
+            case (uint32_t)BR_ACQUIRE: {
+                if (off + sizeof(binder_ptr_cookie) > consumed) {
+                    return Result::Truncated;
+                }
+                binder_ptr_cookie pc;
+                memcpy(&pc, readBuf.data() + off, sizeof(pc));
+                off += sizeof(pc);
+                struct __attribute__((packed)) {
+                    uint32_t cmd;
+                    binder_ptr_cookie pc;
+                } done = { (uint32_t)BC_ACQUIRE_DONE, pc };
+                binder_write_read bwrAck = {};
+                bwrAck.write_size = sizeof(done);
+                bwrAck.write_buffer = reinterpret_cast<uintptr_t>(&done);
+                ioctl(fd_, BINDER_WRITE_READ, &bwrAck);
+                continue;
+            }
+            case (uint32_t)BR_RELEASE:
+            case (uint32_t)BR_DECREFS:
+                /* Halium dropped a ref.  No reply needed; just skip
+                 * the binder_ptr_cookie payload. */
+                if (off + sizeof(binder_ptr_cookie) > consumed) {
+                    return Result::Truncated;
+                }
+                off += sizeof(binder_ptr_cookie);
+                continue;
+            case (uint32_t)BR_TRANSACTION: {
+                /*
+                 * Nested call: while the client thread is waiting
+                 * for BR_REPLY from a Halium method (e.g.
+                 * ICameraDevice::open()), Halium calls back into
+                 * our process — kernel routes the incoming
+                 * BR_TRANSACTION to the same thread to avoid
+                 * deadlock.  Dispatch it to the registered server
+                 * (the LocalBinder lookup + reply-build path).
+                 */
+                if (off + sizeof(binder_transaction_data) > consumed) {
+                    return Result::Truncated;
+                }
+                binder_transaction_data td;
+                memcpy(&td, readBuf.data() + off, sizeof(td));
+                off += sizeof(td);
+                if (server_ != nullptr) {
+                    server_->DispatchTransaction(td);
+                } else {
+                    CAMERA_VDI_LOGE("BR_TRANSACTION with no server "
+                                    "registered (cookie=0x%{public}lx)",
+                                    (unsigned long)td.cookie);
+                    struct __attribute__((packed)) {
+                        uint32_t cmd;
+                        uint64_t ptr;
+                    } freeBuf = {
+                        (uint32_t)BC_FREE_BUFFER, td.data.ptr.buffer
+                    };
+                    binder_write_read bwrFree = {};
+                    bwrFree.write_size = sizeof(freeBuf);
+                    bwrFree.write_buffer = reinterpret_cast<uintptr_t>(&freeBuf);
+                    ioctl(fd_, BINDER_WRITE_READ, &bwrFree);
+                }
+                continue;
+            }
+            case (uint32_t)BR_DEAD_BINDER:
+                if (off + sizeof(binder_uintptr_t) > consumed) {
+                    return Result::Truncated;
+                }
+                off += sizeof(binder_uintptr_t);
                 continue;
             case (uint32_t)BR_REPLY: {
                 if (off + sizeof(binder_transaction_data) > consumed) {

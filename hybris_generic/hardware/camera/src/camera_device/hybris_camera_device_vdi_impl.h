@@ -39,7 +39,9 @@ namespace OHOS::Camera::Hybris {
 
 namespace Hidl {
 class HwBinderClient;
+class HwBinderServer;
 class HwCameraDevice;
+class HwCameraDeviceCallback;
 } // namespace Hidl
 
 using OHOS::VDI::Camera::V1_0::ICameraDeviceVdi;
@@ -76,6 +78,13 @@ public:
     int32_t Close() override;
 
 private:
+    /*
+     * Lazy: open the Halium ICameraDeviceSession on the first
+     * GetStreamOperator call.  Returns 0 on success / on already-
+     * open; non-zero VdiCamRetCode on failure.
+     */
+    int32_t EnsureHaliumSessionOpen();
+
     std::mutex                              mutex_;
     /* Borrowed pointer; the stream operator (N12.6) uses this fd to
      * talk to the Halium ICameraDeviceSession after open(). */
@@ -88,6 +97,18 @@ private:
     std::vector<int32_t>                    enabledResults_;
     std::vector<uint8_t>                    latestSettings_;
     bool                                    closed_ = false;
+
+    /*
+     * Server side: HwBinderServer worker thread + the local
+     * BnHwCameraDeviceCallback impl Halium calls back through.
+     * Owned by the device so it dies with the device.
+     */
+    std::unique_ptr<Hidl::HwBinderServer>          binderServer_;
+    std::unique_ptr<Hidl::HwCameraDeviceCallback>  hwCallback_;
+
+    /* Halium ICameraDeviceSession handle (set by EnsureHaliumSessionOpen). */
+    uint32_t                                       sessionHandle_ = 0;
+    bool                                           sessionOpened_ = false;
 };
 
 } // namespace OHOS::Camera::Hybris

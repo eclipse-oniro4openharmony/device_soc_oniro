@@ -143,15 +143,20 @@ enum binder_driver_return_protocol {
 };
 
 enum binder_driver_command_protocol {
-    BC_TRANSACTION    = _IOW('c', 0,  binder_transaction_data),
-    BC_REPLY          = _IOW('c', 1,  binder_transaction_data),
-    BC_FREE_BUFFER    = _IOW('c', 3,  binder_uintptr_t),
-    BC_INCREFS        = _IOW('c', 4,  uint32_t),
-    BC_ACQUIRE        = _IOW('c', 5,  uint32_t),
-    BC_RELEASE        = _IOW('c', 6,  uint32_t),
-    BC_DECREFS        = _IOW('c', 7,  uint32_t),
-    BC_ENTER_LOOPER   = _IO ('c', 12),
-    BC_TRANSACTION_SG = _IOW('c', 17, binder_transaction_data_sg),
+    BC_TRANSACTION       = _IOW('c', 0,  binder_transaction_data),
+    BC_REPLY             = _IOW('c', 1,  binder_transaction_data),
+    BC_FREE_BUFFER       = _IOW('c', 3,  binder_uintptr_t),
+    BC_INCREFS           = _IOW('c', 4,  uint32_t),
+    BC_ACQUIRE           = _IOW('c', 5,  uint32_t),
+    BC_RELEASE           = _IOW('c', 6,  uint32_t),
+    BC_DECREFS           = _IOW('c', 7,  uint32_t),
+    BC_INCREFS_DONE      = _IOW('c', 8,  binder_ptr_cookie),
+    BC_ACQUIRE_DONE      = _IOW('c', 9,  binder_ptr_cookie),
+    BC_REGISTER_LOOPER   = _IO ('c', 11),
+    BC_ENTER_LOOPER      = _IO ('c', 12),
+    BC_EXIT_LOOPER       = _IO ('c', 13),
+    BC_TRANSACTION_SG    = _IOW('c', 17, binder_transaction_data_sg),
+    BC_REPLY_SG          = _IOW('c', 18, binder_transaction_data_sg),
 };
 
 /*

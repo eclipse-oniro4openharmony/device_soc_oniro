@@ -46,6 +46,23 @@ public:
     bool GetCameraCharacteristics(int32_t *outHalStatus,
                                   std::vector<uint8_t> *outBlob);
 
+    /*
+     * ICameraDevice::open(callback) generates (Status, sp<ICameraDeviceSession>)
+     *
+     * `callbackLocalKey` is the LocalBinder key (== LocalBinder*) that
+     * a previously-Started HwBinderServer has registered.  Halium uses
+     * that key as the binder handle when delivering processCaptureResult /
+     * notify back to our process.
+     *
+     * On success `outSessionHandle` is the binder handle for the
+     * Halium ICameraDeviceSession (already auto-BC_ACQUIRE'd by
+     * ParseReplies).
+     */
+    bool Open(uintptr_t callbackLocalKey,
+              int32_t *outHalStatus,
+              uint32_t *outSessionHandle,
+              bool *outIsNull);
+
     enum : uint32_t {
         TRANSACTION_getResourceCost            = 1,
         TRANSACTION_getCameraCharacteristics   = 2,

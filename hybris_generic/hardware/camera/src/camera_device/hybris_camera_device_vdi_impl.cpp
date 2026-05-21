@@ -8,7 +8,9 @@
 #include <algorithm>
 
 #include "hidl/hw_binder_client.h"
+#include "hidl/hw_binder_server.h"
 #include "hidl/hw_camera_device.h"
+#include "hidl/hw_camera_device_callback.h"
 #include "hybris_camera_log.h"
 #include "hybris_stream_operator_vdi_impl.h"
 #include "v1_0/vdi_types.h"
@@ -30,12 +32,77 @@ HybrisCameraDeviceVdiImpl::HybrisCameraDeviceVdiImpl(
                     "(halium handle=%{public}u)",
                     ohosCameraId_.c_str(),
                     device_ ? device_->Handle() : 0);
+
+    /*
+     * Spin up the local binder server.  Halium calls back into us
+     * through this for processCaptureResult / notify after
+     * ICameraDevice::open() — so the server MUST be live BEFORE
+     * EnsureHaliumSessionOpen issues the open() transaction.
+     *
+     * Also wire the client to forward inline BR_TRANSACTIONs that
+     * arrive during a client-thread BWR (nested-call pattern: the
+     * kernel routes Halium's callback to the same thread that's
+     * waiting on the open() reply, to avoid deadlock).
+     */
+    if (client_ != nullptr) {
+        binderServer_ = std::make_unique<Hidl::HwBinderServer>(client_->Fd());
+        hwCallback_   = std::make_unique<Hidl::HwCameraDeviceCallback>();
+        binderServer_->Register(hwCallback_.get());
+        if (!binderServer_->Start()) {
+            CAMERA_VDI_LOGE("Failed to start HwBinderServer for %{public}s",
+                            ohosCameraId_.c_str());
+            binderServer_.reset();
+            hwCallback_.reset();
+        } else {
+            client_->SetServer(binderServer_.get());
+        }
+    }
 }
 
 HybrisCameraDeviceVdiImpl::~HybrisCameraDeviceVdiImpl()
 {
     CAMERA_VDI_LOGI("HybrisCameraDeviceVdiImpl dtor for %{public}s",
                     ohosCameraId_.c_str());
+    if (client_ != nullptr) {
+        client_->SetServer(nullptr);
+    }
+    binderServer_.reset();
+    hwCallback_.reset();
+}
+
+int32_t HybrisCameraDeviceVdiImpl::EnsureHaliumSessionOpen()
+{
+    /* Caller holds mutex_. */
+    if (sessionOpened_) {
+        return V::NO_ERROR;
+    }
+    if (device_ == nullptr) {
+        return V::CAMERA_CLOSED;
+    }
+    if (hwCallback_ == nullptr || binderServer_ == nullptr) {
+        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): no callback "
+                        "infrastructure", ohosCameraId_.c_str());
+        return V::DEVICE_ERROR;
+    }
+    int32_t halStatus = -1;
+    bool isNull = true;
+    if (!device_->Open(hwCallback_->Key(), &halStatus,
+                       &sessionHandle_, &isNull)) {
+        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): Open failed "
+                        "(halStatus=%{public}d)",
+                        ohosCameraId_.c_str(), halStatus);
+        return V::DEVICE_ERROR;
+    }
+    if (isNull || sessionHandle_ == 0) {
+        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): null session",
+                        ohosCameraId_.c_str());
+        return V::DEVICE_ERROR;
+    }
+    sessionOpened_ = true;
+    CAMERA_VDI_LOGI("EnsureHaliumSessionOpen(%{public}s): "
+                    "ICameraDeviceSession handle=%{public}u",
+                    ohosCameraId_.c_str(), sessionHandle_);
+    return V::NO_ERROR;
 }
 
 int32_t HybrisCameraDeviceVdiImpl::GetStreamOperator(
@@ -51,11 +118,16 @@ int32_t HybrisCameraDeviceVdiImpl::GetStreamOperator(
         return V::CAMERA_CLOSED;
     }
     /*
-     * N12.6.0: return a logging stub that accepts CreateStreams/Commit/
-     * Attach so we can see what shape the OHOS framework requests
-     * on real hardware.  Capture still returns METHOD_NOT_SUPPORTED
-     * (preview frames not delivered until N12.7 buffer interop).
+     * N12.6.1: lazily open the Halium ICameraDeviceSession on first
+     * GetStreamOperator call.  This is the gating step for actual
+     * frame delivery — without a session handle there's no
+     * configureStreams to bridge.
      */
+    int32_t openRc = EnsureHaliumSessionOpen();
+    if (openRc != V::NO_ERROR) {
+        return openRc;
+    }
+
     auto op = sptr<HybrisStreamOperatorVdiImpl>::MakeSptr(
         client_, device_.get(), ohosCameraId_, callbackObj);
     if (op == nullptr) {

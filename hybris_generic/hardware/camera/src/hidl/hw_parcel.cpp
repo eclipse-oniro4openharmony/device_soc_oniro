@@ -97,6 +97,31 @@ void HwParcel::WriteInterfaceToken(const char *iface)
     memcpy(data_.data() + pos, iface, len);
 }
 
+void HwParcel::WriteFlatBinder(uintptr_t localKey)
+{
+    /*
+     * Inline flat_binder_object (24 bytes) with no SG.  4-byte
+     * aligned in main data (same alignment quirk as ReadFlatBinder /
+     * binder_buffer_object — libhwbinder primitives are 4-aligned,
+     * not 8).  Offset must be recorded in the offsets array so the
+     * kernel knows to translate (BINDER_TYPE_BINDER → BINDER_TYPE_HANDLE
+     * on the receiver side).
+     *
+     * We use the local-binder pointer as both `binder` and `cookie`
+     * — keeps lookup in HwBinderServer::HandleTransaction trivial.
+     */
+    AlignTo(4);
+    flat_binder_object fbo = {};
+    fbo.hdr.type = BINDER_TYPE_BINDER;
+    fbo.flags    = 0x10 | TF_ACCEPT_FDS;   /* FLAT_BINDER_FLAG_ACCEPTS_FDS */
+    fbo.binder   = static_cast<binder_uintptr_t>(localKey);
+    fbo.cookie   = static_cast<binder_uintptr_t>(localKey);
+    size_t off = data_.size();
+    data_.resize(off + sizeof(fbo));
+    memcpy(data_.data() + off, &fbo, sizeof(fbo));
+    offsets_.push_back(off);
+}
+
 void HwParcel::WriteHidlString(const std::string &s)
 {
     /*

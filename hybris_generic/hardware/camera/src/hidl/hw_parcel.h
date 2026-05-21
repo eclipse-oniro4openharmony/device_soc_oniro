@@ -68,6 +68,22 @@ public:
     void WriteBool(bool v)       { uint8_t b = v ? 1 : 0; WriteRaw(&b, 1, 1); }
 
     /*
+     * Write a flat_binder_object representing a local binder.  Used
+     * when passing an `sp<IFoo>` callback argument to a remote method
+     * (e.g. ICameraDevice::open(callback)).  The kernel records the
+     * (ptr, cookie) pair in its node table; the remote will receive
+     * a BINDER_TYPE_HANDLE referring back to our process, and any
+     * BC_TRANSACTION it issues with that handle will land in our
+     * HwBinderServer worker thread as BR_TRANSACTION.
+     *
+     * `localKey` is the LocalBinder* (or any unique uintptr_t) we use
+     * as both `binder` and `cookie` in the kernel object.
+     *
+     * 4-byte aligned, NOT 8 — same as ReadFlatBinder's parsing.
+     */
+    void WriteFlatBinder(uintptr_t localKey);
+
+    /*
      * Write a HIDL hidl_string into both buffers:
      *   - In `sg_`: a 16-byte HidlString struct {buffer,size,owns,pad}
      *     followed by the string bytes (NUL-terminated, 8-byte padded).

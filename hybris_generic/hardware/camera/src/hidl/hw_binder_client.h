@@ -23,6 +23,8 @@
 
 namespace OHOS::Camera::Hybris::Hidl {
 
+class HwBinderServer;
+
 class HwBinderClient {
 public:
     enum class Result {
@@ -136,10 +138,20 @@ public:
 
     int Fd() const { return fd_; }
 
+    /*
+     * Register a HwBinderServer so the client can dispatch any
+     * BR_TRANSACTION that arrives on its read path (nested call:
+     * the remote calls back into us while we're waiting for our
+     * own BR_REPLY).  Without this, an incoming callback during
+     * the open() RPC surfaces as `Truncated` / `BinderError`.
+     */
+    void SetServer(HwBinderServer *server) { server_ = server; }
+
 private:
     int    fd_ = -1;
     void  *mapped_ = nullptr;
     size_t mapSize_ = 256 * 1024;
+    HwBinderServer *server_ = nullptr;
 
     bool SendCommand(const void *buf, size_t len);
     bool EnterLooper();
