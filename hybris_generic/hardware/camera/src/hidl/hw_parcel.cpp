@@ -97,6 +97,55 @@ void HwParcel::WriteInterfaceToken(const char *iface)
     memcpy(data_.data() + pos, iface, len);
 }
 
+size_t HwParcel::WriteBlob(const void *data, size_t length,
+                           size_t parentBoIdx, size_t parentOffset)
+{
+    auto blob = std::make_unique<std::vector<uint8_t>>(length);
+    if (length > 0 && data != nullptr) {
+        memcpy(blob->data(), data, length);
+    }
+    binder_buffer_object bo = {};
+    bo.hdr.type = BINDER_TYPE_PTR;
+    bo.buffer   = reinterpret_cast<uintptr_t>(blob->data());
+    bo.length   = length;
+    if (parentBoIdx != static_cast<size_t>(-1)) {
+        bo.flags         = BINDER_BUFFER_FLAG_HAS_PARENT;
+        bo.parent        = parentBoIdx;
+        bo.parent_offset = parentOffset;
+    }
+    size_t idx = AppendBufferObject(bo);
+    GrowSg(length);
+    ownedBlobs_.push_back(std::move(blob));
+    return idx;
+}
+
+size_t HwParcel::WriteHidlVecBlob(const void *array, size_t count,
+                                   size_t elemSize)
+{
+    /*
+     * Stage a 16-byte HidlVec descriptor with placeholder buffer
+     * pointer (kernel rewrites it).  Then stage the element array
+     * with HAS_PARENT pointing at the descriptor's buffer field
+     * (offset 0).
+     */
+    struct HidlVecDescriptor {
+        uint64_t buffer;
+        uint32_t size;
+        uint8_t  owns;
+        uint8_t  pad[3];
+    };
+    static_assert(sizeof(HidlVecDescriptor) == 16, "HidlVec is 16 bytes");
+
+    HidlVecDescriptor desc = {};
+    desc.buffer = 0;   /* kernel fills in */
+    desc.size   = static_cast<uint32_t>(count);
+    desc.owns   = 0;
+
+    size_t descIdx = WriteBlob(&desc, sizeof(desc));
+    WriteBlob(array, count * elemSize, descIdx, 0 /* buffer-field offset */);
+    return descIdx;
+}
+
 void HwParcel::WriteFlatBinder(uintptr_t localKey)
 {
     /*
@@ -172,6 +221,22 @@ bool HwParcel::Reader::Skip(size_t n)
 {
     if (cursor_ + n > dataSize_) return false;
     cursor_ += n;
+    return true;
+}
+
+bool HwParcel::Reader::ReadBufferObject(uint64_t *outBuffer,
+                                         uint64_t *outLength)
+{
+    /* binder_buffer_object is 40 bytes; same 4-byte alignment as
+     * flat_binder_object (libhwbinder primitives are 4-aligned). */
+    cursor_ = Round(cursor_, 4);
+    if (cursor_ + sizeof(binder_buffer_object) > dataSize_) return false;
+    binder_buffer_object bo;
+    memcpy(&bo, data_ + cursor_, sizeof(bo));
+    cursor_ += sizeof(bo);
+    if (bo.hdr.type != (uint32_t)BINDER_TYPE_PTR) return false;
+    *outBuffer = bo.buffer;
+    *outLength = bo.length;
     return true;
 }
 

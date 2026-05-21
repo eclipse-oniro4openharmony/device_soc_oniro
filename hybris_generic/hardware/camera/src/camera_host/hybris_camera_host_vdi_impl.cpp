@@ -5,13 +5,13 @@
 
 #include "hybris_camera_host_vdi_impl.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 #include "camera_device/hybris_camera_device_vdi_impl.h"
-#include "hidl/hw_binder_client.h"
-#include "hidl/hw_camera_device.h"
-#include "hidl/hw_camera_provider.h"
-#include "hidl/hw_service_manager.h"
+#include "droidmedia/droidmedia_loader.h"
 #include "hybris_camera_ability.h"
 #include "hybris_camera_log.h"
 #include "v1_0/vdi_types.h"
@@ -30,99 +30,65 @@ HybrisCameraHostVdiImpl::~HybrisCameraHostVdiImpl()
     CAMERA_VDI_LOGI("HybrisCameraHostVdiImpl dtor");
 }
 
-bool HybrisCameraHostVdiImpl::LoadCameraIdsFromHalium()
+bool HybrisCameraHostVdiImpl::LoadCamerasFromDroidMedia()
 {
-    auto client = std::make_unique<Hidl::HwBinderClient>();
-    auto rc = client->Open("/dev/hwbinder");
-    if (rc != Hidl::HwBinderClient::Result::Ok) {
-        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: HwBinderClient::Open "
-                        "failed (%{public}s)",
-                        Hidl::HwBinderClient::ResultName(rc));
+    auto &loader = Droid::Loader::Get();
+    if (!loader.Ready()) {
+        CAMERA_VDI_LOGE("LoadCamerasFromDroidMedia: Droid::Loader not ready");
+        return false;
+    }
+    int n = loader.GetNumberOfCameras();
+    if (n <= 0) {
+        CAMERA_VDI_LOGE("LoadCamerasFromDroidMedia: droid_media_camera_get_number_of_cameras "
+                        "returned %{public}d", n);
         return false;
     }
 
-    Hidl::HwServiceManager sm(client.get());
-    uint32_t handle = 0;
-    bool isNull = false;
-    constexpr const char *kProviderFq =
-        "android.hardware.camera.provider@2.6::ICameraProvider";
-    constexpr const char *kProviderInstance = "internal/0";
-    if (!sm.GetService(kProviderFq, kProviderInstance, &handle, &isNull) ||
-        isNull) {
-        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: GetService(%{public}s/%{public}s) "
-                        "failed (isNull=%{public}d)",
-                        kProviderFq, kProviderInstance, (int)isNull);
-        return false;
-    }
-
-    auto provider = std::make_unique<Hidl::HwCameraProvider>(client.get(),
-                                                              handle);
-    int32_t halStatus = -1;
-    std::vector<std::string> ids;
-    if (!provider->GetCameraIdList(&halStatus, &ids)) {
-        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: GetCameraIdList failed "
-                        "(halStatus=%{public}d)", halStatus);
-        return false;
-    }
-    if (halStatus != 0) {
-        CAMERA_VDI_LOGE("LoadCameraIdsFromHalium: HAL Status=%{public}d "
-                        "(non-OK)", halStatus);
-        return false;
-    }
-
-    /*
-     * Halium camera IDs come back fully-qualified, e.g.
-     *   "device@3.6/internal/0"
-     * For OHOS-side cameraId values we use the trailing token after
-     * the last '/' — the bare per-device instance name ("internal/0"
-     * → "0").  OpenCamera maps this back to the FQ name (stored in
-     * haliumCameraIds_, parallel-indexed with cameraIds_) when
-     * calling ICameraProvider::getCameraDeviceInterface_V3_x for the
-     * camera device proxy.
-     */
     cameraIds_.clear();
-    haliumCameraIds_.clear();
-    cameraIds_.reserve(ids.size());
-    haliumCameraIds_.reserve(ids.size());
-    for (const auto &fq : ids) {
-        size_t slash = fq.find_last_of('/');
-        cameraIds_.push_back(slash == std::string::npos
-                                 ? fq : fq.substr(slash + 1));
-        haliumCameraIds_.push_back(fq);
-    }
+    perCameraInfo_.clear();
+    cameraIds_.reserve(n);
+    perCameraInfo_.reserve(n);
 
     std::ostringstream summary;
-    for (size_t i = 0; i < ids.size(); ++i) {
+    for (int i = 0; i < n; ++i) {
+        DroidMediaCameraInfo info{};
+        if (!loader.GetInfo(&info, i)) {
+            CAMERA_VDI_LOGW("LoadCamerasFromDroidMedia: get_info(%{public}d) failed — skipping",
+                            i);
+            continue;
+        }
+        std::string id = std::to_string(i);
+        cameraIds_.push_back(id);
+        perCameraInfo_.push_back(PerCameraInfo{
+            .droidIndex  = i,
+            .facing      = info.facing,
+            .orientation = info.orientation,
+        });
         if (i) summary << ",";
-        summary << ids[i] << "→" << cameraIds_[i];
+        summary << id << "(facing=" << info.facing
+                << ",orient=" << info.orientation << ")";
     }
-    CAMERA_VDI_LOGI("LoadCameraIdsFromHalium: %{public}zu cameras: %{public}s",
+    if (cameraIds_.empty()) {
+        CAMERA_VDI_LOGE("LoadCamerasFromDroidMedia: every get_info call failed");
+        return false;
+    }
+    CAMERA_VDI_LOGI("LoadCamerasFromDroidMedia: %{public}zu cameras: %{public}s",
                     cameraIds_.size(), summary.str().c_str());
-
-    hwClient_   = std::move(client);
-    hwProvider_ = std::move(provider);
     return true;
 }
 
 int32_t HybrisCameraHostVdiImpl::Init()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    /*
-     * Bridge to Halium for the real list.  Falls back to the HCS
-     * "lcam001" placeholder if the libhybris transport can't reach
-     * Halium — keeps the HDF host startup non-fatal during early
-     * boot / pre-camerahalserver-ready windows.
-     */
-    if (!LoadCameraIdsFromHalium()) {
-        cameraIds_ = { "lcam001" };
-        fallback_ = true;
+    if (!LoadCamerasFromDroidMedia()) {
+        cameraIds_       = { "lcam001" };
+        perCameraInfo_   = { PerCameraInfo{} };
+        fallback_        = true;
         CAMERA_VDI_LOGW("VDI registered with fallback cameraIds=%{public}s",
                         cameraIds_[0].c_str());
         return VDI::Camera::V1_0::NO_ERROR;
     }
-
-    CAMERA_VDI_LOGI("VDI registered, %{public}zu Halium cameras",
+    CAMERA_VDI_LOGI("VDI registered, %{public}zu droidmedia cameras",
                     cameraIds_.size());
     return VDI::Camera::V1_0::NO_ERROR;
 }
@@ -132,16 +98,10 @@ int32_t HybrisCameraHostVdiImpl::SetCallback(const sptr<ICameraHostVdiCallback> 
     if (callbackObj == nullptr) {
         return VDI::Camera::V1_0::INVALID_ARGUMENT;
     }
-    /*
-     * Bind death recipient via the base-class helper.  When the OHOS
-     * framework callback dies (camera_service crash), the base class
-     * fires CloseAllCameras for us.
-     */
     int32_t rc = ICameraHostVdi::SetCallback(callbackObj);
     if (rc != VDI::Camera::V1_0::NO_ERROR) {
         CAMERA_VDI_LOGW("SetCallback death recipient registration failed rc=%{public}d", rc);
     }
-
     std::lock_guard<std::mutex> lock(mutex_);
     hostCallback_ = callbackObj;
     return VDI::Camera::V1_0::NO_ERROR;
@@ -158,15 +118,12 @@ int32_t HybrisCameraHostVdiImpl::GetCameraAbility(const std::string &cameraId,
                                                   std::vector<uint8_t> &cameraAbility)
 {
     /*
-     * The cameraId we get here is the post-slash suffix of the Halium
-     * HIDL camera id (see LoadCameraIdsFromHalium): "0" for the rear
-     * primary, "1" for the front, "2" for the rear wide.  We hand back
-     * a per-camera ability blob built programmatically — see
-     * hybris_camera_ability.cpp for the X23 profile table.
-     *
-     * Long-term replacement: bridge ICameraDevice::getCameraCharacteristics
-     * over HIDL and translate the Android camera_metadata_t to OHOS
-     * format.  Hand-rolling keeps N12.5.5+ unblocked.
+     * Hand-rolled ability blob per the X23 profile table — see
+     * hybris_camera_ability.cpp.  Future work: parse the
+     * droid_media_camera_get_parameters string to derive supported
+     * preview sizes / picture sizes / FPS ranges instead of
+     * hard-coding.  Orientation/facing already come from
+     * perCameraInfo_ populated at Init time.
      */
     if (!BuildCameraAbility(cameraId, cameraAbility)) {
         CAMERA_VDI_LOGE("GetCameraAbility(%{public}s): no profile",
@@ -174,6 +131,17 @@ int32_t HybrisCameraHostVdiImpl::GetCameraAbility(const std::string &cameraId,
         return VDI::Camera::V1_0::INVALID_ARGUMENT;
     }
     return VDI::Camera::V1_0::NO_ERROR;
+}
+
+const HybrisCameraHostVdiImpl::PerCameraInfo *
+HybrisCameraHostVdiImpl::FindInfo(const std::string &cameraId) const
+{
+    for (size_t i = 0; i < cameraIds_.size(); ++i) {
+        if (cameraIds_[i] == cameraId) {
+            return &perCameraInfo_[i];
+        }
+    }
+    return nullptr;
 }
 
 int32_t HybrisCameraHostVdiImpl::OpenCamera(const std::string &cameraId,
@@ -187,90 +155,77 @@ int32_t HybrisCameraHostVdiImpl::OpenCamera(const std::string &cameraId,
 
     std::unique_lock<std::mutex> lock(mutex_);
 
-    /*
-     * Map OHOS-side cameraId ("0"/"1"/"2") back to the FQ Halium
-     * camera device name we stashed in LoadCameraIdsFromHalium.
-     */
-    std::string haliumName;
-    for (size_t i = 0; i < cameraIds_.size(); ++i) {
-        if (cameraIds_[i] == cameraId) {
-            haliumName = haliumCameraIds_[i];
-            break;
-        }
+    if (fallback_) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): fallback mode "
+                        "(Droid::Loader bring-up failed at Init)",
+                        cameraId.c_str());
+        return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
     }
-    if (haliumName.empty()) {
-        CAMERA_VDI_LOGE("OpenCamera(%{public}s): no Halium FQ name",
+
+    const PerCameraInfo *info = FindInfo(cameraId);
+    if (info == nullptr || info->droidIndex < 0) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): unknown cameraId",
                         cameraId.c_str());
         return VDI::Camera::V1_0::INVALID_ARGUMENT;
     }
-    if (hwProvider_ == nullptr || hwClient_ == nullptr) {
-        CAMERA_VDI_LOGE("OpenCamera(%{public}s): HIDL provider unavailable "
-                        "(fallback mode)", cameraId.c_str());
-        return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
-    }
 
-    /*
-     * Bridge to Halium ICameraProvider::getCameraDeviceInterface_V3_x.
-     * The returned binder ref is auto-BC_ACQUIRE'd by ParseReplies in
-     * HwBinderClient (see N12.5.3a gotcha #4).
-     */
-    int32_t halStatus = -1;
-    uint32_t deviceHandle = 0;
-    bool isNull = true;
-    if (!hwProvider_->GetCameraDeviceInterface(haliumName, &halStatus,
-                                               &deviceHandle, &isNull)) {
-        CAMERA_VDI_LOGE("OpenCamera(%{public}s): GetCameraDeviceInterface "
-                        "failed (halStatus=%{public}d)",
-                        haliumName.c_str(), halStatus);
-        return VDI::Camera::V1_0::DEVICE_ERROR;
-    }
-    if (isNull || deviceHandle == 0) {
-        CAMERA_VDI_LOGE("OpenCamera(%{public}s): Halium returned null "
-                        "ICameraDevice", haliumName.c_str());
-        return VDI::Camera::V1_0::DEVICE_ERROR;
-    }
-
-    auto hwDev = std::make_unique<Hidl::HwCameraDevice>(hwClient_.get(),
-                                                         deviceHandle);
-
-    /*
-     * Sanity-pull camera characteristics so we know the device-side
-     * binder is alive and responding before handing the wrapper to
-     * the framework.  Discard the blob — N12.5.4 already serves a
-     * hand-rolled OHOS ability via GetCameraAbility; characteristic
-     * translation lands later.
-     */
-    std::vector<uint8_t> charsBlob;
-    int32_t charsStatus = -1;
-    if (hwDev->GetCameraCharacteristics(&charsStatus, &charsBlob)) {
-        CAMERA_VDI_LOGI("OpenCamera(%{public}s): characteristics OK, "
-                        "blob=%{public}zu bytes",
-                        haliumName.c_str(), charsBlob.size());
-    } else {
-        CAMERA_VDI_LOGW("OpenCamera(%{public}s): characteristics fetch "
-                        "failed (halStatus=%{public}d) — proceeding anyway",
-                        haliumName.c_str(), charsStatus);
-    }
-
-    /*
-     * Drop the host lock before constructing the device VDI — the
-     * device VDI may take its own internal lock and we don't want to
-     * hold two simultaneously across user-visible code.
-     */
-    auto *raw = hwClient_.get();
-    lock.unlock();
-
-    auto impl = sptr<HybrisCameraDeviceVdiImpl>::MakeSptr(
-        raw, cameraId, std::move(hwDev), callbackObj);
-    if (impl == nullptr) {
-        CAMERA_VDI_LOGE("OpenCamera(%{public}s): VDI device alloc failed",
+    auto &loader = Droid::Loader::Get();
+    if (!loader.Ready()) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): Droid::Loader not ready",
                         cameraId.c_str());
         return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
     }
+
+    DroidMediaCamera *cam = loader.Connect(info->droidIndex);
+    if (cam == nullptr) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): droid_media_camera_connect(%{public}d) "
+                        "returned NULL", cameraId.c_str(), info->droidIndex);
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+
+    /*
+     * Diagnostic: dump the Camera1 parameter string the HAL is willing
+     * to serve.  Knowing the supported preview-sizes / picture-sizes
+     * informs the CommitStreams set_parameters call later (and tells
+     * us when the HAL is too restrictive for the OHOS framework's
+     * 1280x720 preview request).
+     */
+    if (char *params = loader.GetParameters(cam)) {
+        /*
+         * Dump in 512-byte chunks so the full Camera1 parameter string
+         * (typically 2-4 KB on MTK HALs) survives hilog's per-line cap.
+         * Knowing the supported preview-size-values is essential for
+         * CommitStreams to pick a setParameters value the HAL accepts.
+         * Some HALs leak the returned pointer; some expect free() —
+         * upstream droidmedia returns strdup-allocated memory, so we
+         * free.
+         */
+        size_t len = std::strlen(params);
+        constexpr size_t kChunk = 512;
+        for (size_t off = 0; off < len; off += kChunk) {
+            size_t n = std::min(kChunk, len - off);
+            std::string chunk(params + off, n);
+            CAMERA_VDI_LOGI("OpenCamera(%{public}s): params[%{public}zu..%{public}zu] %{public}s",
+                            cameraId.c_str(), off, off + n, chunk.c_str());
+        }
+        std::free(params);
+    }
+
+    /* Drop the host lock before constructing the device wrapper (it
+     * may take its own internal lock; we don't want two held at once). */
+    lock.unlock();
+
+    auto impl = sptr<HybrisCameraDeviceVdiImpl>::MakeSptr(cameraId, cam, callbackObj);
+    if (impl == nullptr) {
+        CAMERA_VDI_LOGE("OpenCamera(%{public}s): VDI device alloc failed",
+                        cameraId.c_str());
+        loader.Disconnect(cam);
+        return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
+    }
     device = impl;
-    CAMERA_VDI_LOGI("OpenCamera(%{public}s → %{public}s): device wrapper "
-                    "constructed (halium handle=%{public}u)",
-                    cameraId.c_str(), haliumName.c_str(), deviceHandle);
+    CAMERA_VDI_LOGI("OpenCamera(%{public}s → droid idx=%{public}d): "
+                    "device wrapper constructed (cam=%{public}p)",
+                    cameraId.c_str(), info->droidIndex, (void *)cam);
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
@@ -278,13 +233,28 @@ int32_t HybrisCameraHostVdiImpl::SetFlashlight(const std::string &cameraId, bool
 {
     (void)cameraId;
     (void)isEnable;
-    CAMERA_VDI_LOGW("SetFlashlight — N12.4 stub, real bridging in N12.12");
+    /*
+     * The on-device libdroidmedia.so revision (Halium X23 2026-02-04)
+     * does NOT export droid_media_camera_set_torch_mode.  Future work
+     * (N12.D.9): either (a) move to a newer droidmedia build, or
+     * (b) drive the LED via the sysfs class node directly from a
+     * separate flashlight VDI.  For now we stay METHOD_NOT_SUPPORTED.
+     */
+    CAMERA_VDI_LOGW("SetFlashlight: droid_media_camera_set_torch_mode "
+                    "not exported by this libdroidmedia build");
     return VDI::Camera::V1_0::METHOD_NOT_SUPPORTED;
 }
 
 int32_t HybrisCameraHostVdiImpl::CloseAllCameras()
 {
-    CAMERA_VDI_LOGI("CloseAllCameras — N12.4 stub no-op");
+    /*
+     * Device VDIs hold their own DroidMediaCamera* and disconnect in
+     * Close().  Host-level CloseAllCameras is a hint from the death
+     * recipient ICameraHostVdi base class; framework retains the per-
+     * device sptr through camera_host_service so the underlying
+     * Close() will fire naturally.
+     */
+    CAMERA_VDI_LOGI("CloseAllCameras — no-op (per-device Close handles teardown)");
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
@@ -292,17 +262,7 @@ int32_t HybrisCameraHostVdiImpl::CloseAllCameras()
 
 /* -------------------------------------------------------------------------
  * HDF VDI plumbing — exported so libcamera_host_service can dlopen + bind.
- * -------------------------------------------------------------------------
- * The OHOS camera HDF host (libcamera_host_service_1.0.z.so) calls
- * HdfLoadVdi(libname) on each entry in vdiLibList.  HdfLoadVdi expects
- * a global `g_vdi` of HdfVdiBase type with CreateVdiInstance /
- * DestoryVdiInstance hooks, exported via HDF_VDI_INIT(...).
- *
- * Pattern matches the v4l2 reference VDI:
- *   drivers/peripheral/camera/vdi_base/v4l2/src/camera_host/camera_host_vdi_impl.cpp
- * The exported symbol name (g_vdi via HDF_VDI_INIT macro) is what
- * HdfLoadVdi looks up via dlsym after dlopen.
- */
+ * ------------------------------------------------------------------------- */
 extern "C" {
 
 static int CreateCameraHostVdiInstance(struct HdfVdiBase *vdiBase)

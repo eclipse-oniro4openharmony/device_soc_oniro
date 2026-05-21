@@ -84,6 +84,35 @@ public:
     void WriteFlatBinder(uintptr_t localKey);
 
     /*
+     * Write a "blob" — append a chunk of bytes to the scatter-gather
+     * region and emit a binder_buffer_object in main data pointing at
+     * it.  Returns the index in the offsets array (use with
+     * WriteEmbeddedBuffer's `parentBoIdx`).  Bytes are owned by the
+     * parcel (copied into `ownedBlobs_`).
+     *
+     * If `parentBoIdx` is std::numeric_limits<size_t>::max(), the
+     * blob has no parent.  Otherwise the binder_buffer_object gets
+     * HAS_PARENT set with parent_offset = `parentOffset`.
+     *
+     * `length` is the byte length sent to the receiver.  Memory
+     * is rounded up to 8 in the SG total to match libhwbinder.
+     */
+    size_t WriteBlob(const void *data, size_t length,
+                     size_t parentBoIdx = static_cast<size_t>(-1),
+                     size_t parentOffset = 0);
+
+    /*
+     * Convenience: write a HIDL hidl_vec<T> backed by an array of
+     * `count` * `elemSize` bytes.  Lays down (a) a 16-byte HidlVec
+     * descriptor blob and (b) the array blob; the array's
+     * binder_buffer_object HAS_PARENTs into the descriptor's
+     * buffer field (offset 0).  Returns the index of the
+     * descriptor's binder_buffer_object (for further fixups by
+     * the caller if T contains its own hidl_vec / hidl_string).
+     */
+    size_t WriteHidlVecBlob(const void *array, size_t count, size_t elemSize);
+
+    /*
      * Write a HIDL hidl_string into both buffers:
      *   - In `sg_`: a 16-byte HidlString struct {buffer,size,owns,pad}
      *     followed by the string bytes (NUL-terminated, 8-byte padded).
@@ -180,6 +209,20 @@ public:
         /* Skip n raw bytes; used by the (rare) caller that knows the
          * wire shape and just wants to seek past padding. */
         bool Skip(size_t n);
+
+        /*
+         * Read a binder_buffer_object (40 bytes) at the cursor.  4-byte
+         * aligned (same as flat_binder_object — libhwbinder primitives
+         * use 4-alignment, NOT 8).  Returns the kernel-fixed-up buffer
+         * pointer + length via outputs; pad/parent fields are dropped.
+         * Used for HIDL replies whose top-level result is a struct
+         * containing nested hidl_vec/hidl_string fields.
+         */
+        bool ReadBufferObject(uint64_t *outBuffer, uint64_t *outLength);
+
+        /* Raw access for callers walking a custom reply layout. */
+        const uint8_t *Data()    const { return data_; }
+        size_t         Cursor()  const { return cursor_; }
 
     private:
         const uint8_t  *data_;

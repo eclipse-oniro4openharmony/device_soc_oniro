@@ -7,11 +7,7 @@
 
 #include <algorithm>
 
-#include "hidl/hw_binder_client.h"
-#include "hidl/hw_binder_server.h"
-#include "hidl/hw_camera_device.h"
-#include "hidl/hw_camera_device_callback.h"
-#include "hidl/hw_camera_device_session.h"
+#include "droidmedia/droidmedia_loader.h"
 #include "hybris_camera_log.h"
 #include "hybris_stream_operator_vdi_impl.h"
 #include "v1_0/vdi_types.h"
@@ -21,111 +17,27 @@ namespace OHOS::Camera::Hybris {
 namespace V = OHOS::VDI::Camera::V1_0;
 
 HybrisCameraDeviceVdiImpl::HybrisCameraDeviceVdiImpl(
-    Hidl::HwBinderClient *client, std::string ohosCameraId,
-    std::unique_ptr<Hidl::HwCameraDevice> device,
+    std::string ohosCameraId, DroidMediaCamera *cam,
     const sptr<ICameraDeviceVdiCallback> &cb)
-    : client_(client),
-      ohosCameraId_(std::move(ohosCameraId)),
-      device_(std::move(device)),
-      deviceCallback_(cb)
+    : ohosCameraId_(std::move(ohosCameraId)), cam_(cam), deviceCallback_(cb)
 {
-    CAMERA_VDI_LOGI("HybrisCameraDeviceVdiImpl ctor for %{public}s "
-                    "(halium handle=%{public}u)",
-                    ohosCameraId_.c_str(),
-                    device_ ? device_->Handle() : 0);
-
-    /*
-     * Spin up the local binder server.  Halium calls back into us
-     * through this for processCaptureResult / notify after
-     * ICameraDevice::open() — so the server MUST be live BEFORE
-     * EnsureHaliumSessionOpen issues the open() transaction.
-     *
-     * Also wire the client to forward inline BR_TRANSACTIONs that
-     * arrive during a client-thread BWR (nested-call pattern: the
-     * kernel routes Halium's callback to the same thread that's
-     * waiting on the open() reply, to avoid deadlock).
-     */
-    if (client_ != nullptr) {
-        binderServer_ = std::make_unique<Hidl::HwBinderServer>(client_->Fd());
-        hwCallback_   = std::make_unique<Hidl::HwCameraDeviceCallback>();
-        binderServer_->Register(hwCallback_.get());
-        if (!binderServer_->Start()) {
-            CAMERA_VDI_LOGE("Failed to start HwBinderServer for %{public}s",
-                            ohosCameraId_.c_str());
-            binderServer_.reset();
-            hwCallback_.reset();
-        } else {
-            client_->SetServer(binderServer_.get());
-        }
-    }
+    CAMERA_VDI_LOGI("HybrisCameraDeviceVdiImpl ctor for %{public}s cam=%{public}p",
+                    ohosCameraId_.c_str(), (void *)cam_);
 }
 
 HybrisCameraDeviceVdiImpl::~HybrisCameraDeviceVdiImpl()
 {
     CAMERA_VDI_LOGI("HybrisCameraDeviceVdiImpl dtor for %{public}s",
                     ohosCameraId_.c_str());
-    if (client_ != nullptr) {
-        client_->SetServer(nullptr);
-    }
-    binderServer_.reset();
-    hwCallback_.reset();
-}
-
-int32_t HybrisCameraDeviceVdiImpl::EnsureHaliumSessionOpen()
-{
-    /* Caller holds mutex_. */
-    if (session_ != nullptr) {
-        return V::NO_ERROR;
-    }
-    if (device_ == nullptr) {
-        return V::CAMERA_CLOSED;
-    }
-    if (hwCallback_ == nullptr || binderServer_ == nullptr) {
-        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): no callback "
-                        "infrastructure", ohosCameraId_.c_str());
-        return V::DEVICE_ERROR;
-    }
-    int32_t halStatus = -1;
-    uint32_t sessionHandle = 0;
-    bool isNull = true;
-    if (!device_->Open(hwCallback_->Key(), &halStatus,
-                       &sessionHandle, &isNull)) {
-        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): Open failed "
-                        "(halStatus=%{public}d)",
-                        ohosCameraId_.c_str(), halStatus);
-        return V::DEVICE_ERROR;
-    }
-    if (isNull || sessionHandle == 0) {
-        CAMERA_VDI_LOGE("EnsureHaliumSessionOpen(%{public}s): null session",
-                        ohosCameraId_.c_str());
-        return V::DEVICE_ERROR;
-    }
-    session_ = std::make_unique<Hidl::HwCameraDeviceSession>(client_,
-                                                              sessionHandle);
-    CAMERA_VDI_LOGI("EnsureHaliumSessionOpen(%{public}s): "
-                    "ICameraDeviceSession handle=%{public}u",
-                    ohosCameraId_.c_str(), sessionHandle);
-
     /*
-     * Liveness check: pull a default PREVIEW request template.  This
-     * is a small constructDefaultRequestSettings call (V3.2 TX 1)
-     * that returns ~hundreds of bytes of camera_metadata_t.  If it
-     * succeeds, the session is responsive and we can attempt
-     * configureStreams_3_4 in N12.6.1b.
+     * Defensive: if Close() wasn't called (framework crashed or
+     * skipped teardown), still release the droidmedia handle so the
+     * Halium HAL doesn't keep the sensor powered on.
      */
-    int32_t tmplStatus = -1;
-    std::vector<uint8_t> tmplBlob;
-    if (session_->ConstructDefaultRequestSettings(
-            Hidl::HwCameraDeviceSession::TEMPLATE_PREVIEW,
-            &tmplStatus, &tmplBlob)) {
-        CAMERA_VDI_LOGI("PREVIEW template: %{public}zu bytes (session live)",
-                        tmplBlob.size());
-    } else {
-        CAMERA_VDI_LOGW("PREVIEW template fetch failed (halStatus=%{public}d)",
-                        tmplStatus);
+    if (cam_ != nullptr) {
+        Droid::Loader::Get().Disconnect(cam_);
+        cam_ = nullptr;
     }
-
-    return V::NO_ERROR;
 }
 
 int32_t HybrisCameraDeviceVdiImpl::GetStreamOperator(
@@ -137,22 +49,11 @@ int32_t HybrisCameraDeviceVdiImpl::GetStreamOperator(
         return V::INVALID_ARGUMENT;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (closed_ || device_ == nullptr) {
+    if (closed_ || cam_ == nullptr) {
         return V::CAMERA_CLOSED;
     }
-    /*
-     * N12.6.1: lazily open the Halium ICameraDeviceSession on first
-     * GetStreamOperator call.  This is the gating step for actual
-     * frame delivery — without a session handle there's no
-     * configureStreams to bridge.
-     */
-    int32_t openRc = EnsureHaliumSessionOpen();
-    if (openRc != V::NO_ERROR) {
-        return openRc;
-    }
-
     auto op = sptr<HybrisStreamOperatorVdiImpl>::MakeSptr(
-        client_, device_.get(), ohosCameraId_, callbackObj);
+        cam_, ohosCameraId_, callbackObj);
     if (op == nullptr) {
         return V::INSUFFICIENT_RESOURCES;
     }
@@ -167,6 +68,13 @@ int32_t HybrisCameraDeviceVdiImpl::UpdateSettings(
     latestSettings_ = settings;
     CAMERA_VDI_LOGI("UpdateSettings(%{public}s): %{public}zu bytes stashed",
                     ohosCameraId_.c_str(), latestSettings_.size());
+    /*
+     * TODO N12.D follow-up: parse OHOS camera_metadata_t entries we
+     * actually care about (auto-focus mode, exposure compensation,
+     * scene mode) and translate to Camera1 setParameters calls.
+     * MVP just stashes — the HAL runs in auto mode by default which
+     * is acceptable for first frames.
+     */
     return V::NO_ERROR;
 }
 
@@ -219,19 +127,12 @@ int32_t HybrisCameraDeviceVdiImpl::Close()
         return V::NO_ERROR;
     }
     closed_ = true;
-    /*
-     * Releasing the unique_ptr drops our reference to HwCameraDevice;
-     * its destructor doesn't release the binder ref directly (the
-     * ref was acquired by HwBinderClient::ParseReplies and is owned
-     * by us until we explicitly BC_RELEASE).  TODO N12.7: actually
-     * BC_RELEASE the handle via client_; for now the HwBinderClient
-     * teardown at VDI shutdown releases all outstanding refs.
-     */
-    CAMERA_VDI_LOGI("Close(%{public}s): releasing Halium device "
-                    "(handle=%{public}u)",
-                    ohosCameraId_.c_str(),
-                    device_ ? device_->Handle() : 0);
-    device_.reset();
+    if (cam_ != nullptr) {
+        CAMERA_VDI_LOGI("Close(%{public}s): droid_media_camera_disconnect(%{public}p)",
+                        ohosCameraId_.c_str(), (void *)cam_);
+        Droid::Loader::Get().Disconnect(cam_);
+        cam_ = nullptr;
+    }
     deviceCallback_ = nullptr;
     return V::NO_ERROR;
 }

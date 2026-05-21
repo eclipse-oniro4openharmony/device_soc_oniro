@@ -26,7 +26,8 @@ group("camera_host_model") {
   deps = [
     ":binder_smoke",
     ":camera_hidl_smoke",
-    ":hidl_camera_smoke",
+    ":droidmedia_loader_smoke",
+    ":droidmedia_smoke",
     ":hidl_get_smoke",
     ":hidl_ping",
     ":libcamera_host_vdi_impl",
@@ -35,18 +36,17 @@ group("camera_host_model") {
 
 # ─── N12.5.2b — pure-musl HIDL transport library ───────────────────────────
 #
-# HwParcel + HwBinderClient + HwServiceManager.  Refactored out of the
-# N12.5.2 inline spike; intended to be reused by libcamera_host_vdi_impl
-# in N12.5.3.  No bionic, no libhybris — talks the kernel binder ABI
-# directly via the vendored uapi in src/hidl/hw_binder_abi.h.
+# HwParcel + HwBinderClient + HwBinderServer + HwServiceManager.  The
+# camera-specific HIDL files (hw_camera_provider, hw_camera_device,
+# hw_camera_device_session, hw_camera_device_callback) were deleted in
+# the N12.D droidmedia pivot — libdroidmedia.so handles the camera HAL
+# transport now.  The generic transport remains: smoke tools build on
+# top of it for IServiceManager::get + IBase::ping; sensors/BT HIDL
+# work can reuse the same primitives.
 
 hidl_transport_sources = [
   "src/hidl/hw_binder_client.cpp",
   "src/hidl/hw_binder_server.cpp",
-  "src/hidl/hw_camera_device.cpp",
-  "src/hidl/hw_camera_device_callback.cpp",
-  "src/hidl/hw_camera_device_session.cpp",
-  "src/hidl/hw_camera_provider.cpp",
   "src/hidl/hw_parcel.cpp",
   "src/hidl/hw_service_manager.cpp",
 ]
@@ -91,33 +91,6 @@ ohos_executable("hidl_ping") {
 
 ohos_executable("hidl_get_smoke") {
   sources = [ "tools/hidl_get_smoke.cpp" ] + hidl_transport_sources
-
-  include_dirs = hidl_transport_include_dirs
-
-  external_deps = [
-    "hilog:libhilog",
-  ]
-
-  cflags_cc = [
-    "-Wno-error=unused-function",
-    "-Wno-error=unused-parameter",
-    "-Wno-error=invalid-offsetof",
-  ]
-
-  install_enable = true
-  install_images = [ chipset_base_dir ]
-  part_name = "hybris_generic_soc"
-}
-
-# ─── N12.5.3b — ICameraProvider::getCameraIdList smoke ───────────────────
-#
-# Resolves the camera provider via hwservicemanager and calls
-# getCameraIdList (transaction code 3) through the resolved handle.
-# Expects 3 cameras on the X23.  Validates the full hidl_vec<hidl_string>
-# reader path.
-
-ohos_executable("hidl_camera_smoke") {
-  sources = [ "tools/hidl_camera_smoke.cpp" ] + hidl_transport_sources
 
   include_dirs = hidl_transport_include_dirs
 
@@ -196,18 +169,89 @@ ohos_executable("camera_hidl_smoke") {
   part_name = "hybris_generic_soc"
 }
 
+# ─── N12.D.2 — droidmedia bring-up smoke ───────────────────────────────────
+#
+# Acceptance gate for the droidmedia pivot (phase_n12_camera_droidmedia.md
+# step D.2): hybris_dlopen libdroidmedia.so + enumerate cameras via the
+# pure-C ABI.  Pre-flight check before refactoring the VDI to load
+# droidmedia for real (N12.D.3+).
+
+ohos_executable("droidmedia_smoke") {
+  sources = [ "tools/droidmedia_smoke.cpp" ]
+
+  include_dirs = [
+    "include",
+    "//third_party/libhybris/hybris/include",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/common:libhybris-common",
+  ]
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
+# ─── N12.D.3 — droidmedia loader smoke (validates Loader singleton) ────────
+#
+# Exercises the Droid::Loader singleton end-to-end (Init →
+# GetNumberOfCameras → Connect/Disconnect each).  Catches regressions
+# in the loader without flashing the full VDI.
+
+ohos_executable("droidmedia_loader_smoke") {
+  sources = [
+    "src/droidmedia/droidmedia_loader.cpp",
+    "tools/droidmedia_loader_smoke.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "src",
+    "//third_party/libhybris/hybris/include",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/common:libhybris-common",
+  ]
+
+  external_deps = [
+    "hilog:libhilog",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+}
+
 ohos_shared_library("libcamera_host_vdi_impl") {
   sources = [
               "src/camera_device/hybris_camera_device_vdi_impl.cpp",
               "src/camera_device/hybris_stream_operator_vdi_impl.cpp",
               "src/camera_host/hybris_camera_ability.cpp",
               "src/camera_host/hybris_camera_host_vdi_impl.cpp",
-            ] + hidl_transport_sources
+              "src/droidmedia/droidmedia_loader.cpp",
+            ]
 
   include_dirs = [
     "include",
-    "src",                       # for hidl/hw_*.h
+    "src",                       # for camera_device/, droidmedia/, hidl/
     "src/camera_host",
+    "//third_party/libhybris/hybris/include",
     "//drivers/peripheral/camera/vdi_base/interfaces",
     "//drivers/peripheral/camera/vdi_base/interfaces/v1_0",
     "//drivers/peripheral/camera/vdi_base/common/include",
@@ -216,6 +260,10 @@ ohos_shared_library("libcamera_host_vdi_impl") {
     "//drivers/interface/camera/v1_0",
     "//drivers/interface/camera/metadata/include",
     "//drivers/hdf_core/interfaces/inner_api/host/uhdf",
+  ]
+
+  deps = [
+    "//third_party/libhybris/hybris/common:libhybris-common",
   ]
 
   external_deps = [
@@ -239,6 +287,13 @@ ohos_shared_library("libcamera_host_vdi_impl") {
   output_name = "libcamera_host_vdi_impl_1.0"
   install_enable = true
   install_images = [ chipset_base_dir ]
-  innerapi_tags = [ "passthrough" ]
+  # Intentionally NO innerapi_tags = [ "passthrough" ]: the camera HDF
+  # host loads us via HdfLoadVdi(libname) which hard-codes
+  # "/vendor/lib64/" + libname.  passthrough innerapi installs to
+  # /vendor/lib64/passthrough/<name> instead, where HdfLoadVdi can't
+  # find us — proven 2026-05-21 by camera_host falling back to the
+  # lcam001 placeholder when the .so was only in the passthrough subdir.
+  # libdisplay_*_vdi_impl can use the passthrough tag because they're
+  # dlopen()'d by name, not via HdfLoadVdi.
   part_name = "hybris_generic_soc"
 }

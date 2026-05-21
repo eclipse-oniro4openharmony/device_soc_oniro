@@ -368,6 +368,16 @@ HwBinderClient::Result HwBinderClient::ParseReplies(
                     flat_binder_object obj;
                     memcpy(&obj, bufData + bufOffsets[i], sizeof(obj));
                     if (obj.hdr.type == (uint32_t)BINDER_TYPE_HANDLE) {
+                        /*
+                         * Pump BC_ACQUIRE through a normal BWR loop —
+                         * the kernel can send BR_INCREFS/BR_ACQUIRE back
+                         * to us in response (the binder needs us to ack
+                         * with BC_*_DONE for our OWN local binders being
+                         * referenced).  Sending BC_ACQUIRE without
+                         * reading replies leaves the BC pending in the
+                         * driver state machine and the handle in a
+                         * weird half-acquired state.
+                         */
                         uint32_t acq[2] = { (uint32_t)BC_ACQUIRE, obj.handle };
                         binder_write_read bwr3 = {};
                         bwr3.write_size = sizeof(acq);
@@ -377,6 +387,12 @@ HwBinderClient::Result HwBinderClient::ParseReplies(
                             CAMERA_VDI_LOGW(
                                 "BC_ACQUIRE(reply handle=%{public}u): "
                                 "errno=%{public}d", obj.handle, errno);
+                        } else {
+                            CAMERA_VDI_LOGI(
+                                "BC_ACQUIRE handle=%{public}u: "
+                                "write_consumed=%{public}llu",
+                                obj.handle,
+                                (unsigned long long)bwr3.write_consumed);
                         }
                     }
                 }

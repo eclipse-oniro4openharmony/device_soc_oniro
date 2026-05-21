@@ -4,42 +4,36 @@
  *
  * Hybris Camera Host VDI — implements ICameraHostVdi.
  *
- * The OHOS camera HDF host (libcamera_host_service_1.0.z.so) reads
- * vdiLibList from camera_host_config.hcs (currently
- * vendor/oniro/hybris_generic/hdf_config/uhdf/camera/hdi_impl/camera_host_config.hcs)
- * and dlopens libcamera_host_vdi_impl_1.0.z.so.  HDF then resolves the
- * exported `g_vdiCameraHost` VdiWrapperCameraHost via HDF_VDI_INIT, calls
- * its CreateVdiInstance which constructs HybrisCameraHostVdiImpl and
- * stores the ICameraHostVdi* in vdiWrapperCameraHost->module.
+ * Loaded by the OHOS camera HDF host (libcamera_host_service_1.0.z.so)
+ * via HdfLoadVdi from the vdiLibList entry in
+ *   vendor/oniro/hybris_generic/hdf_config/uhdf/camera/hdi_impl/camera_host_config.hcs
  *
- * Current state — scaffolding only (N12.4):
- *   - GetCameraIds returns a single "lcam001" matching the existing HCS
- *     ability_01 template.
- *   - GetCameraAbility returns NO_ERROR with an empty blob (HCS supplies
- *     static ability metadata to the host service directly).
- *   - OpenCamera / SetFlashlight / CloseAllCameras return
- *     METHOD_NOT_SUPPORTED.
+ * Wiring under N12.D (droidmedia pivot — phase_n12_camera_droidmedia.md):
+ *   - Init() drives the Droid::Loader bring-up (dlopen libdroidmedia.so
+ *     + binder NS bind + _droid_media_init()) and populates
+ *     cameraIds_ ("0", "1", "2") + perCameraInfo_ from
+ *     droid_media_camera_get_info.
+ *   - OpenCamera() calls Droid::Loader::Connect to obtain a
+ *     DroidMediaCamera* and wraps it in HybrisCameraDeviceVdiImpl.
+ *   - SetFlashlight stays METHOD_NOT_SUPPORTED — the on-device
+ *     libdroidmedia.so revision lacks droid_media_camera_set_torch_mode.
  *
- * N12.5+ will replace these with calls into the libhybris-loaded
- * android.hardware.camera.provider@2.6::ICameraProvider — see
- * device/board/oniro/docs/hybris_generic/phase_n12_camera.md.
+ * Falls back to the HCS "lcam001" placeholder if the loader can't bring
+ * itself up (e.g. CAP_SYS_ADMIN missing → unshare(2) fails) so the HDF
+ * host startup remains non-fatal during early boot / config drift.
  */
 
 #ifndef HYBRIS_CAMERA_HOST_VDI_IMPL_H
 #define HYBRIS_CAMERA_HOST_VDI_IMPL_H
 
-#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "droidmedia/droidmediacamera.h"
 #include "v1_0/icamera_host_vdi.h"
 
 namespace OHOS::Camera::Hybris {
-namespace Hidl {
-class HwBinderClient;
-class HwCameraProvider;
-} // namespace Hidl
 
 using OHOS::VDI::Camera::V1_0::ICameraHostVdi;
 using OHOS::VDI::Camera::V1_0::ICameraHostVdiCallback;
@@ -63,35 +57,32 @@ public:
     int32_t SetFlashlight(const std::string &cameraId, bool isEnable) override;
     int32_t CloseAllCameras() override;
 
+    /*
+     * Indexed by OHOS cameraId ("0" → 0).  Populated by Init from
+     * droid_media_camera_get_info — used by hybris_camera_ability.cpp
+     * to fill OHOS_SENSOR_ORIENTATION and OHOS_LENS_FACING in the
+     * static metadata blob without round-tripping per-call.
+     */
+    struct PerCameraInfo {
+        int droidIndex   = -1;
+        int facing       = -1;   /* DROID_MEDIA_CAMERA_FACING_{FRONT=0,BACK=1} */
+        int orientation  = 0;    /* degrees, multiple of 90 */
+    };
+    const PerCameraInfo *FindInfo(const std::string &cameraId) const;
+
 private:
     /*
-     * Populate cameraIds_ via the libhybris HIDL transport — calls
-     * IServiceManager::get("android.hardware.camera.provider@2.6::"
-     * "ICameraProvider", "internal/0") and then
-     * ICameraProvider::getCameraIdList.  Sets fallback_ = true and
-     * uses the HCS "lcam001" placeholder when the bridge can't reach
-     * Halium (e.g. /dev/hwbinder absent during early boot).
+     * Pull camera count + per-camera info via Droid::Loader.  Populates
+     * cameraIds_ + perCameraInfo_; on failure leaves them empty so the
+     * caller can fall back.
      */
-    bool LoadCameraIdsFromHalium();
+    bool LoadCamerasFromDroidMedia();
 
     std::mutex                    mutex_;
     sptr<ICameraHostVdiCallback>  hostCallback_;
     std::vector<std::string>      cameraIds_;
+    std::vector<PerCameraInfo>    perCameraInfo_;
     bool                          fallback_ = false;
-
-    /* HIDL transport — kept alive for the lifetime of the VDI so
-     * subsequent calls (OpenCamera, SetFlashlight, …) can reuse the
-     * binder handle without re-resolving via hwservicemanager. */
-    std::unique_ptr<Hidl::HwBinderClient>    hwClient_;
-    std::unique_ptr<Hidl::HwCameraProvider>  hwProvider_;
-
-    /*
-     * Halium HIDL camera IDs as returned by getCameraIdList; index
-     * matches cameraIds_.  Stored so OpenCamera can map an OHOS-side
-     * vendorId ("0"/"1"/"2") back to its FQ Halium name (e.g.
-     * "device@3.6/internal/0") for getCameraDeviceInterface_V3_x.
-     */
-    std::vector<std::string>                 haliumCameraIds_;
 };
 
 } // namespace OHOS::Camera::Hybris
