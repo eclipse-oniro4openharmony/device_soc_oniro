@@ -88,23 +88,6 @@ ohos_prebuilt_shared_library("libgallium_dri") {
     ]
 }
 
-ohos_prebuilt_shared_library("libvulkan_radeon") {
-    source = "libvulkan_radeon.so"
-    install_enable = true
-    part_name = "x86_general"
-    install_images = [ vendor_base_dir ]
-    relative_install_dir = "chipsetsdk"
-}
-
-ohos_prebuilt_etc("radeon_icd.x86_64") {
-    source = "radeon_icd.x86_64.json"
-    install_enable = true
-    part_name = "x86_general"
-    install_images = [ vendor_base_dir ]
-    module_install_dir = "etc/vulkan/icd.d"
-}
-
-
 group("mesa3d-lib") {
     deps = [
         ":mesa_egl",
@@ -113,7 +96,5 @@ group("mesa3d-lib") {
         ":mesa_glesv1",
         ":mesa_glesv2",
         ":libgallium_dri",
-        ":libvulkan_radeon",
-        ":radeon_icd.x86_64",
     ]
 }
