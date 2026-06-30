@@ -1,0 +1,44 @@
+# Notices for Eclipse Oniro for OpenHarmony
+
+This content is produced and maintained by the Eclipse Oniro for OpenHarmony
+project (SoC adaptations).
+
+## Source Code
+
+The project maintains the following source code repository for this content:
+
+* https://github.com/eclipse-oniro4openharmony/device_soc_oniro
+
+## Copyright
+
+All content is the property of the respective authors or their employers. For
+more information regarding authorship of content, please consult the listed
+source code repository logs.
+
+## Declared Project License
+
+This program and the accompanying materials are made available under the terms
+of the Apache License, Version 2.0, which is available at
+https://www.apache.org/licenses/LICENSE-2.0.
+
+    SPDX-License-Identifier: Apache-2.0
+
+## Third-party Content
+
+This repository bundles the following third-party content. Their licenses govern
+those files, not the project's declared Apache-2.0 license.
+
+Mesa 3D Graphics Library
+* Files: x86_general/hardware/gpu/lib64/libgallium_dri.so (prebuilt; Git LFS)
+* License: MIT (and other permissive licenses for individual components)
+* Project: https://www.mesa3d.org/
+
+elfutils
+* Files: x86_general/hardware/gpu/third_party/elfutils/**
+* License: GPL-3.0-or-later AND LGPL-3.0-or-later
+* Project: https://sourceware.org/elfutils/
+
+libdrm
+* Files: x86_general/hardware/gpu/third_party/libdrm/**
+* License: MIT
+* Project: https://gitlab.freedesktop.org/mesa/drm
