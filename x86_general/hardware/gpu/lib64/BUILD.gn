@@ -36,18 +36,6 @@ ohos_prebuilt_shared_library("mesa_gbm") {
     ]
 }
 
-ohos_prebuilt_shared_library("mesa_glapi") {
-    source = "libglapi.so.0.0.0"
-    install_enable = true
-    part_name = "x86_general"
-    install_images = [ vendor_base_dir ]
-    relative_install_dir = "chipsetsdk"
-    symlink_target_name = [
-        "libglapi.so.0",
-        "libglapi.so",
-    ]
-}
-
 ohos_prebuilt_shared_library("mesa_glesv1") {
     source = "libGLESv1_CM.so.1.1.0"
     install_enable = true
@@ -92,7 +80,6 @@ group("mesa3d-lib") {
     deps = [
         ":mesa_egl",
         ":mesa_gbm",
-        ":mesa_glapi",
         ":mesa_glesv1",
         ":mesa_glesv2",
         ":libgallium_dri",

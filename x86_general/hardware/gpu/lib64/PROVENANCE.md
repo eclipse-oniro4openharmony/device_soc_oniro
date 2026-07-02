@@ -4,8 +4,7 @@ The prebuilt GPU libraries in this directory (`libgallium_dri.so`,
 `libEGL.so.1.0.0`, `libGLESv2.so.2.0.0`, `libGLESv1_CM.so.1.1.0`,
 `libgbm.so.1.0.0`) are **Mesa 25.0.7**, cross-compiled from source for
 `x86_64-linux-ohosmusl`. This file records where they come from and how to
-rebuild them. `libglapi.so.0.0.0` is the older Mesa 22.2.5 lib kept as-is (the
-25.0.7 set links glapi statically and does not need it).
+rebuild them.
 
 > History: before this rebuild, `libgallium_dri.so` was an opaque **Mesa
 > 22.2.5** blob built by contributor *diemit* in his private tree — its RUNPATH
@@ -46,7 +45,7 @@ git -C third_party/mesa3d-new log --oneline   # diemit's 4 squashed commits
 ## How these binaries were built
 
 Full recipe: **`oniro_build_x86_general.sh`** (in this directory). It runs inside
-the build container (`3127b8693e81`) and:
+the build container (`<container>`) and:
 1. generates the `x86_64-linux-ohosmusl` meson cross-file + pkg-config `.pc`
    set (diemit's `ohos/meson_cross_process86.py`), repointing `zlib.pc` at the
    static `out/.../obj/third_party/zlib/libz.a`;
@@ -89,7 +88,7 @@ git -C third_party/mesa3d-new remote add openharmony \
     https://github.com/eclipse-oniro-mirrors/third_party_mesa3d   # optional, for diffing
 
 # 1. build + deploy into this lib64/ (runs in the build container)
-sudo docker exec -u root -w /home/openharmony/workdir/out/x86_general 3127b8693e81 \
+sudo docker exec -u root -w /home/openharmony/workdir/out/x86_general <container> \
     bash /home/openharmony/workdir/device/soc/oniro/x86_general/hardware/gpu/lib64/oniro_build_x86_general.sh
 
 # 2. verify version of the deployed lib

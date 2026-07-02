@@ -36,8 +36,8 @@
 #    (matching lib64/BUILD.gn and the checked-in artifact), not
 #    libgallium-25.0.7.so.
 #
-# Run INSIDE the build container (id 3127b8693e81), e.g.:
-#   sudo docker exec -u root -w /home/openharmony/workdir/out/x86_general 3127b8693e81 \
+# Run INSIDE the build container (id <container>), e.g.:
+#   sudo docker exec -u root -w /home/openharmony/workdir/out/x86_general <container> \
 #       bash /home/openharmony/workdir/device/soc/oniro/x86_general/hardware/gpu/lib64/oniro_build_x86_general.sh
 set -euo pipefail
 
@@ -105,7 +105,7 @@ ninja -C "$BUILDDIR" -j"$(nproc)"
 ninja -C "$BUILDDIR" install
 
 # 5. Deploy the matched set into lib64/ (libEGL.so -> libEGL.so.1.0.0 for BUILD.gn).
-#    libglapi.so.0.0.0 is left as-is (the 25.0.7 set links glapi statically).
+#    (The 25.0.7 set links glapi statically, so no libglapi is deployed.)
 LIB64=$WORKDIR/device/soc/oniro/x86_general/hardware/gpu/lib64
 install -m0755 "$PREFIX/lib/libgallium_dri.so"      "$LIB64/libgallium_dri.so"
 install -m0755 "$PREFIX/lib/libEGL.so"              "$LIB64/libEGL.so.1.0.0"

@@ -21,7 +21,9 @@ board repository, under `device/board/oniro/docs/hybris_generic/README.md`.
 ### `x86_general` — QEMU / x86 emulator
 
 GPU adaptation for the Oniro emulator target, based on the Mesa graphics stack.
-See the build instructions in the board repository's README.
+The prebuilt GPU libraries are cross-compiled from Mesa source; their provenance
+and rebuild recipe are documented in
+[`x86_general/hardware/gpu/lib64/PROVENANCE.md`](x86_general/hardware/gpu/lib64/PROVENANCE.md).
 
 ## Building
 

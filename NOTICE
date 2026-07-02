@@ -29,9 +29,25 @@ This repository bundles the following third-party content. Their licenses govern
 those files, not the project's declared Apache-2.0 license.
 
 Mesa 3D Graphics Library
-* Files: x86_general/hardware/gpu/lib64/libgallium_dri.so (prebuilt; Git LFS)
-* License: MIT (and other permissive licenses for individual components)
+* Files: x86_general/hardware/gpu/lib64/{libgallium_dri.so, libEGL.so.1.0.0,
+  libGLESv2.so.2.0.0, libGLESv1_CM.so.1.1.0, libgbm.so.1.0.0} — Mesa 25.0.7,
+  cross-compiled from source. libgallium_dri.so is stored via Git LFS; the other
+  libraries are committed directly. Source commit and rebuild recipe:
+  x86_general/hardware/gpu/lib64/PROVENANCE.md.
+* License: MIT (and other permissive licenses for individual Mesa components)
 * Project: https://www.mesa3d.org/
+
+LLVM (statically linked into libgallium_dri.so)
+* Files: embedded in x86_general/hardware/gpu/lib64/libgallium_dri.so — LLVM
+  15.0.4, linked in statically for the llvmpipe/softpipe Gallium drivers.
+* License: Apache-2.0 WITH LLVM-exception
+* Project: https://llvm.org/
+
+zlib (statically linked into libgallium_dri.so)
+* Files: embedded in x86_general/hardware/gpu/lib64/libgallium_dri.so — linked in
+  statically (via LLVMSupport) from the OpenHarmony in-tree third_party/zlib.
+* License: Zlib
+* Project: https://zlib.net/
 
 elfutils
 * Files: x86_general/hardware/gpu/third_party/elfutils/**
