@@ -189,8 +189,15 @@ int32_t HybrisComposerVdiImpl::WriteBacklight(uint32_t level)
         return HDF_FAILURE;
     }
 
-    DISPLAY_LOGI("Backlight: level=%u -> raw=%u (max=%u)",
-                 level, raw, g_backlightMax);
+    /*
+     * The power manager rewrites the backlight every frame during a ramp, so
+     * logging unconditionally floods hilog at ~30 Hz and evicts the rest of
+     * the boot — including render_service's screen-connect messages — from the
+     * buffer within seconds.  Only report actual changes.
+     */
+    if (level != g_backlightLast) {
+        DISPLAY_LOGI("Backlight: level=%u -> raw=%u (max=%u)", level, raw, g_backlightMax);
+    }
     g_backlightLast = level;
     return HDF_SUCCESS;
 }

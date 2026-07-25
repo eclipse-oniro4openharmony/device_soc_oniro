@@ -306,16 +306,42 @@ void HybrisBufferVdiImpl::FreeMem(const BufferHandle& handle) const
 {
     int32_t owner = HANDLE_OWNER_NONE;
     buffer_handle_t nativeHandle = LoadNativeHandle(handle, &owner);
-    if (nativeHandle) {
-        /* was_allocated=1 frees the allocation, 0 drops our import reference. */
-        hybris_gralloc_release(nativeHandle, owner == HANDLE_OWNER_ALLOCATED ? 1 : 0);
-    } else {
-        /* Allocated in another process (AllocMem runs in allocator_host) and
-         * never imported here — this copy owns nothing to release. */
-        DISPLAY_LOGD("FreeMem: no local handle, nothing to release");
+    BufferHandle* bh = const_cast<BufferHandle*>(&handle);
+
+    if (owner == HANDLE_OWNER_ALLOCATED) {
+        /*
+         * Releasing the allocation also closes its fds — which are the very
+         * fds mirrored into this BufferHandle — so they must not be closed
+         * again here or we would close an unrelated, since-reused fd.
+         */
+        hybris_gralloc_release(nativeHandle, 1 /* was_allocated */);
+        free(bh);
+        return;
     }
-    /* The BufferHandle was malloc()'d by AllocMem */
-    free(const_cast<BufferHandle*>(&handle));
+
+    if (owner == HANDLE_OWNER_IMPORTED) {
+        /* Drops our import reference along with the fds importBuffer dup'd. */
+        hybris_gralloc_release(nativeHandle, 0 /* just an import reference */);
+    }
+
+    /*
+     * The buffer was allocated in another process (AllocMem runs in
+     * allocator_host), which frees the allocation itself.  The fds this
+     * BufferHandle carries were dup'd into us by the IPC layer, and
+     * MapperService::FreeMem handed us ownership of it via
+     * NativeBuffer::Move(), so closing them is our job — nobody else will.
+     */
+    if (bh->fd >= 0) {
+        close(bh->fd);
+        bh->fd = -1;
+    }
+    for (uint32_t i = 0; i < bh->reserveFds; i++) {
+        if (bh->reserve[i] >= 0) {
+            close(bh->reserve[i]);
+            bh->reserve[i] = -1;
+        }
+    }
+    free(bh);
 }
 
 /* ─── Mmap ───────────────────────────────────────────────────────────────── */
@@ -323,7 +349,7 @@ void HybrisBufferVdiImpl::FreeMem(const BufferHandle& handle) const
 /*
  * Build a native_handle_t from the fds and ints serialised in a BufferHandle.
  *
- * AllocMem stores a raw process-local buffer_handle_t pointer in the last two
+ * AllocMem stores a raw process-local buffer_handle_t pointer in the trailing
  * reserve[] slots.  That pointer is meaningless once the BufferHandle has been
  * marshalled across an IPC boundary (the fds are dup'd, the ints are copied
  * verbatim, but the pointer addresses are from the allocating process).
