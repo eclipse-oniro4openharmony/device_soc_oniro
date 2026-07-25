@@ -13,6 +13,7 @@
       "deps": {
         "components": [
           "hilog",
+          "init",
           "drivers_interface_display",
           "drivers_interface_wlan",
           "graphic_surface",

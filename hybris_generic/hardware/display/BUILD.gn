@@ -50,6 +50,7 @@ ohos_shared_library("libdisplay_composer_vdi_impl") {
     "graphic_surface:buffer_handle",
     "hdf_core:libhdf_utils",
     "hilog:libhilog",
+    "init:libbegetutil",
     "ipc:ipc_single",
   ]
 
@@ -105,6 +106,7 @@ ohos_shared_library("libdisplay_buffer_vdi_impl") {
     "graphic_surface:buffer_handle",
     "hdf_core:libhdf_utils",
     "hilog:libhilog",
+    "init:libbegetutil",
     "ipc:ipc_single",
   ]
 

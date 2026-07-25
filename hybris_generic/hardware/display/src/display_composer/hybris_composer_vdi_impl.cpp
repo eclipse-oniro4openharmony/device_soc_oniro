@@ -25,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include "display_common.h"
+#include "parameter.h"
 
 /* android_dlopen from libhybris */
 extern "C" void* android_dlopen(const char* filename, int flags);
@@ -260,6 +261,24 @@ void HybrisComposerVdiImpl::PreloadGrallocMapper()
 
 void HybrisComposerVdiImpl::InitHwc2Device()
 {
+    /*
+     * Gate on androidd's composer-readiness param.  The Android composer
+     * service registers ~60 s into boot (Halium container bring-up), but
+     * hdf_devmgr demand-loads this host within seconds of render_service
+     * starting.  On AIDL-only vendors (ansuz) an early attempt is FATAL:
+     * Hwc2::Composer::create finds the AIDL service undeclared-yet, falls
+     * back to HidlComposer, and its ctor LOG_ALWAYS_FATALs — the host
+     * crash-loops into devmgr's respawn cap before the container is even
+     * up, and the display never attaches.  androidd flips
+     * android.composer.ready=1 the moment its probe sees the composer
+     * (HIDL or AIDL) registered; wait for it here.  On timeout proceed
+     * anyway — X23's HIDL getService blocks internally, preserving the
+     * pre-gate behavior if the param never fires.
+     */
+    if (WaitParameter("android.composer.ready", "1", 90) != 0) {
+        DISPLAY_LOGW("timed out waiting for android.composer.ready=1 — proceeding anyway");
+    }
+
     PreloadGrallocMapper();
 
     eventListener_.on_hotplug_received = OnHotplug;

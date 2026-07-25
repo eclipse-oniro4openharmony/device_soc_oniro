@@ -23,6 +23,7 @@
 
 #include "display_common.h"
 #include "hdf_base.h"
+#include "parameter.h"
 
 /* libhybris gralloc API */
 #include <hybris/gralloc/gralloc.h>
@@ -172,6 +173,19 @@ static void PreloadGrallocMapper()
 
 HybrisBufferVdiImpl::HybrisBufferVdiImpl()
 {
+    /*
+     * Same readiness gate as the composer VDI (see InitHwc2Device): the
+     * ctor itself only dlopens, but the first AllocMem reaches
+     * GraphicBufferAllocator::get(), which LOG_ALWAYS_FATALs if the
+     * Android allocator service isn't registered yet.  androidd flips
+     * android.composer.ready when the container HAL fleet (composer +
+     * allocator register together) is up.  Timeout → proceed, preserving
+     * pre-gate behavior.
+     */
+    if (WaitParameter("android.composer.ready", "1", 90) != 0) {
+        DISPLAY_LOGW("timed out waiting for android.composer.ready=1 — proceeding anyway");
+    }
+
     PreloadGrallocMapper();
 
     /*
