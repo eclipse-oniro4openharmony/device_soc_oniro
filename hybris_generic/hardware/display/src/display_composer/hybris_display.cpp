@@ -20,6 +20,7 @@
 #include <ctime>
 #include <unordered_map>
 #include "display_common.h"
+#include "hybris_buffer_layout.h"
 #include <hardware/hwcomposer2.h>
 #include <system/window.h>
 #include <cutils/native_handle.h>
@@ -540,8 +541,10 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
      * it to hwc2_compat_display_set_client_target.
      */
     int numFds = 1 + buffer.reserveFds;
-    /* We added 2 ints (kPtrSlots) for the native pointer in our buffer VDI. Exclude them for HWC2. */
-    int numInts = (buffer.reserveInts >= 2) ? (buffer.reserveInts - 2) : buffer.reserveInts;
+    /* The trailing kPtrSlots slots are the buffer VDI's bookkeeping, not part
+     * of the handle — exclude them before handing the handle to HWC2. */
+    int numInts = (buffer.reserveInts >= kPtrSlots) ? (buffer.reserveInts - kPtrSlots)
+                                                    : buffer.reserveInts;
 
     native_handle_t* nh = native_handle_create(numFds, numInts);
     DISPLAY_CHK_RETURN(nh == nullptr, HDF_FAILURE,

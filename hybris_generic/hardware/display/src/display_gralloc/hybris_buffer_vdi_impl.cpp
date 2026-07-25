@@ -23,6 +23,7 @@
 
 #include "display_common.h"
 #include "hdf_base.h"
+#include "hybris_buffer_layout.h"
 #include "parameter.h"
 
 /* libhybris gralloc API */
@@ -120,25 +121,35 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
 
 /* ─── native_handle_t pointer storage in BufferHandle::reserve[] ─────────── */
 
-/*
- * We need 2 × int32_t to store a 64-bit buffer_handle_t pointer.
- * These slots are appended after the mirrored native_handle data.
- */
-static constexpr uint32_t kPtrSlots = 2; /* sizeof(buffer_handle_t) / sizeof(int32_t) on 64-bit */
+/* Layout of the trailing kPtrSlots bookkeeping slots: hybris_buffer_layout.h */
 
-static void StoreNativeHandle(BufferHandle* bh, buffer_handle_t native)
+static void StoreNativeHandle(BufferHandle* bh, buffer_handle_t native, int32_t owner)
 {
     uint32_t offset = bh->reserveFds + bh->reserveInts - kPtrSlots;
     uintptr_t p = reinterpret_cast<uintptr_t>(native);
     bh->reserve[offset]     = static_cast<int32_t>(p & 0xFFFFFFFFu);
     bh->reserve[offset + 1] = static_cast<int32_t>(p >> 32u);
+    bh->reserve[offset + 2] = native ? static_cast<int32_t>(getpid()) : 0;
+    bh->reserve[offset + 3] = native ? owner : HANDLE_OWNER_NONE;
 }
 
-static buffer_handle_t LoadNativeHandle(const BufferHandle& bh)
+static buffer_handle_t LoadNativeHandle(const BufferHandle& bh, int32_t* owner = nullptr)
 {
+    if (owner != nullptr) {
+        *owner = HANDLE_OWNER_NONE;
+    }
+    if (bh.reserveFds + bh.reserveInts < kPtrSlots) {
+        return nullptr;
+    }
     uint32_t offset = bh.reserveFds + bh.reserveInts - kPtrSlots;
+    if (bh.reserve[offset + 2] != static_cast<int32_t>(getpid())) {
+        return nullptr;
+    }
     uintptr_t lo = static_cast<uint32_t>(bh.reserve[offset]);
     uintptr_t hi = static_cast<uint32_t>(bh.reserve[offset + 1]);
+    if (owner != nullptr) {
+        *owner = bh.reserve[offset + 3];
+    }
     return reinterpret_cast<buffer_handle_t>(lo | (hi << 32u));
 }
 
@@ -228,7 +239,7 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
      * Layout of BufferHandle::reserve[]:
      *   [0 .. reserveFds-1]                      — extra fds (nh->data[1..numFds-1])
      *   [reserveFds .. reserveFds+numInts-1]      — native ints (nh->data[numFds..])
-     *   [reserveFds+numInts .. +kPtrSlots-1]      — buffer_handle_t pointer (2 slots)
+     *   [reserveFds+numInts .. +kPtrSlots-1]      — handle pointer + owner tag
      */
     uint32_t reserveFds  = (nh->numFds > 0) ? static_cast<uint32_t>(nh->numFds - 1) : 0;
     uint32_t nativeInts  = static_cast<uint32_t>(nh->numInts);
@@ -279,7 +290,7 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
         bh->reserve[reserveFds + i] = nh->data[nh->numFds + i];
     }
     /* Store the native handle pointer in the last kPtrSlots slots */
-    StoreNativeHandle(bh, nativeHandle);
+    StoreNativeHandle(bh, nativeHandle, HANDLE_OWNER_ALLOCATED);
 
     DISPLAY_LOGI("AllocMem: %{public}ux%{public}u fmt=%{public}d "
                  "pixStride=%{public}u byteStride=%{public}u size=%{public}d fd=%{public}d",
@@ -293,11 +304,15 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
 
 void HybrisBufferVdiImpl::FreeMem(const BufferHandle& handle) const
 {
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle);
+    int32_t owner = HANDLE_OWNER_NONE;
+    buffer_handle_t nativeHandle = LoadNativeHandle(handle, &owner);
     if (nativeHandle) {
-        hybris_gralloc_release(nativeHandle, 1 /* was_allocated */);
+        /* was_allocated=1 frees the allocation, 0 drops our import reference. */
+        hybris_gralloc_release(nativeHandle, owner == HANDLE_OWNER_ALLOCATED ? 1 : 0);
     } else {
-        DISPLAY_LOGW("FreeMem: null native handle, skipping gralloc release");
+        /* Allocated in another process (AllocMem runs in allocator_host) and
+         * never imported here — this copy owns nothing to release. */
+        DISPLAY_LOGD("FreeMem: no local handle, nothing to release");
     }
     /* The BufferHandle was malloc()'d by AllocMem */
     free(const_cast<BufferHandle*>(&handle));
@@ -345,7 +360,8 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 {
     static const int kLockUsage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
 
-    /* Path 1: same-process — stored native handle pointer is valid directly. */
+    /* Path 1: same-process — LoadNativeHandle only returns the stored pointer
+     * when this process is the one that produced it, so it is safe to use. */
     buffer_handle_t nativeHandle = LoadNativeHandle(handle);
     if (nativeHandle) {
         void* vaddr = nullptr;
@@ -370,7 +386,8 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
             ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
                                       handle.width, handle.height, &vaddr);
             if (ret == 0 && vaddr) {
-                StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle);
+                StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle,
+                                  HANDLE_OWNER_IMPORTED);
                 const_cast<BufferHandle&>(handle).virAddr = vaddr;
                 return vaddr;
             }
@@ -401,7 +418,8 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 
 int32_t HybrisBufferVdiImpl::Unmap(const BufferHandle& handle) const
 {
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle);
+    int32_t owner = HANDLE_OWNER_NONE;
+    buffer_handle_t nativeHandle = LoadNativeHandle(handle, &owner);
     if (!nativeHandle) {
         /* Buffer was mapped via direct fd mmap — no gralloc unlock needed. */
         if (handle.virAddr && handle.size > 0) {
@@ -419,14 +437,16 @@ int32_t HybrisBufferVdiImpl::Unmap(const BufferHandle& handle) const
     }
 
     /*
-     * If this handle was imported cross-process in Mmap (stored via
-     * StoreNativeHandle), release the import reference now.  FreeMem in
-     * the allocating process will release the allocation separately.
-     * We clear the stored pointer so a subsequent Mmap will re-import.
+     * If this handle was imported cross-process in Mmap, release the import
+     * reference now and clear the stored pointer so a subsequent Mmap
+     * re-imports.  A handle we allocated ourselves keeps its pointer — only
+     * FreeMem may release that one.
      */
-    hybris_gralloc_release(nativeHandle, 0 /* not allocated here, just imported */);
-    static constexpr buffer_handle_t kNullHandle = nullptr;
-    StoreNativeHandle(const_cast<BufferHandle*>(&handle), kNullHandle);
+    if (owner == HANDLE_OWNER_IMPORTED) {
+        hybris_gralloc_release(nativeHandle, 0 /* just an import reference */);
+        static constexpr buffer_handle_t kNullHandle = nullptr;
+        StoreNativeHandle(const_cast<BufferHandle*>(&handle), kNullHandle, HANDLE_OWNER_NONE);
+    }
     const_cast<BufferHandle&>(handle).virAddr = nullptr;
     return HDF_SUCCESS;
 }

@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cstdlib>
 #include "display_common.h"
+#include "hybris_buffer_layout.h"
 
 /* Android HWC2 / hardware headers pulled in via android-headers */
 #include <hardware/hwcomposer2.h>
@@ -75,8 +76,9 @@ HybrisLayer::~HybrisLayer()
 static HybrisNativeBuffer* BuildNativeBuffer(const BufferHandle& bh)
 {
     int numFds = 1 + bh.reserveFds;
-    /* We added 2 ints (kPtrSlots) for the native pointer in our buffer VDI. Exclude them for HWC2. */
-    int numInts = (bh.reserveInts >= 2) ? (bh.reserveInts - 2) : bh.reserveInts;
+    /* The trailing kPtrSlots slots are the buffer VDI's bookkeeping, not part
+     * of the handle — exclude them before handing the handle to HWC2. */
+    int numInts = (bh.reserveInts >= kPtrSlots) ? (bh.reserveInts - kPtrSlots) : bh.reserveInts;
 
     native_handle_t* nh = native_handle_create(numFds, numInts);
     if (!nh) {
