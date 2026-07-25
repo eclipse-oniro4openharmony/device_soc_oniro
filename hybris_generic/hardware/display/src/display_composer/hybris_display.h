@@ -16,8 +16,10 @@
 #ifndef HYBRIS_DISPLAY_H
 #define HYBRIS_DISPLAY_H
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include "buffer_handle.h"
@@ -82,8 +84,27 @@ private:
     VBlankCallback vblankCb_{nullptr};
     void* vblankData_{nullptr};
 
-    /* Vsync sequence counter */
-    uint32_t vsyncSeq_{0};
+    /* Vsync sequence counter (shared by the HWC2 event thread and the
+     * software-vsync fallback thread) */
+    std::atomic<uint32_t> vsyncSeq_{0};
+
+    /*
+     * Software vsync fallback.  On the Volla Plinius (ansuz) the panel is a
+     * command-mode AMOLED whose TE interrupt never ticks under our boot path,
+     * so the vendor HWC delivers no vsync callbacks.  render_service commits
+     * exactly one frame and then the whole UI pipeline starves waiting for
+     * vblank ("ArkUI request vsync, but no vsync received in 3 seconds").
+     * A 60 Hz generator thread synthesizes vblank callbacks whenever the
+     * hardware vsync has been silent for >100 ms; if real vsync ever starts
+     * flowing it automatically yields.
+     */
+    std::atomic<bool> vsyncEnabled_{false};
+    std::atomic<bool> swVsyncRun_{false};
+    std::atomic<int64_t> lastHwVsyncNs_{0};
+    std::thread swVsyncThread_;
+    void EnsureSwVsyncThread();
+    void SwVsyncLoop();
+    static int64_t NowNs();
 
     /* Whether PrepareDisplayLayers found any CLIENT layers requiring flush */
     bool needsClientComposition_{false};

@@ -17,6 +17,7 @@
 #include "hybris_composer_vdi_impl.h"
 #include <hdf_base.h>
 #include <cstring>
+#include <ctime>
 #include <unordered_map>
 #include "display_common.h"
 #include <hardware/hwcomposer2.h>
@@ -61,6 +62,10 @@ HybrisDisplay::HybrisDisplay(uint32_t devId, hwc2_compat_display_t* display, hwc
 
 HybrisDisplay::~HybrisDisplay()
 {
+    swVsyncRun_ = false;
+    if (swVsyncThread_.joinable()) {
+        swVsyncThread_.join();
+    }
     if (pendingFences_) {
         hwc2_compat_out_fences_destroy(pendingFences_);
         pendingFences_ = nullptr;
@@ -237,6 +242,10 @@ int32_t HybrisDisplay::SetDisplayPowerStatus(DispPowerStatus status)
 int32_t HybrisDisplay::SetDisplayVsyncEnabled(bool enabled)
 {
     DISPLAY_LOGI("HybrisDisplay::SetDisplayVsyncEnabled devId=%u enabled=%d", devId_, enabled);
+    vsyncEnabled_ = enabled;
+    if (enabled) {
+        EnsureSwVsyncThread();
+    }
     int hwc2Enabled = enabled ? HWC2_VSYNC_ENABLE : HWC2_VSYNC_DISABLE;
     hwc2_error_t err = hwc2_compat_display_set_vsync_enabled(display_, hwc2Enabled);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
@@ -246,6 +255,7 @@ int32_t HybrisDisplay::SetDisplayVsyncEnabled(bool enabled)
 
 int32_t HybrisDisplay::RegDisplayVBlankCallback(VBlankCallback cb, void* data)
 {
+    DISPLAY_LOGI("RegDisplayVBlankCallback devId=%u cb=%{public}d", devId_, cb != nullptr);
     vblankCb_ = cb;
     vblankData_ = data;
     return HDF_SUCCESS;
@@ -253,8 +263,67 @@ int32_t HybrisDisplay::RegDisplayVBlankCallback(VBlankCallback cb, void* data)
 
 void HybrisDisplay::OnVsync(int64_t timestampNs)
 {
+    lastHwVsyncNs_ = NowNs();
     if (vblankCb_) {
         vblankCb_(vsyncSeq_++, static_cast<uint64_t>(timestampNs), vblankData_);
+    }
+}
+
+int64_t HybrisDisplay::NowNs()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+void HybrisDisplay::EnsureSwVsyncThread()
+{
+    bool expected = false;
+    if (!swVsyncRun_.compare_exchange_strong(expected, true)) {
+        return; /* already running */
+    }
+    swVsyncThread_ = std::thread([this]() { SwVsyncLoop(); });
+}
+
+void HybrisDisplay::SwVsyncLoop()
+{
+    /* 60 Hz — the sampler in render_service phase-locks to whatever cadence
+     * we deliver; 120 Hz panel timing is a later refinement. */
+    constexpr int64_t kPeriodNs = 16666667;
+    /* Consider hardware vsync "alive" if a callback landed in the last 100 ms;
+     * the fallback then stays silent and the real signal wins. */
+    constexpr int64_t kHwSilenceNs = 100000000;
+    bool active = false;
+    int64_t lastIdleLogNs = 0;
+    while (swVsyncRun_) {
+        struct timespec ts = { 0, static_cast<long>(kPeriodNs) };
+        nanosleep(&ts, nullptr);
+        if (!vsyncEnabled_ || vblankCb_ == nullptr) {
+            int64_t now = NowNs();
+            if (now - lastIdleLogNs > 5000000000LL) {
+                DISPLAY_LOGI("sw-vsync idle: enabled=%{public}d cb=%{public}d",
+                    vsyncEnabled_.load(), vblankCb_ != nullptr);
+                lastIdleLogNs = now;
+            }
+            continue;
+        }
+        int64_t now = NowNs();
+        if (now - lastHwVsyncNs_.load() < kHwSilenceNs) {
+            if (active) {
+                DISPLAY_LOGI("sw-vsync: hardware vsync alive — fallback yielding");
+                active = false;
+            }
+            continue;
+        }
+        if (!active) {
+            DISPLAY_LOGI("sw-vsync: no hardware vsync — fallback generating 60 Hz");
+            active = true;
+        }
+        if (now - lastIdleLogNs > 5000000000LL) {
+            DISPLAY_LOGI("sw-vsync active: seq=%{public}u", vsyncSeq_.load());
+            lastIdleLogNs = now;
+        }
+        vblankCb_(vsyncSeq_++, static_cast<uint64_t>(now), vblankData_);
     }
 }
 
