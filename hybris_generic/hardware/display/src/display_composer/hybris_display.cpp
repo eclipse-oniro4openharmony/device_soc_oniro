@@ -174,8 +174,9 @@ int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
      * the vendor stack uses, on whichever panel we are running.
      *
      * Note this is the *reported* density, not the UI scale factor: OHOS takes
-     * its virtual-pixel ratio from the `dpi` window config / `const.window.dpi`
-     * (see vendor/oniro/hybris_generic/custom_conf/window).
+     * its virtual-pixel ratio from the `dpi` entry of the per-device
+     * display_manager_config.xml (see
+     * vendor/oniro/hybris_generic/custom_conf/window/devices/).
      */
     info.phyWidth  = FALLBACK_PHY_WIDTH_MM;
     info.phyHeight = FALLBACK_PHY_HEIGHT_MM;
