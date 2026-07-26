@@ -152,22 +152,51 @@ HybrisLayer* HybrisDisplay::GetLayer(uint32_t layerId)
 
 int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
 {
+    /* Millimetres per inch, for the pixel-density → physical-size conversion. */
+    constexpr float MM_PER_INCH = 25.4f;
+    /* Volla X23 (6.3", 720×1560) — used when the HAL reports no usable DPI. */
+    constexpr uint32_t FALLBACK_PHY_WIDTH_MM  = 65;
+    constexpr uint32_t FALLBACK_PHY_HEIGHT_MM = 141;
+
     info.name = "hybris-hwc2-display";
-    info.type = DISP_INTF_MIPI; /* Volla X23 has an internal MIPI DSI panel */
+    info.type = DISP_INTF_MIPI; /* both supported devices have internal MIPI DSI panels */
     info.supportLayers = 16;
     info.virtualDispCount = 0;
     info.supportWriteBack = false;
     info.propertyCount = 0;
 
     /*
-     * phyWidth / phyHeight are the physical screen dimensions in millimetres.
-     * AbstractDisplay::CalculateXYDpi() uses them to compute xDpi/yDpi:
-     *   xDpi = pixelWidth * 25.4 / phyWidth_mm
-     * Volla X23: 6.3" diagonal, 720×1560 → ~67 mm × 145 mm → ~272 DPI.
-     * (The pixel resolution from the active HWC2 config is NOT used here.)
+     * phyWidth / phyHeight are the physical panel dimensions in millimetres;
+     * DMS turns them back into the xDpi/yDpi it reports to applications
+     * (xDpi = pixelWidth * 25.4 / phyWidth_mm).  Derive them from the DPI the
+     * Android HWC advertises for the active config rather than hardcoding one
+     * device's panel — that keeps the density we report identical to the one
+     * the vendor stack uses, on whichever panel we are running.
+     *
+     * Note this is the *reported* density, not the UI scale factor: OHOS takes
+     * its virtual-pixel ratio from the `dpi` window config / `const.window.dpi`
+     * (see vendor/oniro/hybris_generic/custom_conf/window).
      */
-    info.phyWidth  = 65;   /* mm */
-    info.phyHeight = 141;  /* mm */
+    info.phyWidth  = FALLBACK_PHY_WIDTH_MM;
+    info.phyHeight = FALLBACK_PHY_HEIGHT_MM;
+
+    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
+    if (cfg != nullptr) {
+        DISPLAY_LOGI("GetDisplayCapability: HWC active config %{public}dx%{public}d "
+                     "dpi=%{public}.1fx%{public}.1f",
+                     cfg->width, cfg->height, cfg->dpiX, cfg->dpiY);
+        if (cfg->dpiX > 0.0f && cfg->width > 0) {
+            info.phyWidth = static_cast<uint32_t>(cfg->width * MM_PER_INCH / cfg->dpiX + 0.5f);
+        }
+        if (cfg->dpiY > 0.0f && cfg->height > 0) {
+            info.phyHeight = static_cast<uint32_t>(cfg->height * MM_PER_INCH / cfg->dpiY + 0.5f);
+        }
+        free(cfg);
+    } else {
+        DISPLAY_LOGW("GetDisplayCapability: no active config, using fallback panel size");
+    }
+    DISPLAY_LOGI("GetDisplayCapability: phyWidth=%{public}u mm phyHeight=%{public}u mm",
+                 info.phyWidth, info.phyHeight);
     return HDF_SUCCESS;
 }
 
