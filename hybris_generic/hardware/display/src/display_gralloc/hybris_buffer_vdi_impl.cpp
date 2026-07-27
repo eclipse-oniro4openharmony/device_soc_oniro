@@ -15,11 +15,15 @@
 
 #include "hybris_buffer_vdi_impl.h"
 
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <linux/dma-buf.h>
 
 #include "display_common.h"
 #include "hdf_base.h"
@@ -76,6 +80,11 @@ static int OhosFormatToAndroid(uint32_t ohosFormat)
         case 24: return HAL_PIXEL_FORMAT_YCBCR_420_888;  /* PIXEL_FMT_YCBCR_420_SP */
         case 25: return HAL_PIXEL_FORMAT_YCRCB_420_SP;   /* PIXEL_FMT_YCRCB_420_SP */
         case 21: return HAL_PIXEL_FORMAT_YCBCR_422_I;    /* PIXEL_FMT_YUV_422_I */
+        case 38: return HAL_PIXEL_FORMAT_BLOB;           /* PIXEL_FMT_BLOB (v1_1): 1-D byte buffer
+                                                          * (e.g. ASTC payloads from ImageSource);
+                                                          * IMPLEMENTATION_DEFINED would make MTK
+                                                          * gralloc pick a non-CPU-mappable layout */
+        case 39: return HAL_PIXEL_FORMAT_RGBA_FP16;      /* PIXEL_FMT_RGBA16_FLOAT (v1_2) */
         default:
             DISPLAY_LOGW("Unknown OHOS format %{public}u, using IMPLEMENTATION_DEFINED", ohosFormat);
             return HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
@@ -161,8 +170,16 @@ static buffer_handle_t LoadNativeHandle(const BufferHandle& bh, int32_t* owner =
  * Pre-loading here ensures it is already in the hybris linker's table so
  * the SPHAL namespace bypass hook (_hybris_hook_android_load_sphal_library)
  * can intercept the call successfully.
+ *
+ * Returns whether a mapper implementation could be loaded.  In appspawn'd
+ * processes the sandbox carries /android/system but not the nested
+ * /android/vendor mount, so this fails there — and every libhybris gralloc
+ * entry point would then LOG_ALWAYS_FATAL inside the GraphicBufferMapper
+ * constructor instead of returning an error.  Callers must treat false as
+ * "never touch hybris gralloc in this process" (Mmap falls back to direct
+ * DMA-BUF fd mapping).
  */
-static void PreloadGrallocMapper()
+static bool PreloadGrallocMapper()
 {
     static const char* kMapperPaths[] = {
         "/android/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-mediatek.so",
@@ -174,10 +191,74 @@ static void PreloadGrallocMapper()
         void* h = android_dlopen(kMapperPaths[i], RTLD_LAZY | RTLD_GLOBAL);
         if (h) {
             DISPLAY_LOGI("Pre-loaded gralloc mapper: %{public}s", kMapperPaths[i]);
-            return;
+            return true;
         }
     }
-    DISPLAY_LOGW("Could not pre-load gralloc mapper; GPU buffer alloc may fail");
+    DISPLAY_LOGW("Could not pre-load gralloc mapper; using direct DMA-BUF fd mapping");
+    return false;
+}
+
+/* True once a gralloc mapper implementation is loaded in this process. */
+static bool g_grallocUsable = false;
+
+/* Debug override: force the DMA-BUF fd path even where gralloc works, so the
+ * app-sandbox fallback can be exercised from a plain shell process. */
+static bool ForceFdMmap()
+{
+    static bool force = getenv("HYBRIS_DISP_FORCE_FD_MMAP") != nullptr;
+    return force;
+}
+
+static bool UseGralloc()
+{
+    return g_grallocUsable && !ForceFdMmap();
+}
+
+/*
+ * Find the fd in a BufferHandle that actually backs the pixels.
+ *
+ * MTK gralloc handles carry several fds and the FIRST one (which AllocMem
+ * mirrors into BufferHandle::fd) is an anon_inode:gralloc_extra metadata fd
+ * that cannot be mmap'd at all; the real DMA-BUF is among the reserve fds.
+ * The buffer fd is identified as the first one whose fstat size covers the
+ * buffer (metadata fds report 0 or a few KiB).
+ */
+static int FindMappableFd(const BufferHandle& handle)
+{
+    int candidates[9];
+    int count = 0;
+    candidates[count++] = handle.fd;
+    for (uint32_t i = 0; i < handle.reserveFds && count < 9; i++) {
+        candidates[count++] = handle.reserve[i];
+    }
+    for (int i = 0; i < count; i++) {
+        if (candidates[i] < 0) {
+            continue;
+        }
+        struct stat st = {};
+        if (fstat(candidates[i], &st) == 0 && st.st_size >= handle.size) {
+            return candidates[i];
+        }
+    }
+    return handle.fd;
+}
+
+/* ─── DMA-BUF cache maintenance for fd-mapped buffers ────────────────────── */
+
+/*
+ * When a buffer is CPU-mapped via plain mmap of its DMA-BUF fd (no gralloc
+ * lock), cache coherency is our job: DMA_BUF_IOCTL_SYNC START invalidates
+ * before CPU access, END flushes after.  Failure is non-fatal — coherent
+ * allocations don't need it and the ioctl just returns an error.
+ */
+static void DmaBufSync(int fd, uint64_t flags)
+{
+    struct dma_buf_sync sync = {};
+    sync.flags = flags;
+    if (ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync) != 0) {
+        DISPLAY_LOGD("DMA_BUF_IOCTL_SYNC(0x%{public}llx) failed: %{public}s",
+                     static_cast<unsigned long long>(flags), strerror(errno));
+    }
 }
 
 /* ─── Constructor ────────────────────────────────────────────────────────── */
@@ -197,7 +278,12 @@ HybrisBufferVdiImpl::HybrisBufferVdiImpl()
         DISPLAY_LOGW("timed out waiting for android.composer.ready=1 — proceeding anyway");
     }
 
-    PreloadGrallocMapper();
+    g_grallocUsable = PreloadGrallocMapper();
+    if (!g_grallocUsable) {
+        /* App sandbox (no /android/vendor): hybris gralloc would abort on
+         * first use, so leave it uninitialized — Mmap uses fd mapping. */
+        return;
+    }
 
     /*
      * Initialize libhybris gralloc without a framebuffer device.
@@ -212,6 +298,13 @@ HybrisBufferVdiImpl::HybrisBufferVdiImpl()
 
 int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& handle) const
 {
+    if (!g_grallocUsable) {
+        /* hybris_gralloc_allocate would abort in the GraphicBufferMapper
+         * ctor; allocation belongs in allocator_host anyway. */
+        DISPLAY_LOGE("AllocMem: no gralloc mapper in this process");
+        return HDF_FAILURE;
+    }
+
     int androidFormat = OhosFormatToAndroid(info.format);
     int androidUsage  = OhosUsageToAndroid(info.usage);
 
@@ -386,54 +479,74 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 {
     static const int kLockUsage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
 
-    /* Path 1: same-process — LoadNativeHandle only returns the stored pointer
-     * when this process is the one that produced it, so it is safe to use. */
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    if (nativeHandle) {
-        void* vaddr = nullptr;
-        int ret = hybris_gralloc_lock(nativeHandle, kLockUsage, 0, 0,
-                                      handle.width, handle.height, &vaddr);
-        if (ret == 0 && vaddr) {
-            const_cast<BufferHandle&>(handle).virAddr = vaddr;
-            return vaddr;
-        }
-        /* Fall through: cross-process stale pointer. */
-    }
-
-    /* Path 2: cross-process import — reconstruct handle from portable fd/int
-     * data, import via gralloc, then lock. */
-    native_handle_t* rawNh = ReconstructNativeHandle(handle);
-    if (rawNh) {
-        buffer_handle_t importedHandle = nullptr;
-        int ret = hybris_gralloc_import_buffer(rawNh, &importedHandle);
-        native_handle_delete(rawNh);
-        if (ret == 0 && importedHandle) {
+    /* Paths 1–2 require the Android mapper HAL, which appspawn'd processes
+     * cannot load (no /android/vendor in the sandbox) — any hybris gralloc
+     * call there would LOG_ALWAYS_FATAL in the GraphicBufferMapper ctor, so
+     * such processes use only the DMA-BUF fd path below. */
+    if (UseGralloc()) {
+        /* Path 1: same-process — LoadNativeHandle only returns the stored
+         * pointer when this process is the one that produced it. */
+        buffer_handle_t nativeHandle = LoadNativeHandle(handle);
+        if (nativeHandle) {
             void* vaddr = nullptr;
-            ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
-                                      handle.width, handle.height, &vaddr);
+            int ret = hybris_gralloc_lock(nativeHandle, kLockUsage, 0, 0,
+                                          handle.width, handle.height, &vaddr);
             if (ret == 0 && vaddr) {
-                StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle,
-                                  HANDLE_OWNER_IMPORTED);
                 const_cast<BufferHandle&>(handle).virAddr = vaddr;
                 return vaddr;
             }
-            hybris_gralloc_release(importedHandle, 0);
+            /* Fall through: cross-process stale pointer. */
         }
-        DISPLAY_LOGW("Mmap: gralloc import/lock failed, using fd mmap fallback");
+
+        /* Path 2: cross-process import — reconstruct handle from portable
+         * fd/int data, import via gralloc, then lock. */
+        native_handle_t* rawNh = ReconstructNativeHandle(handle);
+        if (rawNh) {
+            buffer_handle_t importedHandle = nullptr;
+            int ret = hybris_gralloc_import_buffer(rawNh, &importedHandle);
+            native_handle_delete(rawNh);
+            if (ret == 0 && importedHandle) {
+                void* vaddr = nullptr;
+                ret = hybris_gralloc_lock(importedHandle, kLockUsage, 0, 0,
+                                          handle.width, handle.height, &vaddr);
+                if (ret == 0 && vaddr) {
+                    StoreNativeHandle(const_cast<BufferHandle*>(&handle), importedHandle,
+                                      HANDLE_OWNER_IMPORTED);
+                    const_cast<BufferHandle&>(handle).virAddr = vaddr;
+                    return vaddr;
+                }
+                hybris_gralloc_release(importedHandle, 0);
+            }
+            DISPLAY_LOGW("Mmap: gralloc import/lock failed, using fd mmap fallback");
+        }
     }
 
     /* Path 3: direct DMA-BUF fd mmap — bypasses gralloc HAL entirely.
-     * Works for any buffer allocated with a DMA-BUF fd regardless of usage. */
-    if (handle.fd >= 0 && handle.size > 0) {
+     * handle.fd itself may be a metadata fd (MTK gralloc_extra); pick the fd
+     * that actually backs the pixels. */
+    int bufFd = FindMappableFd(handle);
+    if (bufFd >= 0 && handle.size > 0) {
         void* mmapAddr = ::mmap(nullptr, static_cast<size_t>(handle.size),
-                                PROT_READ | PROT_WRITE, MAP_SHARED, handle.fd, 0);
+                                PROT_READ | PROT_WRITE, MAP_SHARED, bufFd, 0);
+        if (mmapAddr == MAP_FAILED && (errno == EACCES || errno == EPERM)) {
+            /* fds that crossed the HDI IPC boundary may arrive without write
+             * mode; consumers in mapper-less processes only read (snapshot /
+             * thumbnail decode), so a read-only mapping is still useful. */
+            mmapAddr = ::mmap(nullptr, static_cast<size_t>(handle.size),
+                              PROT_READ, MAP_SHARED, bufFd, 0);
+            if (mmapAddr != MAP_FAILED) {
+                DISPLAY_LOGW("Mmap: fd mmap is read-only (rw refused: EACCES)");
+            }
+        }
         if (mmapAddr != MAP_FAILED) {
+            DmaBufSync(bufFd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
             DISPLAY_LOGI("Mmap: fd mmap fd=%{public}d size=%{public}d addr=%{public}p",
-                         handle.fd, handle.size, mmapAddr);
+                         bufFd, handle.size, mmapAddr);
             const_cast<BufferHandle&>(handle).virAddr = mmapAddr;
             return mmapAddr;
         }
-        DISPLAY_LOGE("Mmap: fd mmap failed: %{public}s", strerror(errno));
+        DISPLAY_LOGE("Mmap: fd mmap failed: %{public}s (fd=%{public}d reqSize=%{public}d)",
+                     strerror(errno), bufFd, handle.size);
     }
     DISPLAY_LOGE("Mmap: all paths failed %{public}dx%{public}d fd=%{public}d",
                  handle.width, handle.height, handle.fd);
@@ -445,10 +558,14 @@ void* HybrisBufferVdiImpl::Mmap(const BufferHandle& handle) const
 int32_t HybrisBufferVdiImpl::Unmap(const BufferHandle& handle) const
 {
     int32_t owner = HANDLE_OWNER_NONE;
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle, &owner);
+    buffer_handle_t nativeHandle = UseGralloc() ? LoadNativeHandle(handle, &owner) : nullptr;
     if (!nativeHandle) {
         /* Buffer was mapped via direct fd mmap — no gralloc unlock needed. */
         if (handle.virAddr && handle.size > 0) {
+            int bufFd = FindMappableFd(handle);
+            if (bufFd >= 0) {
+                DmaBufSync(bufFd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+            }
             ::munmap(handle.virAddr, static_cast<size_t>(handle.size));
             const_cast<BufferHandle&>(handle).virAddr = nullptr;
             return HDF_SUCCESS;
@@ -486,9 +603,16 @@ int32_t HybrisBufferVdiImpl::FlushCache(const BufferHandle& handle) const
      * We unlock and immediately re-lock to keep the mapping valid.
      * This matches the semantics expected by the OHOS buffer layer.
      */
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    /* fd-mapped buffers: kernel DMA-BUF coherency, no gralloc flush needed. */
+    buffer_handle_t nativeHandle = UseGralloc() ? LoadNativeHandle(handle) : nullptr;
+    /* fd-mapped buffers: flush CPU writes via DMA-BUF sync. */
     if (!nativeHandle) {
+        if (handle.virAddr) {
+            int bufFd = FindMappableFd(handle);
+            if (bufFd >= 0) {
+                DmaBufSync(bufFd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+                DmaBufSync(bufFd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
+            }
+        }
         return HDF_SUCCESS;
     }
 
@@ -507,9 +631,15 @@ int32_t HybrisBufferVdiImpl::FlushCache(const BufferHandle& handle) const
 int32_t HybrisBufferVdiImpl::InvalidateCache(const BufferHandle& handle) const
 {
     /* Re-locking invalidates the cache for subsequent CPU reads. */
-    buffer_handle_t nativeHandle = LoadNativeHandle(handle);
-    /* fd-mapped buffers: kernel DMA-BUF coherency, no gralloc flush needed. */
+    buffer_handle_t nativeHandle = UseGralloc() ? LoadNativeHandle(handle) : nullptr;
+    /* fd-mapped buffers: invalidate via DMA-BUF sync for CPU reads. */
     if (!nativeHandle) {
+        if (handle.virAddr) {
+            int bufFd = FindMappableFd(handle);
+            if (bufFd >= 0) {
+                DmaBufSync(bufFd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+            }
+        }
         return HDF_SUCCESS;
     }
 

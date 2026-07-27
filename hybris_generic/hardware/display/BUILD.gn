@@ -126,3 +126,29 @@ ohos_shared_library("libdisplay_buffer_vdi_impl") {
   innerapi_tags = [ "passthrough" ]
   part_name = "hybris_generic_soc"
 }
+
+# ─── fd-layout diagnostic for the app-sandbox mmap fallback ─────────────────
+
+ohos_executable("hybris_blob_buffer_test") {
+  sources = [ "test/hybris_blob_buffer_test.cpp" ]
+
+  include_dirs = [
+    "include",
+    "src/display_gralloc",
+    "//drivers/peripheral/display/utils/include",
+    "//drivers/peripheral/display/buffer/hdi_service/include",
+    "//drivers/interface/display/buffer",
+  ]
+
+  deps = [ ":libdisplay_buffer_vdi_impl" ]
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_display:display_buffer_idl_headers",
+    "graphic_surface:buffer_handle",
+    "hilog:libhilog",
+  ]
+
+  install_enable = false
+  part_name = "hybris_generic_soc"
+}
