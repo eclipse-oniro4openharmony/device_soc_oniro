@@ -186,7 +186,7 @@ int32_t HybrisLayer::SetLayerDirtyRegion(const std::vector<IRect>& rects)
 
 int32_t HybrisLayer::SetLayerBuffer(const BufferHandle& buffer, int32_t fence)
 {
-    DISPLAY_LOGI("HybrisLayer::SetLayerBuffer layerId=%u fence=%d", id_, fence);
+    DISPLAY_LOGI("HybrisLayer::SetLayerBuffer layerId=%{public}u fence=%{public}d", id_, fence);
     HybrisNativeBuffer* nb = BuildNativeBuffer(buffer);
     if (!nb) {
         DISPLAY_LOGE("BuildNativeBuffer failed for layer %u", id_);

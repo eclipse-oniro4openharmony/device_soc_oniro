@@ -604,6 +604,7 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
     nb.layerCount = 1;
     nb.handle = nh;
 
+    DISPLAY_LOGI("SetDisplayClientBuffer fd=%{public}d fence=%{public}d", buffer.fd, fence);
     hwc2_error_t err = hwc2_compat_display_set_client_target(display_,
         0, &nb, fence, HAL_DATASPACE_UNKNOWN);
 
@@ -655,7 +656,7 @@ int32_t HybrisDisplay::Commit(int32_t& fence)
 
     int32_t presentFence = -1;
     err = hwc2_compat_display_present(display_, &presentFence);
-    DISPLAY_LOGI("HybrisDisplay::Commit devId=%u presentFence=%d err=%d", devId_, presentFence, err);
+    DISPLAY_LOGI("HybrisDisplay::Commit devId=%{public}u presentFence=%{public}d err=%{public}d", devId_, presentFence, err);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
         DISPLAY_LOGE("hwc2_compat_display_present failed: %d", err));
 
