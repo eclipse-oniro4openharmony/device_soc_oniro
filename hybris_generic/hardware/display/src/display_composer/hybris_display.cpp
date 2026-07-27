@@ -438,7 +438,7 @@ int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
     if (numTypes == 0) {
         if (stickyClientLayers_.empty()) {
             /* Pure DEVICE steady-state — no GPU composite needed */
-            DISPLAY_LOGI("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u (DEVICE)",
+            DISPLAY_LOGD("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u (DEVICE)",
                 devId_, numRequests);
             needFlushFb = false;
             needsClientComposition_ = false;
@@ -453,7 +453,7 @@ int32_t HybrisDisplay::PrepareDisplayLayers(bool& needFlushFb)
              * call SetDisplayClientBuffer — otherwise the HAL would present a stale
              * client target.
              */
-            DISPLAY_LOGI("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u "
+            DISPLAY_LOGD("PrepareDisplayLayers devId=%u: numTypes=0 numRequests=%u "
                 "(%zu sticky CLIENT layer(s) — maintaining)",
                 devId_, numRequests, stickyClientLayers_.size());
             pendingClientLayers_ = stickyClientLayers_;
@@ -604,7 +604,7 @@ int32_t HybrisDisplay::SetDisplayClientBuffer(const BufferHandle& buffer, int32_
     nb.layerCount = 1;
     nb.handle = nh;
 
-    DISPLAY_LOGI("SetDisplayClientBuffer fd=%{public}d fence=%{public}d", buffer.fd, fence);
+    DISPLAY_LOGD("SetDisplayClientBuffer fd=%{public}d fence=%{public}d", buffer.fd, fence);
     hwc2_error_t err = hwc2_compat_display_set_client_target(display_,
         0, &nb, fence, HAL_DATASPACE_UNKNOWN);
 
@@ -656,7 +656,7 @@ int32_t HybrisDisplay::Commit(int32_t& fence)
 
     int32_t presentFence = -1;
     err = hwc2_compat_display_present(display_, &presentFence);
-    DISPLAY_LOGI("HybrisDisplay::Commit devId=%{public}u presentFence=%{public}d err=%{public}d", devId_, presentFence, err);
+    DISPLAY_LOGD("HybrisDisplay::Commit devId=%{public}u presentFence=%{public}d err=%{public}d", devId_, presentFence, err);
     DISPLAY_CHK_RETURN(err != HWC2_ERROR_NONE, HDF_FAILURE,
         DISPLAY_LOGE("hwc2_compat_display_present failed: %d", err));
 
