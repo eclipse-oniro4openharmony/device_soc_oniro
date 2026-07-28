@@ -15,6 +15,8 @@
           "hilog",
           "init",
           "drivers_interface_display",
+          "drivers_interface_sensor",
+          "drivers_interface_vibrator",
           "drivers_interface_wlan",
           "graphic_surface",
           "hdf_core",
