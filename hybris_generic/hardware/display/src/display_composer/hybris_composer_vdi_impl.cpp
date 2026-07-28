@@ -24,6 +24,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 #include "display_common.h"
 #include "parameter.h"
 
@@ -348,39 +349,57 @@ void HybrisComposerVdiImpl::OnRefresh(HWC2EventListener* /*self*/, int32_t /*seq
 
 void HybrisComposerVdiImpl::HandleHotplug(hwc2_display_t hwc2Id, bool connected)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    /*
+     * The callback must be invoked with mutex_ released: it makes a
+     * synchronous binder call into the client, and a client whose handler
+     * re-enters the composer HDI (HATS does; only RenderService defers) has
+     * that nested transaction dispatched on this very thread — re-acquiring
+     * mutex_ here would self-deadlock.
+     */
+    HotPlugCallback cb = nullptr;
+    void* cbData = nullptr;
+    uint32_t devId = 0;
+    bool fire = false;
 
-    if (connected) {
-        hwc2_compat_display_t* hwc2Disp =
-            hwc2_compat_device_get_display_by_id(device_, hwc2Id);
-        if (!hwc2Disp) {
-            DISPLAY_LOGE("hwc2_compat_device_get_display_by_id(%llu) returned null",
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (connected) {
+            hwc2_compat_display_t* hwc2Disp =
+                hwc2_compat_device_get_display_by_id(device_, hwc2Id);
+            if (!hwc2Disp) {
+                DISPLAY_LOGE("hwc2_compat_device_get_display_by_id(%llu) returned null",
+                    (unsigned long long)hwc2Id);
+                return;
+            }
+
+            devId = nextDevId_++;
+            displays_[devId] = std::make_unique<HybrisDisplay>(devId, hwc2Disp, hwc2Id);
+
+            DISPLAY_LOGI("Display %u connected (hwc2 id=%llu)", devId,
                 (unsigned long long)hwc2Id);
-            return;
-        }
 
-        uint32_t devId = nextDevId_++;
-        displays_[devId] = std::make_unique<HybrisDisplay>(devId, hwc2Disp, hwc2Id);
-
-        DISPLAY_LOGI("Display %u connected (hwc2 id=%llu)", devId,
-            (unsigned long long)hwc2Id);
-
-        if (hotplugCb_) {
-            hotplugCb_(devId, true, hotplugData_);
-        }
-    } else {
-        /* Find the devId that corresponds to this hwc2 display */
-        for (auto it = displays_.begin(); it != displays_.end(); ++it) {
-            if (it->second->GetHwc2DisplayId() == hwc2Id) {
-                uint32_t devId = it->first;
-                DISPLAY_LOGI("Display %u disconnected", devId);
-                if (hotplugCb_) {
-                    hotplugCb_(devId, false, hotplugData_);
+            cb = hotplugCb_;
+            cbData = hotplugData_;
+            fire = (cb != nullptr);
+        } else {
+            /* Find the devId that corresponds to this hwc2 display */
+            for (auto it = displays_.begin(); it != displays_.end(); ++it) {
+                if (it->second->GetHwc2DisplayId() == hwc2Id) {
+                    devId = it->first;
+                    DISPLAY_LOGI("Display %u disconnected", devId);
+                    cb = hotplugCb_;
+                    cbData = hotplugData_;
+                    fire = (cb != nullptr);
+                    displays_.erase(it);
+                    break;
                 }
-                displays_.erase(it);
-                break;
             }
         }
+    }
+
+    if (fire) {
+        cb(devId, connected, cbData);
     }
 }
 
@@ -447,9 +466,22 @@ int32_t HybrisComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data
      * to RSScreenManager causing spurious display creation.
      */
     if (!needRegister) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& kv : displays_) {
-            cb(kv.first, true, data);
+        /*
+         * Snapshot the connected ids and fire with mutex_ released: cb is a
+         * synchronous binder call, and the client's handler may re-enter the
+         * composer HDI on this same thread (nested transaction) — holding
+         * mutex_ across it self-deadlocks. See HandleHotplug.
+         */
+        std::vector<uint32_t> connectedIds;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connectedIds.reserve(displays_.size());
+            for (auto& kv : displays_) {
+                connectedIds.push_back(kv.first);
+            }
+        }
+        for (uint32_t id : connectedIds) {
+            cb(id, true, data);
         }
     }
     return HDF_SUCCESS;
