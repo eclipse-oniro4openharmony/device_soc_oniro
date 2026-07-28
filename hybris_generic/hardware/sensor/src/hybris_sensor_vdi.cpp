@@ -103,16 +103,20 @@ constexpr int32_t GROUP_MEDICAL = 1;
 struct SensorMapEntry {
     uint8_t mtkType;
     int32_t ohosType;
-    int valueCount;
+    int valueCount;   /* words carried by the hub event */
+    int reportCount;  /* floats the framework expects (sensor_napi_utils
+                       * g_sensorAttributeList; light needs 3: intensity,
+                       * colorTemperature, infraredLuminance) — extra
+                       * values are zero-padded */
     float maxRange;
     float power;
 };
 constexpr SensorMapEntry SENSOR_MAP[] = {
-    { 1, HDF_SENSOR_TYPE_ACCELEROMETER, 3, 39.2f, 0.5f },
-    { 4, HDF_SENSOR_TYPE_GYROSCOPE, 3, 34.9f, 0.9f },
-    { 2, HDF_SENSOR_TYPE_MAGNETIC_FIELD, 3, 4900.0f, 0.5f },
-    { 5, HDF_SENSOR_TYPE_AMBIENT_LIGHT, 1, 65535.0f, 0.1f },
-    { 8, HDF_SENSOR_TYPE_PROXIMITY, 1, 5.0f, 0.1f },
+    { 1, HDF_SENSOR_TYPE_ACCELEROMETER, 3, 3, 39.2f, 0.5f },
+    { 4, HDF_SENSOR_TYPE_GYROSCOPE, 3, 3, 34.9f, 0.9f },
+    { 2, HDF_SENSOR_TYPE_MAGNETIC_FIELD, 3, 3, 4900.0f, 0.5f },
+    { 5, HDF_SENSOR_TYPE_AMBIENT_LIGHT, 1, 3, 65535.0f, 0.1f },
+    { 8, HDF_SENSOR_TYPE_PROXIMITY, 1, 1, 5.0f, 0.1f },
 };
 
 const SensorMapEntry *FindByOhosType(int32_t ohosType)
@@ -380,14 +384,30 @@ private:
     void ReaderLoop()
     {
         HfManagerEvent events[8];
+        int errStreak = 0;
         while (running_) {
+            /* hf_manager returns 0 from read() while this client has no
+             * enabled sensors — that is NOT EOF. Wait for readability and
+             * treat empty reads as idle, or the reader dies at boot before
+             * the first Enable and every later sample is dropped on the
+             * kernel side ("buffer reset" kmsg spam). */
+            struct pollfd pfd = { fd_, POLLIN, 0 };
+            int pr = poll(&pfd, 1, 200);
+            if (pr <= 0) {
+                continue;
+            }
             ssize_t n = read(fd_, events, sizeof(events));
             if (n <= 0) {
-                if (!running_ || (errno != EINTR && errno != EAGAIN)) {
-                    break;
+                if (n < 0 && errno != EINTR && errno != EAGAIN) {
+                    if (++errStreak == 1 || errStreak % 500 == 0) {
+                        HDF_LOGE("%{public}s: read failed: %{public}d (streak %{public}d)",
+                            __func__, errno, errStreak);
+                    }
+                    usleep(20000);
                 }
                 continue;
             }
+            errStreak = 0;
             int count = static_cast<int>(n / static_cast<ssize_t>(sizeof(events[0])));
             for (int i = 0; i < count; i++) {
                 DispatchEvent(events[i]);
@@ -426,7 +446,7 @@ private:
         event.timestamp = ev.timestamp;
         event.option = 0;
         event.mode = 1; /* realtime */
-        event.dataLen = static_cast<uint32_t>(e->valueCount * sizeof(float));
+        event.dataLen = static_cast<uint32_t>(e->reportCount * sizeof(float));
         event.data.resize(event.dataLen);
         memcpy(event.data.data(), values, event.dataLen);
 
