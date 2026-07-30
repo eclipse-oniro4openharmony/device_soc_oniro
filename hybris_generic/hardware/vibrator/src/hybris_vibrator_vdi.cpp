@@ -15,9 +15,10 @@
  * limitations under the License.
  *
  * Vibrator VDI for hybris_generic: drives the LED-class vibrator node the
- * MTK/AWinic haptic drivers expose (/sys/class/leds/vibrator — aw-haptic-hv
- * on the Volla Phone Plinius). No HDF kernel driver is involved: a millisecond
- * count goes to `duration` and `activate` starts/stops the motor.
+ * MTK/AWinic haptic drivers expose (/sys/class/leds/vibrator — haptic_hv /
+ * aw8692x on the Volla Phone Plinius). No HDF kernel driver is involved: a
+ * millisecond count goes to the duration node and the activate node
+ * starts/stops the motor.
  */
 
 #include <cstdio>
@@ -41,6 +42,37 @@ namespace {
 
 constexpr const char *VIB_DIR = "/sys/class/leds/vibrator";
 
+struct VibNodes {
+    const char *activate;
+    const char *duration;
+};
+
+/* The AWinic haptic_hv driver (aw8692x, Volla Phone Plinius) exports *two*
+ * interfaces on the same LED class device, and only one of them honours the
+ * requested duration:
+ *
+ *   activate / duration       a timed_output-style compat shim. Writing 1
+ *                             arms a hrtimer and only when it expires does
+ *                             the driver fire a single fixed-length RAM
+ *                             click through the LED brightness path (the
+ *                             kernel prints "ram_select_waveform: duration
+ *                             time 0 error" — the brightness path never sees
+ *                             a duration). Net effect: the buzz is *late by*
+ *                             the requested duration instead of *lasting* it.
+ *   activate_aw / duration_aw the real interface, and the one the stock MTK
+ *                             AIDL HAL writes. The duration picks a waveform
+ *                             index, and anything past the short-click
+ *                             threshold plays in RAM-loop mode for exactly as
+ *                             long as asked.
+ *
+ * Init() takes the first pair the driver actually exposes, so the _aw pair
+ * wins where it exists and the plain LED-class names remain the fallback for
+ * drivers that only expose those (e.g. the Volla X23).
+ */
+constexpr VibNodes VIB_NODES_STD = { "activate", "duration" };
+constexpr VibNodes VIB_NODES_AW = { "activate_aw", "duration_aw" };
+constexpr VibNodes VIB_NODE_CANDIDATES[] = { VIB_NODES_AW, VIB_NODES_STD };
+
 /* Preset effects: this motor has no waveform library, so every supported
  * effect maps to a plain buzz of a plausible length. Unknown names must
  * fail with HDF_ERR_INVALID_PARAM (the framework and HATS rely on it). */
@@ -56,10 +88,23 @@ const std::map<std::string, uint32_t> g_effectDurationMs = {
     { "haptic.threshold", 30 },
 };
 
+constexpr size_t PATH_LEN = 128;
+
+bool MakePath(char (&path)[PATH_LEN], const char *file)
+{
+    return snprintf(path, PATH_LEN, "%s/%s", VIB_DIR, file) >= 0;
+}
+
+bool NodeWritable(const char *file)
+{
+    char path[PATH_LEN];
+    return MakePath(path, file) && access(path, W_OK) == 0;
+}
+
 int32_t WriteSysfs(const char *file, const std::string &value)
 {
-    char path[128];
-    if (snprintf(path, sizeof(path), "%s/%s", VIB_DIR, file) < 0) {
+    char path[PATH_LEN];
+    if (!MakePath(path, file)) {
         return HDF_FAILURE;
     }
     int fd = open(path, O_WRONLY);
@@ -82,17 +127,18 @@ class HybrisVibratorVdi : public IVibratorInterfaceVdi {
 public:
     int32_t Init() override
     {
-        char path[128];
-        if (snprintf(path, sizeof(path), "%s/activate", VIB_DIR) < 0) {
-            return HDF_FAILURE;
+        for (const VibNodes &candidate : VIB_NODE_CANDIDATES) {
+            if (!NodeWritable(candidate.activate)) {
+                continue;
+            }
+            nodes_ = candidate;
+            HDF_LOGI("%{public}s: using %{public}s/{%{public}s,%{public}s}",
+                __func__, VIB_DIR, nodes_.duration, nodes_.activate);
+            return HDF_SUCCESS;
         }
-        if (access(path, W_OK) != 0) {
-            HDF_LOGE("%{public}s: no writable vibrator node at %{public}s (%{public}d)",
-                __func__, path, errno);
-            return HDF_FAILURE;
-        }
-        HDF_LOGI("%{public}s: using %{public}s", __func__, VIB_DIR);
-        return HDF_SUCCESS;
+        HDF_LOGE("%{public}s: no writable vibrator node under %{public}s (%{public}d)",
+            __func__, VIB_DIR, errno);
+        return HDF_FAILURE;
     }
 
     int32_t StartOnce(uint32_t duration) override
@@ -112,6 +158,20 @@ public:
         return BuzzLocked(it->second);
     }
 
+    /* The framework's preset path (MiscdeviceService::PlayPrimitiveEffect →
+     * VibratorThread) calls StartByIntensity, never Start(), so without this
+     * override every haptic.* preset fell through to the base class, which
+     * just logs "only in Hdi return" and reports success — the caller saw no
+     * error and the motor never moved. Intensity is ignored on purpose:
+     * GetVibratorInfo advertises no intensity support, so the aw8692x `gain`
+     * node is left at its calibrated default. */
+    int32_t StartByIntensity(const std::string &effectType, uint16_t intensity) override
+    {
+        HDF_LOGD("%{public}s: effect [%{public}s] intensity %{public}u (intensity ignored)",
+            __func__, effectType.c_str(), intensity);
+        return Start(effectType);
+    }
+
     int32_t Stop(HdfVibratorModeVdi mode) override
     {
         if (mode >= VDI_VIBRATOR_MODE_BUTT) {
@@ -122,7 +182,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
-        return WriteSysfs("activate", "0");
+        return WriteSysfs(nodes_.activate, "0");
     }
 
     int32_t GetVibratorInfo(std::vector<HdfVibratorInfoVdi> &vibratorInfo) override
@@ -178,6 +238,12 @@ public:
         return Start(effectType);
     }
 
+    int32_t StartByIntensity(const V2_0::DeviceVibratorInfo &, const std::string &effectType,
+        uint16_t intensity) override
+    {
+        return StartByIntensity(effectType, intensity);
+    }
+
     int32_t Stop(const V2_0::DeviceVibratorInfo &, HdfVibratorModeVdi mode) override
     {
         return Stop(mode);
@@ -197,13 +263,16 @@ public:
 private:
     int32_t BuzzLocked(uint32_t durationMs)
     {
-        /* duration=0 must still succeed (HATS 0300): treat as no-op pulse. */
-        if (durationMs > 0) {
-            if (WriteSysfs("duration", std::to_string(durationMs)) != HDF_SUCCESS) {
-                return HDF_FAILURE;
-            }
+        /* duration=0 must still succeed (HATS 0300). Don't arm the motor for
+         * it: the driver ignores a 0 written to duration_aw, so activating
+         * anyway would replay whatever duration was set last. */
+        if (durationMs == 0) {
+            return HDF_SUCCESS;
         }
-        int32_t ret = WriteSysfs("activate", "1");
+        if (WriteSysfs(nodes_.duration, std::to_string(durationMs)) != HDF_SUCCESS) {
+            return HDF_FAILURE;
+        }
+        int32_t ret = WriteSysfs(nodes_.activate, "1");
         if (ret == HDF_SUCCESS) {
             running_ = true;
         }
@@ -212,6 +281,7 @@ private:
 
     std::mutex mutex_;
     bool running_ = false;
+    VibNodes nodes_ = VIB_NODES_STD;
 };
 
 static int32_t CreateVibratorVdiInstance(struct HdfVdiBase *vdiBase)
