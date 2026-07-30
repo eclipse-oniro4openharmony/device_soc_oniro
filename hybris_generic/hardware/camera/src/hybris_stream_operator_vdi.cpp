@@ -60,6 +60,89 @@ int32_t JpegLength(const uint8_t *data, int32_t len)
     return len;
 }
 
+/*
+ * Repairs the EXIF orientation tag of a freshly encoded still.
+ *
+ * When ACAMERA_JPEG_ORIENTATION asks for a rotation, the MT6878 HAL rotates the
+ * pixels itself but then writes 0 into the EXIF Orientation tag.  0 is not a
+ * legal value (1..8 are), so every decoder is free to guess: OHOS' media
+ * library ends up showing such photos rotated in the gallery even though the
+ * pixels are already upright.  The pixels are correct, so the honest tag is 1
+ * ("upper-left", no further rotation).  Only an out-of-range value is touched --
+ * a HAL that writes a real orientation keeps it.
+ */
+void FixupExifOrientation(uint8_t *data, int32_t len)
+{
+    constexpr int32_t APP1_MIN = 12;               // SOI + APP1 marker/length/"Exif\0\0"
+    constexpr uint16_t TAG_ORIENTATION = 0x0112;
+    constexpr int32_t IFD_ENTRY_BYTES = 12;
+    if (data == nullptr || len < APP1_MIN || data[0] != 0xff || data[1] != 0xd8) {
+        return;
+    }
+    // Locate the APP1/Exif segment by walking the marker chain from the SOI.
+    int32_t pos = 2;
+    while (pos + 4 <= len && data[pos] == 0xff) {
+        uint8_t marker = data[pos + 1];
+        int32_t segLen = (data[pos + 2] << 8) | data[pos + 3];
+        if (segLen < 2 || pos + 2 + segLen > len) {
+            return;
+        }
+        if (marker == 0xe1 && segLen >= 8 && memcmp(&data[pos + 4], "Exif\0\0", 6) == 0) {
+            break;
+        }
+        if (marker == 0xda) { // start of scan: no EXIF present
+            return;
+        }
+        pos += 2 + segLen;
+    }
+    if (pos + 4 > len || data[pos] != 0xff || data[pos + 1] != 0xe1) {
+        return;
+    }
+    const int32_t tiff = pos + 10;                 // start of the TIFF header
+    if (tiff + 8 > len) {
+        return;
+    }
+    const bool little = (data[tiff] == 'I' && data[tiff + 1] == 'I');
+    const bool big = (data[tiff] == 'M' && data[tiff + 1] == 'M');
+    if (!little && !big) { // not a TIFF header after all
+        return;
+    }
+    auto rd16 = [&](int32_t at) -> uint16_t {
+        return little ? static_cast<uint16_t>(data[at] | (data[at + 1] << 8))
+                      : static_cast<uint16_t>((data[at] << 8) | data[at + 1]);
+    };
+    auto wr16 = [&](int32_t at, uint16_t v) {
+        data[at]     = little ? static_cast<uint8_t>(v & 0xff) : static_cast<uint8_t>(v >> 8);
+        data[at + 1] = little ? static_cast<uint8_t>(v >> 8) : static_cast<uint8_t>(v & 0xff);
+    };
+    uint32_t ifdOff = little
+        ? (data[tiff + 4] | (data[tiff + 5] << 8) | (data[tiff + 6] << 16) |
+           (static_cast<uint32_t>(data[tiff + 7]) << 24))
+        : ((static_cast<uint32_t>(data[tiff + 4]) << 24) | (data[tiff + 5] << 16) |
+           (data[tiff + 6] << 8) | data[tiff + 7]);
+    const int64_t ifd = static_cast<int64_t>(tiff) + ifdOff;
+    if (ifd + 2 > len) {
+        return;
+    }
+    const uint16_t entries = rd16(static_cast<int32_t>(ifd));
+    for (uint16_t i = 0; i < entries; i++) {
+        const int64_t entry = ifd + 2 + static_cast<int64_t>(i) * IFD_ENTRY_BYTES;
+        if (entry + IFD_ENTRY_BYTES > len) {
+            return;
+        }
+        if (rd16(static_cast<int32_t>(entry)) != TAG_ORIENTATION) {
+            continue;
+        }
+        // SHORT value, stored left-aligned in the 4-byte value field.
+        const uint16_t value = rd16(static_cast<int32_t>(entry) + 8);
+        if (value == 0 || value > 8) {
+            wr16(static_cast<int32_t>(entry) + 8, 1);
+            HC_LOGI("repaired invalid EXIF orientation %{public}u -> 1", value);
+        }
+        return;
+    }
+}
+
 } // namespace
 
 HybrisStreamOperator::HybrisStreamOperator(const NdkApi *ndk, HybrisCameraDevice *device,
@@ -725,6 +808,7 @@ bool HybrisStreamOperator::DeliverBlob(Stream &stream, AImage *image, int64_t ti
     }
     int32_t copyLen = std::min<int32_t>(jpegLen, static_cast<int32_t>(sb->GetSize()));
     (void)memcpy(dst, data, static_cast<size_t>(copyLen));
+    FixupExifOrientation(dst, copyLen);
 
     const OHOS::sptr<OHOS::BufferExtraData> &extra = sb->GetExtraData();
     if (extra != nullptr) {

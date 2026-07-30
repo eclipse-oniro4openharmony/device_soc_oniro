@@ -358,6 +358,7 @@ void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosS
 
     if (OHOS::Camera::FindCameraMetadataItem(header, OHOS_JPEG_ORIENTATION, &item) == CAM_META_SUCCESS) {
         int32_t orientation = item.data.i32[0];
+        HC_LOGI("jpeg orientation %{public}d", orientation);
         ndk->ACaptureRequest_setEntry_i32(request, ACAMERA_JPEG_ORIENTATION, 1, &orientation);
     }
     if (OHOS::Camera::FindCameraMetadataItem(header, OHOS_JPEG_QUALITY, &item) == CAM_META_SUCCESS) {
@@ -379,6 +380,7 @@ void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosS
 const std::vector<int32_t> &SupportedResultTags()
 {
     static const std::vector<int32_t> tags = {
+        OHOS_CONTROL_FOCUS_MODE,
         OHOS_CONTROL_FOCUS_STATE,
         OHOS_CONTROL_EXPOSURE_STATE,
         OHOS_SENSOR_EXPOSURE_TIME,
@@ -400,6 +402,29 @@ std::shared_ptr<OHOS::Camera::CameraMetadata> BuildResultMetadata(
                std::find(enabled.begin(), enabled.end(), tag) != enabled.end();
     };
     ACameraMetadata_const_entry entry {};
+
+    /*
+     * CaptureSession::ProcessAutoFocusUpdates reads the focus MODE out of every
+     * result before it will look at the focus state, and logs an error per frame
+     * when it is missing -- so leaving it out both floods the log at frame rate
+     * and suppresses the app's focus-state callback.  Mirrors MapFocusModes.
+     */
+    if (wants(OHOS_CONTROL_FOCUS_MODE) &&
+        GetEntry(ndk, androidResult, ACAMERA_CONTROL_AF_MODE, entry)) {
+        uint8_t mode = OHOS_CAMERA_FOCUS_MODE_CONTINUOUS_AUTO;
+        switch (entry.data.u8[0]) {
+            case ACAMERA_CONTROL_AF_MODE_OFF:
+                mode = OHOS_CAMERA_FOCUS_MODE_MANUAL;
+                break;
+            case ACAMERA_CONTROL_AF_MODE_AUTO:
+            case ACAMERA_CONTROL_AF_MODE_MACRO:
+                mode = OHOS_CAMERA_FOCUS_MODE_AUTO;
+                break;
+            default: // CONTINUOUS_VIDEO / CONTINUOUS_PICTURE / EDOF
+                break;
+        }
+        result->addEntry(OHOS_CONTROL_FOCUS_MODE, &mode, 1);
+    }
 
     if (wants(OHOS_CONTROL_FOCUS_STATE) &&
         GetEntry(ndk, androidResult, ACAMERA_CONTROL_AF_STATE, entry)) {
