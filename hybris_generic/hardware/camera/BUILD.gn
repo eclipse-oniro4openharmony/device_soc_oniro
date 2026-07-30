@@ -1,0 +1,189 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Camera bridge to the Halium camera stack.  The Android CameraService and the
+# MTK camerahalserver already run in the androidd container; everything here
+# lives on the OHOS side of the binder seam.  See
+# device/board/oniro/docs/hybris_generic/camera_enablement_plan.md.
+
+import("//build/ohos.gni")
+import("//build/config/components/hc_gen/hc_gen.gni")
+import("//drivers/hdf_core/adapter/uhdf2/uhdf.gni")
+
+group("camera_vdi_model") {
+  deps = [
+    ":camera_host_config.hcb",
+    ":libcamera_host_vdi_impl_hybris",
+  ]
+}
+
+# ─── camera_host's VDI list ─────────────────────────────────────────────────
+#
+# Deliberately NOT routed through board_camera_path: that variable exists to
+# recompile the ~45k-LOC v4l2 reference VDI (and pulls its white-box HATS
+# suites back into the build).  All we need from the camera build system is
+# this one blob naming our library.
+
+hc_gen("build_camera_host_config") {
+  sources = [ rebase_path("hdf_config/camera_host_config.hcs") ]
+}
+
+ohos_prebuilt_etc("camera_host_config.hcb") {
+  deps = [ ":build_camera_host_config" ]
+  hcs_outputs = get_target_outputs(":build_camera_host_config")
+  source = hcs_outputs[0]
+  relative_install_dir = "hdfconfig"
+  install_images = [ chipset_base_dir ]
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# ─── the VDI itself ─────────────────────────────────────────────────────────
+
+ohos_shared_library("libcamera_host_vdi_impl_hybris") {
+  sources = [
+    "src/hybris_camera_device_vdi.cpp",
+    "src/hybris_camera_host_vdi.cpp",
+    "src/hybris_camera_metadata.cpp",
+    "src/hybris_camera_service_proxy.cpp",
+    "src/hybris_dl.cpp",
+    "src/hybris_ndk_api.cpp",
+    "src/hybris_stream_operator_vdi.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "//third_party/android-headers",
+    "//drivers/peripheral/camera/vdi_base/interfaces",
+    "//drivers/peripheral/camera/vdi_base/common/include",
+    "//drivers/peripheral/camera/interfaces/include",
+  ]
+
+  # No link-time dep on libhybris: HdfLoadVdi only looks in /vendor/lib64, and
+  # deps_guard will not let a module installed there link a system-image
+  # library.  src/hybris_dl.cpp dlopens libhybris-common instead — the same
+  # trick the audio VDI uses for libhardware.
+  deps = []
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_camera:libbuffer_producer_sequenceable_1.0",
+    "drivers_interface_camera:metadata",
+    "graphic_surface:surface",
+    "hdf_core:libhdf_host",
+    "hdf_core:libhdf_ipc_adapter",
+    "hdf_core:libhdf_utils",
+    "hdf_core:libhdi",
+    "hilog:libhilog",
+    "init:libbegetutil",
+    "ipc:ipc_single",
+  ]
+
+  defines = [
+    "ANDROID_VERSION_MAJOR=14",
+    "RTLD_LAZY=1",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=missing-braces",
+    "-Wno-error=#warnings",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=unused-variable",
+  ]
+
+  output_name = "libcamera_host_vdi_impl_hybris"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# ─── C0 harness ─────────────────────────────────────────────────────────────
+#
+# Standalone camera2-NDK client, hosted by libhybris, used to prove the
+# CameraService seam independently of the VDI.  Not installed into the image:
+# build it and `hdc file send` it to /data (plan §5 C0).
+
+ohos_executable("hybris_camera_test") {
+  sources = [
+    "src/hybris_camera_service_proxy.cpp",
+    "src/hybris_dl.cpp",
+    "test/hybris_camera_test.cpp",
+  ]
+
+  include_dirs = [
+    "include",
+    "//third_party/libhybris/hybris/include",
+    "//third_party/android-headers",
+  ]
+
+  deps = [ "//third_party/libhybris/hybris/common:libhybris-common" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  defines = [
+    "ANDROID_VERSION_MAJOR=14",
+    "RTLD_LAZY=1",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=missing-braces",
+    "-Wno-error=#warnings",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=unused-variable",
+  ]
+
+  install_enable = false
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# ─── end-to-end client ──────────────────────────────────────────────────────
+#
+# Drives SA 3008 -> camera_host -> this VDI -> the container's CameraService
+# through the camera_framework inner API, so preview and still capture can be
+# verified without com.ohos.camera (which ANRs in the media library long
+# before a viewfinder appears — see the file header).
+
+ohos_executable("hybris_camera_hdi_test") {
+  sources = [ "test/hybris_camera_hdi_test.cpp" ]
+
+  external_deps = [
+    "access_token:libaccesstoken_sdk",
+    # The *shared* nativetoken: the static one drags a CFI runtime into this
+    # binary, and its __cfi_check then rejects camera_framework's cross-DSO
+    # calls back into our IBufferConsumerListener.
+    "access_token:libnativetoken_shared",
+    "access_token:libtoken_setproc",
+    "c_utils:utils",
+    "camera_framework:camera_framework",
+    "drivers_interface_camera:metadata",
+    "graphic_surface:surface",
+    "hilog:libhilog",
+    "ipc:ipc_single",
+  ]
+
+  cflags_cc = [
+    "-Wno-error=unused-function",
+    "-Wno-error=unused-parameter",
+    "-Wno-error=unused-variable",
+  ]
+
+  install_enable = false
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}

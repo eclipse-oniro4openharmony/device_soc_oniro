@@ -102,6 +102,38 @@ static inline uint32_t HybrisBytesPerPixelOhos(uint32_t ohosFormat)
     }
 }
 
+/*
+ * Total bytes occupied by a buffer of this format.
+ *
+ * byteStride * height only covers the luma plane.  Planar and semi-planar YUV
+ * carry chroma after it — half again for 4:2:0, double for 4:2:2 planar — and
+ * under-reporting that size makes Mmap() map too little, so anyone writing the
+ * chroma plane runs off the end of the mapping.  The camera VDI is the first
+ * consumer on this port to allocate YUV, which is where this surfaced; RGB
+ * formats are unaffected.
+ */
+static inline uint32_t HybrisBufferBytesOhos(uint32_t ohosFormat, uint32_t byteStride,
+                                             uint32_t height)
+{
+    uint32_t luma = byteStride * height;
+    switch (ohosFormat) {
+        case 24: /* YCBCR_420_SP (NV12) */
+        case 25: /* YCRCB_420_SP (NV21) */
+        case 28: /* YCBCR_420_P  (I420) */
+        case 29: /* YCRCB_420_P  (YV12) */
+        case 35: /* YCBCR_P010          */
+        case 36: /* YCRCB_P010          */
+            return luma + luma / 2;
+        case 22: /* YCBCR_422_SP */
+        case 23: /* YCRCB_422_SP */
+        case 26: /* YCBCR_422_P  */
+        case 27: /* YCRCB_422_P  */
+            return luma * 2;
+        default:
+            return luma;
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

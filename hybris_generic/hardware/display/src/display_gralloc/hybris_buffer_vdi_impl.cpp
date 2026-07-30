@@ -368,7 +368,8 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
     bh->stride      = static_cast<int32_t>(byteStride);
     bh->format      = static_cast<int32_t>(info.format); /* keep OHOS format for upper layers */
     bh->usage       = info.usage;
-    bh->size        = static_cast<int32_t>(byteStride * info.height); /* total bytes */
+    bh->size        = static_cast<int32_t>(
+        HybrisBufferBytesOhos(info.format, byteStride, info.height)); /* incl. chroma */
     bh->virAddr     = nullptr;
     bh->phyAddr     = 0;
     bh->reserveFds  = reserveFds;

@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * camera_host reads vdiLibList from the compiled form of this file
+ * (/vendor/etc/hdfconfig/camera_host_config.hcb) and HdfLoadVdi's each entry
+ * from /vendor/lib64.  Without it the driver's Bind fails and no camera HDI
+ * service is ever published — which is why hybris_generic reported zero
+ * cameras before this bridge existed.
+ *
+ * The stock template carries a static per-camera ability tree as well; ours
+ * does not, because the abilities are synthesised at runtime from the Android
+ * camera characteristics (see camera_enablement_plan.md §D4).
+ */
+root {
+    module = "hybris_generic";
+    vdiLibList = [
+        "libcamera_host_vdi_impl_hybris.z.so"
+    ];
+}
