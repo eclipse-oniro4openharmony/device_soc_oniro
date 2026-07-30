@@ -55,6 +55,28 @@ public:
     int32_t IsSupportedAlloc(
         const std::vector<VerifyAllocInfo>& infos,
         std::vector<bool>& supporteds) const override;
+
+    /*
+     * Buffer metadata — not implemented on this port.
+     *
+     * These must be overridden: the IDisplayBufferVdi defaults return 0
+     * (DISPLAY_SUCCESS) while storing nothing, so GetMetadata reports success
+     * and hands back an empty value.  Callers that trust that contract (and
+     * the HATS DisplayBufferUt metadata round-trip) then see a silent data
+     * loss instead of an honest "unsupported".
+     *
+     * DISPLAY_NOT_SUPPORT matches the reference VDI
+     * (drivers/peripheral/display/buffer/vdi_base/src/display_buffer_vdi_impl.cpp),
+     * and SurfaceBufferImpl already treats it as a non-error for
+     * RegisterBuffer (surface_buffer_impl.cpp:253, :594).
+     */
+    int32_t RegisterBuffer(const BufferHandle& handle) override;
+    int32_t SetMetadata(const BufferHandle& handle, uint32_t key,
+                        const std::vector<uint8_t>& value) override;
+    int32_t GetMetadata(const BufferHandle& handle, uint32_t key,
+                        std::vector<uint8_t>& value) override;
+    int32_t ListMetadataKeys(const BufferHandle& handle, std::vector<uint32_t>& keys) override;
+    int32_t EraseMetadataKey(const BufferHandle& handle, uint32_t key) override;
 };
 
 } // namespace DISPLAY

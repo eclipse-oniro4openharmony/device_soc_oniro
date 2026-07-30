@@ -29,6 +29,7 @@
 #include "hdf_base.h"
 #include "hybris_buffer_layout.h"
 #include "parameter.h"
+#include "v1_0/display_composer_type.h" /* DispErrCode::DISPLAY_NOT_SUPPORT */
 
 /* libhybris gralloc API */
 #include <hybris/gralloc/gralloc.h>
@@ -243,6 +244,28 @@ static int FindMappableFd(const BufferHandle& handle)
     return handle.fd;
 }
 
+/*
+ * Size in bytes of the largest DMA-BUF among a native handle's fds.
+ *
+ * The pixel buffer is always the biggest fd of an MTK gralloc handle — the
+ * others are the small anon_inode gralloc_extra metadata fds (see
+ * FindMappableFd).  fstat on a DMA-BUF reports its allocated size, so this is
+ * the authoritative "how many bytes does this buffer actually have".
+ * Returns 0 if nothing could be stat'd.
+ */
+static int64_t LargestFdBytes(const native_handle_t* nh)
+{
+    int64_t best = 0;
+    for (int i = 0; i < nh->numFds; i++) {
+        struct stat st = {};
+        if (nh->data[i] >= 0 && fstat(nh->data[i], &st) == 0 &&
+            static_cast<int64_t>(st.st_size) > best) {
+            best = static_cast<int64_t>(st.st_size);
+        }
+    }
+    return best;
+}
+
 /* ─── DMA-BUF cache maintenance for fd-mapped buffers ────────────────────── */
 
 /*
@@ -368,8 +391,42 @@ int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& hand
     bh->stride      = static_cast<int32_t>(byteStride);
     bh->format      = static_cast<int32_t>(info.format); /* keep OHOS format for upper layers */
     bh->usage       = info.usage;
-    bh->size        = static_cast<int32_t>(
+
+    /*
+     * Report the size the buffer actually has, not the size the requested
+     * OHOS format implies.
+     *
+     * OhosFormatToAndroid() is a nearest-fit mapping: several OHOS formats
+     * have no exact HAL equivalent and are allocated with a *smaller* layout
+     * (PIXEL_FMT_YCRCB_422_SP -> HAL_PIXEL_FORMAT_YCRCB_420_SP is 1.5 bytes
+     * per pixel instead of 2).  HybrisBufferBytesOhos() describes the format
+     * the caller asked for, so on those formats it overstates the allocation
+     * by a third — and since every CPU consumer sizes its access off
+     * BufferHandle::size, it walks straight off the end of the mapping.
+     * HATS DisplayBufferMt 0130 died exactly this way: a 1024x1024 request
+     * wrote 2 MiB into the 1.5 MiB NV21 buffer gralloc had really handed out,
+     * SIGSEGV at mapping base + 0x181000.
+     *
+     * Clamping (rather than always trusting the fd) keeps the logical size
+     * whenever the allocation is at least that big — the normal case, where
+     * gralloc rounds up for stride/page alignment and the extra tail is not
+     * ours to describe.  It only ever shrinks the value, so it cannot
+     * introduce a new overrun.  It also un-breaks FindMappableFd(), which
+     * selects on `st_size >= handle.size` and would otherwise skip the real
+     * pixel fd and fall back to the unmappable metadata fd.
+     */
+    int32_t logicalSize = static_cast<int32_t>(
         HybrisBufferBytesOhos(info.format, byteStride, info.height)); /* incl. chroma */
+    int64_t allocBytes = LargestFdBytes(nh);
+    bh->size = (allocBytes > 0 && allocBytes < static_cast<int64_t>(logicalSize))
+                   ? static_cast<int32_t>(allocBytes)
+                   : logicalSize;
+    if (bh->size != logicalSize) {
+        DISPLAY_LOGW("AllocMem: ohosFmt=%{public}u (androidFmt=%{public}d) implies %{public}d bytes "
+                     "but gralloc allocated %{public}lld; clamping size to the allocation",
+                     info.format, androidFormat, logicalSize,
+                     static_cast<long long>(allocBytes));
+    }
     bh->virAddr     = nullptr;
     bh->phyAddr     = 0;
     bh->reserveFds  = reserveFds;
@@ -667,6 +724,59 @@ int32_t HybrisBufferVdiImpl::IsSupportedAlloc(
     (void)infos;
     (void)supporteds;
     return NOT_SUPPORT;
+}
+
+/* ─── Buffer metadata (unsupported) ──────────────────────────────────────── */
+
+/*
+ * libhybris' gralloc wrapper exposes no generic metadata channel (the gralloc4
+ * IMapper get/set-metadata API is not plumbed through hybris_gralloc), so this
+ * port cannot store or retrieve per-buffer metadata.
+ *
+ * Say so explicitly.  The IDisplayBufferVdi defaults return DISPLAY_SUCCESS
+ * without storing anything, which is worse than useless: GetMetadata reports
+ * success and yields an empty value, so a caller cannot tell "no metadata
+ * support" from "metadata was set to nothing".
+ */
+static constexpr int32_t kDisplayNotSupport =
+    OHOS::HDI::Display::Composer::V1_0::DISPLAY_NOT_SUPPORT;
+
+int32_t HybrisBufferVdiImpl::RegisterBuffer(const BufferHandle& handle)
+{
+    DISPLAY_UNUSED(handle);
+    return kDisplayNotSupport;
+}
+
+int32_t HybrisBufferVdiImpl::SetMetadata(const BufferHandle& handle, uint32_t key,
+                                         const std::vector<uint8_t>& value)
+{
+    DISPLAY_UNUSED(handle);
+    DISPLAY_UNUSED(key);
+    DISPLAY_UNUSED(value);
+    return kDisplayNotSupport;
+}
+
+int32_t HybrisBufferVdiImpl::GetMetadata(const BufferHandle& handle, uint32_t key,
+                                         std::vector<uint8_t>& value)
+{
+    DISPLAY_UNUSED(handle);
+    DISPLAY_UNUSED(key);
+    value.clear();
+    return kDisplayNotSupport;
+}
+
+int32_t HybrisBufferVdiImpl::ListMetadataKeys(const BufferHandle& handle, std::vector<uint32_t>& keys)
+{
+    DISPLAY_UNUSED(handle);
+    keys.clear();
+    return kDisplayNotSupport;
+}
+
+int32_t HybrisBufferVdiImpl::EraseMetadataKey(const BufferHandle& handle, uint32_t key)
+{
+    DISPLAY_UNUSED(handle);
+    DISPLAY_UNUSED(key);
+    return kDisplayNotSupport;
 }
 
 /* ─── Factory functions ──────────────────────────────────────────────────── */

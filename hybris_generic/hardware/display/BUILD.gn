@@ -92,6 +92,9 @@ ohos_shared_library("libdisplay_buffer_vdi_impl") {
     "//drivers/peripheral/display/utils/include",
     "//drivers/peripheral/display/buffer/hdi_service/include",
     "//drivers/interface/display/buffer",
+
+    # v1_0/display_composer_type.h (DispErrCode) pulls in hdifd_parcelable.h.
+    "//drivers/interface/display/composer/hdifd_parcelable",
   ]
 
   deps = [
@@ -103,6 +106,9 @@ ohos_shared_library("libdisplay_buffer_vdi_impl") {
   external_deps = [
     "c_utils:utils",
     "drivers_interface_display:display_buffer_idl_headers",
+
+    # DispErrCode (DISPLAY_NOT_SUPPORT) lives in the composer type header.
+    "drivers_interface_display:display_composer_idl_headers",
     "graphic_surface:buffer_handle",
     "hdf_core:libhdf_utils",
     "hilog:libhilog",
