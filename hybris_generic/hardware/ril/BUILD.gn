@@ -102,7 +102,10 @@ ohos_shared_library("libril_vendor_hybris") {
 
   deps = [ ":radio_aidl_ndk" ]
 
-  external_deps = [ "hilog:libhilog" ]
+  external_deps = [
+    "hilog:libhilog",
+    "init:libbegetutil",
+  ]
 
   cflags_cc = [
     "-Wno-error",

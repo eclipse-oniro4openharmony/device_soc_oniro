@@ -39,6 +39,10 @@ namespace radio = aidl::android::hardware::radio;
  * ("slot1").  Dual SIM is plan phase R7. */
 constexpr int32_t MAX_SLOTS = 1;
 
+/* Set to "1" by androidd once the Halium composer has registered — our
+ * proxy for "the container is serving binder".  See WaitForContainer(). */
+constexpr const char *CONTAINER_READY_PARAM = "android.composer.ready";
+
 /*
  * The bridge between hril's vendor ABI and the container's AIDL IRadio HAL.
  *
@@ -99,6 +103,7 @@ public:
 
 private:
     RilBridge() = default;
+    void WaitForContainer();
     void ConnectLoop();
     bool ConnectSlot(int32_t slotId);
 

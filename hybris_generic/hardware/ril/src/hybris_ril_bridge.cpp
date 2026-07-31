@@ -23,6 +23,8 @@
 
 #include <android/binder_manager.h>
 
+#include "parameter.h"
+
 #include "hril_notification.h"
 #include "hybris_binder_ndk.h"
 #include "hybris_ril_log.h"
@@ -96,8 +98,40 @@ bool RilBridge::ConnectSlot(int32_t slotId)
     return true;
 }
 
+/*
+ * Wait for the Halium container to be usable before touching binder.
+ *
+ * riladapter_host starts with the rest of the HDF hosts, well before
+ * androidd has finished bringing up the container, and joining the binder
+ * thread pool against a context manager that does not exist yet leaves a
+ * bionic binder thread spinning in the driver — one core pegged for the
+ * whole uptime, which is how this was found.  androidd flips
+ * `android.composer.ready` when the Halium composer registers, which is the
+ * same "container is serving binder" signal the camera and audio bridges
+ * gate on.
+ */
+void RilBridge::WaitForContainer()
+{
+    constexpr int32_t POLL_MS = 500;
+    constexpr int32_t TIMEOUT_MS = 180000;
+    for (int32_t waited = 0; waited < TIMEOUT_MS; waited += POLL_MS) {
+        char value[16] = { 0 };
+        if (GetParameter(CONTAINER_READY_PARAM, "0", value, sizeof(value)) > 0 &&
+            value[0] == '1') {
+            HR_LOGI("container ready after %{public}d ms", waited);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+    }
+    /* Carry on anyway: a container that never announced itself may still
+     * come up, and blocking here forever guarantees no cellular. */
+    HR_LOGW("%{public}s never set — continuing without it", CONTAINER_READY_PARAM);
+}
+
 void RilBridge::ConnectLoop()
 {
+    WaitForContainer();
+
     if (!BinderNdkInit()) {
         HR_LOGE("libbinder_ndk unavailable — no cellular");
         return;
