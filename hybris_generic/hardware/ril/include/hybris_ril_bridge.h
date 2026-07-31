@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <aidl/android/hardware/radio/modem/IRadioModem.h>
 #include <aidl/android/hardware/radio/network/IRadioNetwork.h>
@@ -104,6 +105,7 @@ public:
 private:
     RilBridge() = default;
     void WaitForContainer();
+    ::ndk::SpAIBinder AwaitService(const std::string &name);
     void ConnectLoop();
     bool ConnectSlot(int32_t slotId);
 

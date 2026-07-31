@@ -51,38 +51,66 @@ bool RilBridge::Connected() const
 }
 
 /*
- * AServiceManager_waitForService blocks until the instance appears, which is
- * exactly what we want on a dedicated thread: rild registers its radio
- * services only once the modem has left `exception` and finished booting,
- * several seconds after the container comes up.
+ * Deliberately AServiceManager_checkService in a poll loop, not
+ * waitForService.
+ *
+ * waitForService is the obvious call — rild only registers its radio
+ * services once the modem has left `exception`, several seconds after the
+ * container comes up — but it registers a service-notification callback with
+ * servicemanager, which requires this process to be able to *serve* incoming
+ * binder transactions.  Doing that against a servicemanager that is still
+ * coming up leaves a libbinder pool thread spinning: one core pegged for the
+ * rest of the uptime, in userspace, with no trace in our own logs.  It is a
+ * race, so it reproduces on some boots and not others.
+ *
+ * checkService is a plain one-shot lookup that returns null when the service
+ * is absent, needs nothing served back, and costs one binder round trip a
+ * second while we wait.
  */
+::ndk::SpAIBinder RilBridge::AwaitService(const std::string &name)
+{
+    constexpr int32_t POLL_MS = 1000;
+    constexpr int32_t TIMEOUT_MS = 300000;
+    for (int32_t waited = 0; waited < TIMEOUT_MS; waited += POLL_MS) {
+        ::ndk::SpAIBinder binder(AServiceManager_checkService(name.c_str()));
+        if (binder.get() != nullptr) {
+            return binder;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+    }
+    HR_LOGE("%{public}s never appeared", name.c_str());
+    return ::ndk::SpAIBinder();
+}
+
 bool RilBridge::ConnectSlot(int32_t slotId)
 {
     const std::string suffix = "/slot" + std::to_string(slotId + 1);
 
     std::string modemName = std::string(radio::modem::IRadioModem::descriptor) + suffix;
-    ::ndk::SpAIBinder modemBinder(AServiceManager_waitForService(modemName.c_str()));
-    auto modem = radio::modem::IRadioModem::fromBinder(modemBinder);
+    auto modem = radio::modem::IRadioModem::fromBinder(AwaitService(modemName));
     if (modem == nullptr) {
         HR_LOGE("no %{public}s", modemName.c_str());
         return false;
     }
 
     std::string netName = std::string(radio::network::IRadioNetwork::descriptor) + suffix;
-    ::ndk::SpAIBinder netBinder(AServiceManager_waitForService(netName.c_str()));
-    auto network = radio::network::IRadioNetwork::fromBinder(netBinder);
+    auto network = radio::network::IRadioNetwork::fromBinder(AwaitService(netName));
     if (network == nullptr) {
         HR_LOGE("no %{public}s", netName.c_str());
         return false;
     }
 
     std::string simName = std::string(radio::sim::IRadioSim::descriptor) + suffix;
-    ::ndk::SpAIBinder simBinder(AServiceManager_waitForService(simName.c_str()));
-    auto sim = radio::sim::IRadioSim::fromBinder(simBinder);
+    auto sim = radio::sim::IRadioSim::fromBinder(AwaitService(simName));
     if (sim == nullptr) {
         HR_LOGE("no %{public}s", simName.c_str());
         return false;
     }
+
+    /* Only now start serving: setResponseFunctions below hands rild binder
+     * objects it will call back into, so the pool has to exist — but not one
+     * moment earlier than that. */
+    BinderNdkStartThreadPool(2);
 
     {
         std::lock_guard<std::mutex> guard(lock_);
@@ -136,10 +164,8 @@ void RilBridge::ConnectLoop()
         HR_LOGE("libbinder_ndk unavailable — no cellular");
         return;
     }
-    /* Two binder threads: responses and indications arrive concurrently and
-     * the handlers below are short. */
-    BinderNdkStartThreadPool(2);
-
+    /* The thread pool is started later, once we actually hold a service
+     * handle — see ConnectSlot(). */
     for (int32_t slot = 0; slot < MAX_SLOTS; slot++) {
         while (!ConnectSlot(slot)) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
