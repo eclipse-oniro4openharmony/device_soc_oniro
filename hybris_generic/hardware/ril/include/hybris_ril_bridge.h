@@ -68,6 +68,10 @@ public:
 
     bool Connected() const;
 
+    /* Blocking one-shot lookup, for the domains that hold a service the
+     * bridge itself does not keep (hybris_ril_presence.cpp). */
+    ::ndk::SpAIBinder AwaitService(const std::string &name);
+
     std::shared_ptr<radio::modem::IRadioModem> Modem(int32_t slotId);
     std::shared_ptr<radio::sim::IRadioSim> Sim(int32_t slotId);
     std::shared_ptr<radio::network::IRadioNetwork> Network(int32_t slotId);
@@ -111,7 +115,6 @@ public:
 private:
     RilBridge() = default;
     void WaitForContainer();
-    ::ndk::SpAIBinder AwaitService(const std::string &name);
     void ConnectLoop();
     bool ConnectSlot(int32_t slotId);
 
@@ -151,6 +154,10 @@ void AttachNetworkCallbacks(int32_t slotId,
                             const std::shared_ptr<radio::network::IRadioNetwork> &network);
 void AttachMessagingCallbacks(int32_t slotId,
                               const std::shared_ptr<radio::messaging::IRadioMessaging> &messaging);
+
+/* Registers the interfaces we do not implement yet.  Not optional: MTK
+ * gates MT SMS on all seven being registered — see hybris_ril_presence.cpp. */
+bool AttachPresenceCallbacks(int32_t slotId);
 
 } // namespace HybrisRil
 } // namespace OHOS

@@ -29,12 +29,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIDL="${AIDL:?set AIDL=<path to aidl compiler>}"
 AOSP_RADIO="${AOSP_RADIO:?set AOSP_RADIO=<path to hardware/interfaces/radio>}"
 API="$AOSP_RADIO/aidl_api"
-VERSION=2
 
-# Every package the container publishes at v2.  `ims`, `ims.media` and `sap`
-# are frozen at v1 only and are out of scope for R0-R7 (plan §D8) — add them
-# here if R8 needs them.
-PKGS=(
+# Every package the container publishes, with the frozen version it
+# publishes it at (checked against /android/vendor/etc/vintf/manifest.xml
+# and the *-ndk.so set in /android/vendor/lib64).  Most are v2; `ims` is
+# frozen at v1 only.
+#
+# `ims` is not optional even though nothing here implements IMS.  MTK's
+# rild only treats the framework as connected once setResponseFunctions
+# has been called on *all seven* per-slot AOSP radio interfaces — see
+# rilAidlUtils::checkIfSetAllAospResponseDone() in librilfusion.so, and
+# plan §10 — and until then it refuses to deliver MT SMS.  So the client
+# has to be able to register on ims as well, if only with a stub.
+#
+# `ims.media` and `sap` are genuinely out of scope: they are not part of
+# that count.
+V2_PKGS=(
   android.hardware.radio
   android.hardware.radio.config
   android.hardware.radio.data
@@ -44,31 +54,48 @@ PKGS=(
   android.hardware.radio.sim
   android.hardware.radio.voice
 )
+V1_PKGS=(
+  android.hardware.radio.ims
+)
 
+# Include paths cover every package at its own version: the v1 ims
+# interfaces import v2 base types (RadioResponseInfo and friends), which
+# is exactly how the device's own libraries are built.
 INCS=()
-for p in "${PKGS[@]}"; do
-    [ -d "$API/$p/$VERSION" ] || { echo "missing $API/$p/$VERSION" >&2; exit 1; }
-    INCS+=(-I "$API/$p/$VERSION")
+for p in "${V2_PKGS[@]}"; do
+    [ -d "$API/$p/2" ] || { echo "missing $API/$p/2" >&2; exit 1; }
+    INCS+=(-I "$API/$p/2")
+done
+for p in "${V1_PKGS[@]}"; do
+    [ -d "$API/$p/1" ] || { echo "missing $API/$p/1" >&2; exit 1; }
+    INCS+=(-I "$API/$p/1")
 done
 
 rm -rf "$HERE/src" "$HERE/include"
 mkdir -p "$HERE/src" "$HERE/include"
 
-SRCS=()
-for p in "${PKGS[@]}"; do
-    while IFS= read -r f; do SRCS+=("$f"); done \
-        < <(find "$API/$p/$VERSION" -name '*.aidl' | sort)
-done
-
 # --stability=vintf matches the @VintfStability annotation the frozen
 # snapshots carry; without it the generated proxies refuse to talk to a
 # vintf-stable server.  --min_sdk_version only gates __INTRODUCED_IN
-# guards in the generated code.
-"$AIDL" --lang=ndk --structured --stability=vintf \
-        --version="$VERSION" --min_sdk_version=31 \
-        "${INCS[@]}" \
-        --out="$HERE/src" --header_out="$HERE/include" \
-        "${SRCS[@]}"
+# guards in the generated code.  --version applies to every input of one
+# invocation, so the two version groups are compiled separately.
+gen_group() {
+    local version="$1"; shift
+    local srcs=()
+    local p
+    for p in "$@"; do
+        while IFS= read -r f; do srcs+=("$f"); done \
+            < <(find "$API/$p/$version" -name '*.aidl' | sort)
+    done
+    "$AIDL" --lang=ndk --structured --stability=vintf \
+            --version="$version" --min_sdk_version=31 \
+            "${INCS[@]}" \
+            --out="$HERE/src" --header_out="$HERE/include" \
+            "${srcs[@]}"
+}
+
+gen_group 2 "${V2_PKGS[@]}"
+gen_group 1 "${V1_PKGS[@]}"
 
 # GN cannot glob, so publish the file list the build imports.
 {

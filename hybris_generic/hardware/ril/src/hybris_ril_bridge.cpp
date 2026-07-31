@@ -131,6 +131,12 @@ bool RilBridge::ConnectSlot(int32_t slotId)
     AttachSimCallbacks(slotId, sim);
     AttachNetworkCallbacks(slotId, network);
     AttachMessagingCallbacks(slotId, messaging);
+
+    /* The remaining three of the seven interfaces MTK counts before it
+     * considers the framework connected.  Registering only what we use
+     * leaves inbound SMS undeliverable — see hybris_ril_presence.cpp. */
+    AttachPresenceCallbacks(slotId);
+
     HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork/IRadioMessaging v2",
             slotId);
     return true;
