@@ -91,6 +91,7 @@ ohos_source_set("radio_aidl_ndk") {
 ohos_shared_library("libril_vendor_hybris") {
   sources = [
     "src/hybris_ril_bridge.cpp",
+    "src/hybris_ril_data.cpp",
     "src/hybris_ril_modem.cpp",
     "src/hybris_ril_network.cpp",
     "src/hybris_ril_presence.cpp",

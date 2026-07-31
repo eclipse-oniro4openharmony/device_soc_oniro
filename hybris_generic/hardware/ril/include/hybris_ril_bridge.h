@@ -24,6 +24,8 @@
 #include <mutex>
 #include <string>
 
+#include <aidl/android/hardware/radio/AccessNetwork.h>
+#include <aidl/android/hardware/radio/data/IRadioData.h>
 #include <aidl/android/hardware/radio/messaging/IRadioMessaging.h>
 #include <aidl/android/hardware/radio/modem/IRadioModem.h>
 #include <aidl/android/hardware/radio/network/IRadioNetwork.h>
@@ -76,11 +78,16 @@ public:
     std::shared_ptr<radio::sim::IRadioSim> Sim(int32_t slotId);
     std::shared_ptr<radio::network::IRadioNetwork> Network(int32_t slotId);
     std::shared_ptr<radio::messaging::IRadioMessaging> Messaging(int32_t slotId);
+    std::shared_ptr<radio::data::IRadioData> Data(int32_t slotId);
 
     /* Register an in-flight request and get the serial to pass to IRadio.
      * The ReqDataInfo is owned by hril and handed back by TakePending(). */
     int32_t Track(const ReqDataInfo *request);
     ReqDataInfo *TakePending(int32_t serial);
+
+    /* A serial for a request we make on our own behalf, with no hril request
+     * behind it.  The response handler finds nothing pending and drops it. */
+    int32_t NextSerial();
 
     /* Some IRadio indications only say "something changed" where HRil wants
      * the new value (registration is the case that matters).  Issue the
@@ -96,12 +103,14 @@ public:
     void ReportSim(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportNetwork(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportSms(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+    void ReportData(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
 
     /* Unsolicited notifications (requestInfo == NULL + notifyId). */
     void NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifySim(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifySms(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+    void NotifyData(int32_t slotId, int32_t notifyId, const void *data, size_t len);
 
     /* Fail an op that arrived before the AIDL side was up.  Reports
      * HRIL_ERR_GENERIC_FAILURE so the framework retries rather than wedging. */
@@ -111,6 +120,7 @@ public:
                         std::shared_ptr<radio::network::IRadioNetwork> *out);
     bool RequireSms(const ReqDataInfo *request,
                     std::shared_ptr<radio::messaging::IRadioMessaging> *out);
+    bool RequireData(const ReqDataInfo *request, std::shared_ptr<radio::data::IRadioData> *out);
 
 private:
     RilBridge() = default;
@@ -126,6 +136,7 @@ private:
     std::shared_ptr<radio::sim::IRadioSim> sim_[MAX_SLOTS];
     std::shared_ptr<radio::network::IRadioNetwork> network_[MAX_SLOTS];
     std::shared_ptr<radio::messaging::IRadioMessaging> messaging_[MAX_SLOTS];
+    std::shared_ptr<radio::data::IRadioData> data_[MAX_SLOTS];
     bool connected_ = false;
 
     struct NotifyTarget {
@@ -147,6 +158,7 @@ const HRilModemReq *ModemOps();
 const HRilSimReq *SimOps();
 const HRilNetworkReq *NetworkOps();
 const HRilSmsReq *SmsOps();
+const HRilDataReq *DataOps();
 
 /* Response/indication objects, created once per slot by the bridge. */
 void AttachModemCallbacks(int32_t slotId, const std::shared_ptr<radio::modem::IRadioModem> &modem);
@@ -155,6 +167,12 @@ void AttachNetworkCallbacks(int32_t slotId,
                             const std::shared_ptr<radio::network::IRadioNetwork> &network);
 void AttachMessagingCallbacks(int32_t slotId,
                               const std::shared_ptr<radio::messaging::IRadioMessaging> &messaging);
+void AttachDataCallbacks(int32_t slotId, const std::shared_ptr<radio::data::IRadioData> &data);
+
+/* The access network the *data* registration last reported, kept by the
+ * network domain.  The framework's own radio-technology field is unreliable
+ * on this port; see AccessNetworkFor() in hybris_ril_data.cpp. */
+radio::AccessNetwork LastDataAccessNetwork(int32_t slotId);
 
 /* Registers the interfaces we do not implement yet.  Not optional: MTK
  * gates MT SMS on all seven being registered — see hybris_ril_presence.cpp. */

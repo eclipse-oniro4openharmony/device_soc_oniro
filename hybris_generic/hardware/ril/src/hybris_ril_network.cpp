@@ -18,10 +18,12 @@
 /* networkOps — registration, operator and signal, mapped onto
  * android.hardware.radio.network v2. */
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <aidl/android/hardware/radio/AccessNetwork.h>
 #include <aidl/android/hardware/radio/network/BnRadioNetworkIndication.h>
 #include <aidl/android/hardware/radio/network/BnRadioNetworkResponse.h>
 #include <aidl/android/hardware/radio/network/CellIdentity.h>
@@ -145,6 +147,66 @@ void ToHrilRegStatusInfo(const rnet::RegStateResult &reg, HRilRegStatusInfo *out
 }
 
 /*
+ * The access network the data registration last reported.
+ *
+ * setupDataCall needs one, and the value the framework passes down with the
+ * activation is regularly RADIO_TECHNOLOGY_UNKNOWN on this port — see
+ * AccessNetworkFor() in hybris_ril_data.cpp for why.  Recording it here, at
+ * the one place it arrives first-hand, costs nothing and is strictly better
+ * information than a guess.
+ *
+ * Written from a binder thread, read from an hril dispatch thread, so it is
+ * atomic; a stale read is harmless (it can only be the previous RAT of the
+ * same registration).
+ */
+std::atomic<int32_t> g_dataAccessNetwork[MAX_SLOTS];
+
+radio::AccessNetwork ToAccessNetwork(radio::RadioTechnology rat)
+{
+    using RT = radio::RadioTechnology;
+    switch (rat) {
+        case RT::GPRS:
+        case RT::EDGE:
+        case RT::GSM:
+            return radio::AccessNetwork::GERAN;
+        case RT::UMTS:
+        case RT::HSDPA:
+        case RT::HSUPA:
+        case RT::HSPA:
+        case RT::HSPAP:
+        case RT::TD_SCDMA:
+            return radio::AccessNetwork::UTRAN;
+        case RT::LTE:
+            return radio::AccessNetwork::EUTRAN;
+        case RT::IS95A:
+        case RT::IS95B:
+        case RT::ONE_X_RTT:
+        case RT::EVDO_0:
+        case RT::EVDO_A:
+        case RT::EVDO_B:
+        case RT::EHRPD:
+            return radio::AccessNetwork::CDMA2000;
+        case RT::IWLAN:
+            return radio::AccessNetwork::IWLAN;
+        case RT::NR:
+            return radio::AccessNetwork::NGRAN;
+        default:
+            return radio::AccessNetwork::UNKNOWN;
+    }
+}
+
+void RememberDataAccessNetwork(int32_t slotId, radio::RadioTechnology rat)
+{
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return;
+    }
+    radio::AccessNetwork network = ToAccessNetwork(rat);
+    if (network != radio::AccessNetwork::UNKNOWN) {
+        g_dataAccessNetwork[slotId].store(static_cast<int32_t>(network));
+    }
+}
+
+/*
  * Signal strength is where the two dialects disagree most, and silently:
  * every field is an integer, so a wrong unit produces plausible-looking
  * nonsense rather than an error.
@@ -239,6 +301,8 @@ void ToHrilRssi(const rnet::SignalStrength &s, HRilRssi *out)
 
 class NetworkResponse : public rnet::IRadioNetworkResponseDefault {
 public:
+    explicit NetworkResponse(int32_t slotId) : slotId_(slotId) {}
+
     ::ndk::ScopedAStatus getSignalStrengthResponse(const radio::RadioResponseInfo &info,
                                                    const rnet::SignalStrength &sig) override
     {
@@ -265,6 +329,7 @@ public:
     ::ndk::ScopedAStatus getDataRegistrationStateResponse(
         const radio::RadioResponseInfo &info, const rnet::RegStateResult &reg) override
     {
+        RememberDataAccessNetwork(slotId_, reg.rat);
         return ReportReg(info, reg, "data");
     }
 
@@ -383,6 +448,8 @@ private:
                                        sizeof(out));
         return ::ndk::ScopedAStatus::ok();
     }
+
+    int32_t slotId_;
 };
 
 /* ---- indications ----------------------------------------------------- */
@@ -564,13 +631,21 @@ const HRilNetworkReq *NetworkOps()
     return &g_networkOps;
 }
 
+radio::AccessNetwork LastDataAccessNetwork(int32_t slotId)
+{
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return radio::AccessNetwork::UNKNOWN;
+    }
+    return static_cast<radio::AccessNetwork>(g_dataAccessNetwork[slotId].load());
+}
+
 void AttachNetworkCallbacks(int32_t slotId, const std::shared_ptr<rnet::IRadioNetwork> &network)
 {
     static std::shared_ptr<rnet::IRadioNetworkResponseDelegator> resp[MAX_SLOTS];
     static std::shared_ptr<rnet::IRadioNetworkIndicationDelegator> ind[MAX_SLOTS];
 
     resp[slotId] = ::ndk::SharedRefBase::make<rnet::IRadioNetworkResponseDelegator>(
-        ::ndk::SharedRefBase::make<NetworkResponse>());
+        ::ndk::SharedRefBase::make<NetworkResponse>(slotId));
     ind[slotId] = ::ndk::SharedRefBase::make<rnet::IRadioNetworkIndicationDelegator>(
         ::ndk::SharedRefBase::make<NetworkIndication>(slotId));
 

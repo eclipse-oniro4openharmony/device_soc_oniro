@@ -58,21 +58,20 @@ bool RilBridge::Connected() const
 }
 
 /*
- * Deliberately AServiceManager_checkService in a poll loop, not
- * waitForService.
+ * AServiceManager_checkService in a poll loop rather than waitForService.
  *
  * waitForService is the obvious call — rild only registers its radio
  * services once the modem has left `exception`, several seconds after the
  * container comes up — but it registers a service-notification callback with
  * servicemanager, which requires this process to be able to *serve* incoming
- * binder transactions.  Doing that against a servicemanager that is still
- * coming up leaves a libbinder pool thread spinning: one core pegged for the
- * rest of the uptime, in userspace, with no trace in our own logs.  It is a
- * race, so it reproduces on some boots and not others.
+ * binder transactions before it has any reason to.  checkService is a plain
+ * one-shot lookup that returns null when the service is absent, needs
+ * nothing served back, and costs one binder round trip a second while we
+ * wait, so the thread pool can stay unstarted until we hold a handle.
  *
- * checkService is a plain one-shot lookup that returns null when the service
- * is absent, needs nothing served back, and costs one binder round trip a
- * second while we wait.
+ * This is not what protects us from the pegged-core wedge: that one lives in
+ * defaultServiceManager(), which both calls go through — see
+ * ProbeServiceManager() below.
  */
 ::ndk::SpAIBinder RilBridge::AwaitService(const std::string &name)
 {
@@ -121,6 +120,13 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         return false;
     }
 
+    std::string dataName = std::string(radio::data::IRadioData::descriptor) + suffix;
+    auto data = radio::data::IRadioData::fromBinder(AwaitService(dataName));
+    if (data == nullptr) {
+        HR_LOGE("no %{public}s", dataName.c_str());
+        return false;
+    }
+
     /* Only now start serving: setResponseFunctions below hands rild binder
      * objects it will call back into, so the pool has to exist — but not one
      * moment earlier than that. */
@@ -132,20 +138,22 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         sim_[slotId] = sim;
         network_[slotId] = network;
         messaging_[slotId] = messaging;
+        data_[slotId] = data;
     }
 
     AttachModemCallbacks(slotId, modem);
     AttachSimCallbacks(slotId, sim);
     AttachNetworkCallbacks(slotId, network);
     AttachMessagingCallbacks(slotId, messaging);
+    AttachDataCallbacks(slotId, data);
 
-    /* The remaining three of the seven interfaces MTK counts before it
+    /* The remaining two of the seven interfaces MTK counts before it
      * considers the framework connected.  Registering only what we use
      * leaves inbound SMS undeliverable — see hybris_ril_presence.cpp. */
     AttachPresenceCallbacks(slotId);
 
-    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork/IRadioMessaging v2",
-            slotId);
+    HR_LOGI("slot %{public}d bound to "
+            "IRadioModem/IRadioSim/IRadioNetwork/IRadioMessaging/IRadioData v2", slotId);
     return true;
 }
 
@@ -396,6 +404,15 @@ std::shared_ptr<radio::messaging::IRadioMessaging> RilBridge::Messaging(int32_t 
     return messaging_[slotId];
 }
 
+std::shared_ptr<radio::data::IRadioData> RilBridge::Data(int32_t slotId)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return nullptr;
+    }
+    return data_[slotId];
+}
+
 int32_t RilBridge::Track(const ReqDataInfo *request)
 {
     std::lock_guard<std::mutex> guard(pendingLock_);
@@ -404,6 +421,16 @@ int32_t RilBridge::Track(const ReqDataInfo *request)
         nextSerial_ = 1;
     }
     pending_[serial] = const_cast<ReqDataInfo *>(request);
+    return serial;
+}
+
+int32_t RilBridge::NextSerial()
+{
+    std::lock_guard<std::mutex> guard(pendingLock_);
+    int32_t serial = nextSerial_++;
+    if (nextSerial_ < 0) {
+        nextSerial_ = 1;
+    }
     return serial;
 }
 
@@ -488,6 +515,17 @@ void RilBridge::ReportSms(const ReqDataInfo *request, int32_t err, const void *d
     reportOps_->OnSmsReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
+void RilBridge::ReportData(const ReqDataInfo *request, int32_t err, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr || request == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { const_cast<ReqDataInfo *>(request), 0, HRIL_RESPONSE,
+                               static_cast<HRilErrNumber>(err), { 0, static_cast<ReportErrorType>(0) },
+                               HRIL_UNNEED_ACK };
+    reportOps_->OnDataReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
 void RilBridge::NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len)
 {
     if (reportOps_ == nullptr) {
@@ -526,6 +564,16 @@ void RilBridge::NotifySms(int32_t slotId, int32_t notifyId, const void *data, si
     struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
                                { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
     reportOps_->OnSmsReport(slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
+void RilBridge::NotifyData(int32_t slotId, int32_t notifyId, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
+                               { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
+    reportOps_->OnDataReport(slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
 bool RilBridge::RequireModem(const ReqDataInfo *request,
@@ -588,6 +636,22 @@ bool RilBridge::RequireSms(const ReqDataInfo *request,
         return false;
     }
     *out = messaging;
+    return true;
+}
+
+bool RilBridge::RequireData(const ReqDataInfo *request,
+                            std::shared_ptr<radio::data::IRadioData> *out)
+{
+    if (request == nullptr) {
+        return false;
+    }
+    auto data = Data(request->slotId);
+    if (data == nullptr) {
+        HR_LOGW("request %{public}d before rild is up", request->request);
+        ReportData(request, HRIL_ERR_GENERIC_FAILURE, nullptr, 0);
+        return false;
+    }
+    *out = data;
     return true;
 }
 

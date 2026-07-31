@@ -17,6 +17,7 @@ Design, phases and the implementation log live in
 | `src/hybris_ril_sim.cpp` | `simOps` floor + `IRadioSimResponse`/`Indication`. |
 | `src/hybris_ril_network.cpp` | `networkOps` + `IRadioNetworkResponse`/`Indication`, including the three signal-strength encodings. |
 | `src/hybris_ril_sms.cpp` | `smsOps` + `IRadioMessagingResponse`/`Indication`. |
+| `src/hybris_ril_data.cpp` | `dataOps` + `IRadioDataResponse`/`Indication`, and the profile table MTK needs before it will activate a context. |
 | `src/hybris_ril_presence.cpp` | Stub registration for the interfaces we do not implement yet. **Not optional** — see below. |
 | `src/hybris_ril_dl.cpp` | libhybris loader (system-first search path). |
 | `binder_ndk_shim/` | 142 aarch64 tail-jump trampolines that give the generated code libbinder_ndk's C ABI, bound at load time through hybris. |
@@ -63,10 +64,31 @@ rild consider the framework connected. Registering only the interfaces
 you use leaves inbound SMS queued and NACKed forever while modem, SIM and
 network work normally, because none of those consult that state.
 
-`hybris_ril_presence.cpp` therefore registers the three we do not
-implement yet with the generated `Default` handlers. When data (R5) and
-voice (R6) land, they must **replace** their stub, not add a second
-registration — `setResponseFunctions` overwrites.
+`hybris_ril_presence.cpp` therefore registers the ones we do not
+implement yet with the generated `Default` handlers. When voice (R6)
+lands it must **replace** its stub, not add a second registration —
+`setResponseFunctions` overwrites. Data did exactly that in R5.
+
+## A NULL op is not a neutral answer
+
+hril answers a NULL member with `RIL_ERR_VENDOR_NOT_IMPLEMENT`, which
+reads like "this feature is unavailable" but is often "the framework
+stops here". Three `simOps` members left NULL by the R2 SIM floor each
+silently prevented mobile data from ever starting, with a fully working
+SIM, network registration and APN list:
+
+* `GetSimIO` — no elementary-file reads, so `RADIO_SIM_RECORDS_LOADED`
+  never fires and `cellular_data` never builds an APN list.
+* `SetActiveSim` — `MultiSimController::InitActive` fails, so
+  `RADIO_SIM_ACCOUNT_LOADED` never fires and `cellular_data` never
+  registers a net supplier for the connectivity manager to request.
+* (and `getImsiForApp` with an empty AID returns an empty IMSI, so the
+  operator numeric the APN lookup keys on is never derived.)
+
+The only signal any of these produce is one hril line,
+`reqFunSet or reqFuncSet->*fun is null`, with no request name. When a
+domain looks complete and the layer above it does nothing, check the
+table against what the framework actually calls.
 
 ## Two ways this seam wedges
 

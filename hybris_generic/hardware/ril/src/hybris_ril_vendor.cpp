@@ -29,7 +29,7 @@
  *
  * Ops tables may be partial: hril answers a NULL member with
  * RIL_ERR_VENDOR_NOT_IMPLEMENT, so the domains land one phase at a time
- * (plan §D4).  Currently: modem + the SIM floor.
+ * (plan §D4).  Currently: modem, SIM, network, SMS and data.
  */
 
 #include "hril.h"
@@ -38,12 +38,22 @@
 
 using namespace OHOS::HybrisRil;
 
+/*
+ * `version` is not an ABI version — HRilOps' layout is fixed — it is how
+ * hril decides which shape of a request to hand the vendor.  Today it gates
+ * exactly one thing: below 13, HRilData::ActivatePdpContextWithApnTypes
+ * flattens the request into the V1_1 HRilDataInfo, which has no apn-type
+ * bitmap, so every context would be set up as if it were the default one
+ * (hril_data.cpp:199).  Declaring 13 keeps the bitmap.
+ */
+constexpr int32_t HRIL_OPS_VERSION = 13;
+
 static HRilOps g_hrilOps = {
-    .version = 1,
+    .version = HRIL_OPS_VERSION,
     .callOps = nullptr,     /* R6 */
     .simOps = nullptr,      /* filled in below */
     .smsOps = nullptr,      /* filled in below */
-    .dataOps = nullptr,     /* R5 */
+    .dataOps = nullptr,     /* filled in below */
     .networkOps = nullptr,  /* filled in below */
     .modemOps = nullptr,
 };
@@ -59,6 +69,7 @@ const HRilOps *RilInitOps(const struct HRilReport *reportOps)
     g_hrilOps.simOps = SimOps();
     g_hrilOps.networkOps = NetworkOps();
     g_hrilOps.smsOps = SmsOps();
+    g_hrilOps.dataOps = DataOps();
 
     /* Must not block: this runs inside riladapter_host's HDF init, long
      * before rild has registered anything.  Start() only spawns the connect

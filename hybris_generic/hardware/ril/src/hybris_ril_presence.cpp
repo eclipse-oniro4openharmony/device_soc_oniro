@@ -40,24 +40,22 @@
  * working modem, SIM and network but silently never receives an SMS, with
  * nothing wrong on the OHOS side to find.
  *
- * So we register on all seven.  Three of them have no implementation here
- * (data is R5, voice R6, ims R8); they get the generated Default handlers,
- * which answer every callback with STATUS_UNKNOWN_TRANSACTION.  rild's
- * calls into them are oneway, so nothing observes that, and the
- * indications they would carry are ones we do not act on yet.
+ * So we register on all seven.  Two of them have no implementation here
+ * (voice is R6, ims R8); they get the generated Default handlers, which
+ * answer every callback with STATUS_UNKNOWN_TRANSACTION.  rild's calls into
+ * them are oneway, so nothing observes that, and the indications they would
+ * carry are ones we do not act on yet.
  *
- * When R5 and R6 land they should replace their stub here with a real
+ * When R6 lands it should replace its stub here with a real
  * response/indication object rather than adding a second registration —
  * setResponseFunctions overwrites, so registering twice would drop
- * whichever came first.
+ * whichever came first.  (Data did exactly that in R5: its stub is gone and
+ * hybris_ril_data.cpp registers instead, from ConnectSlot.)
  */
 
 #include <memory>
 #include <string>
 
-#include <aidl/android/hardware/radio/data/BnRadioDataIndication.h>
-#include <aidl/android/hardware/radio/data/BnRadioDataResponse.h>
-#include <aidl/android/hardware/radio/data/IRadioData.h>
 #include <aidl/android/hardware/radio/ims/BnRadioImsIndication.h>
 #include <aidl/android/hardware/radio/ims/BnRadioImsResponse.h>
 #include <aidl/android/hardware/radio/ims/IRadioIms.h>
@@ -72,12 +70,11 @@ namespace OHOS {
 namespace HybrisRil {
 namespace {
 
-namespace rdata = aidl::android::hardware::radio::data;
 namespace rvoice = aidl::android::hardware::radio::voice;
 namespace rims = aidl::android::hardware::radio::ims;
 
 /*
- * One registration.  Kept as a template because the three are identical
+ * One registration.  Kept as a template because the two are identical
  * apart from their types: look the service up, wrap the generated Default
  * in the generated Delegator (a Bn* skeleton, so it is a real binder
  * object), and hand it over.
@@ -116,20 +113,12 @@ bool RegisterStub(int32_t slotId, const char *what,
 
 bool AttachPresenceCallbacks(int32_t slotId)
 {
-    static std::shared_ptr<rdata::IRadioDataResponseDelegator> dataResp[MAX_SLOTS];
-    static std::shared_ptr<rdata::IRadioDataIndicationDelegator> dataInd[MAX_SLOTS];
     static std::shared_ptr<rvoice::IRadioVoiceResponseDelegator> voiceResp[MAX_SLOTS];
     static std::shared_ptr<rvoice::IRadioVoiceIndicationDelegator> voiceInd[MAX_SLOTS];
     static std::shared_ptr<rims::IRadioImsResponseDelegator> imsResp[MAX_SLOTS];
     static std::shared_ptr<rims::IRadioImsIndicationDelegator> imsInd[MAX_SLOTS];
 
     bool ok = true;
-
-    ok &= RegisterStub<rdata::IRadioData, rdata::IRadioDataResponseDefault,
-                       rdata::IRadioDataResponseDelegator,
-                       rdata::IRadioDataIndicationDefault,
-                       rdata::IRadioDataIndicationDelegator>(
-        slotId, "data", &dataResp[slotId], &dataInd[slotId]);
 
     ok &= RegisterStub<rvoice::IRadioVoice, rvoice::IRadioVoiceResponseDefault,
                        rvoice::IRadioVoiceResponseDelegator,
