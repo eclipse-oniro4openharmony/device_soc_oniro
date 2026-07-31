@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 
+#include <aidl/android/hardware/radio/messaging/IRadioMessaging.h>
 #include <aidl/android/hardware/radio/modem/IRadioModem.h>
 #include <aidl/android/hardware/radio/network/IRadioNetwork.h>
 #include <aidl/android/hardware/radio/sim/IRadioSim.h>
@@ -70,6 +71,7 @@ public:
     std::shared_ptr<radio::modem::IRadioModem> Modem(int32_t slotId);
     std::shared_ptr<radio::sim::IRadioSim> Sim(int32_t slotId);
     std::shared_ptr<radio::network::IRadioNetwork> Network(int32_t slotId);
+    std::shared_ptr<radio::messaging::IRadioMessaging> Messaging(int32_t slotId);
 
     /* Register an in-flight request and get the serial to pass to IRadio.
      * The ReqDataInfo is owned by hril and handed back by TakePending(). */
@@ -89,11 +91,13 @@ public:
     void ReportModem(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportSim(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportNetwork(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+    void ReportSms(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
 
     /* Unsolicited notifications (requestInfo == NULL + notifyId). */
     void NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifySim(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+    void NotifySms(int32_t slotId, int32_t notifyId, const void *data, size_t len);
 
     /* Fail an op that arrived before the AIDL side was up.  Reports
      * HRIL_ERR_GENERIC_FAILURE so the framework retries rather than wedging. */
@@ -101,6 +105,8 @@ public:
     bool RequireSim(const ReqDataInfo *request, std::shared_ptr<radio::sim::IRadioSim> *out);
     bool RequireNetwork(const ReqDataInfo *request,
                         std::shared_ptr<radio::network::IRadioNetwork> *out);
+    bool RequireSms(const ReqDataInfo *request,
+                    std::shared_ptr<radio::messaging::IRadioMessaging> *out);
 
 private:
     RilBridge() = default;
@@ -115,6 +121,7 @@ private:
     std::shared_ptr<radio::modem::IRadioModem> modem_[MAX_SLOTS];
     std::shared_ptr<radio::sim::IRadioSim> sim_[MAX_SLOTS];
     std::shared_ptr<radio::network::IRadioNetwork> network_[MAX_SLOTS];
+    std::shared_ptr<radio::messaging::IRadioMessaging> messaging_[MAX_SLOTS];
     bool connected_ = false;
 
     struct NotifyTarget {
@@ -135,12 +142,15 @@ int32_t ToHrilError(int32_t radioError);
 const HRilModemReq *ModemOps();
 const HRilSimReq *SimOps();
 const HRilNetworkReq *NetworkOps();
+const HRilSmsReq *SmsOps();
 
 /* Response/indication objects, created once per slot by the bridge. */
 void AttachModemCallbacks(int32_t slotId, const std::shared_ptr<radio::modem::IRadioModem> &modem);
 void AttachSimCallbacks(int32_t slotId, const std::shared_ptr<radio::sim::IRadioSim> &sim);
 void AttachNetworkCallbacks(int32_t slotId,
                             const std::shared_ptr<radio::network::IRadioNetwork> &network);
+void AttachMessagingCallbacks(int32_t slotId,
+                              const std::shared_ptr<radio::messaging::IRadioMessaging> &messaging);
 
 } // namespace HybrisRil
 } // namespace OHOS

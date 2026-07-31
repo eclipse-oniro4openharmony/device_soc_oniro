@@ -107,6 +107,13 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         return false;
     }
 
+    std::string msgName = std::string(radio::messaging::IRadioMessaging::descriptor) + suffix;
+    auto messaging = radio::messaging::IRadioMessaging::fromBinder(AwaitService(msgName));
+    if (messaging == nullptr) {
+        HR_LOGE("no %{public}s", msgName.c_str());
+        return false;
+    }
+
     /* Only now start serving: setResponseFunctions below hands rild binder
      * objects it will call back into, so the pool has to exist — but not one
      * moment earlier than that. */
@@ -117,12 +124,15 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         modem_[slotId] = modem;
         sim_[slotId] = sim;
         network_[slotId] = network;
+        messaging_[slotId] = messaging;
     }
 
     AttachModemCallbacks(slotId, modem);
     AttachSimCallbacks(slotId, sim);
     AttachNetworkCallbacks(slotId, network);
-    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork v2", slotId);
+    AttachMessagingCallbacks(slotId, messaging);
+    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork/IRadioMessaging v2",
+            slotId);
     return true;
 }
 
@@ -226,6 +236,15 @@ std::shared_ptr<radio::network::IRadioNetwork> RilBridge::Network(int32_t slotId
     return network_[slotId];
 }
 
+std::shared_ptr<radio::messaging::IRadioMessaging> RilBridge::Messaging(int32_t slotId)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return nullptr;
+    }
+    return messaging_[slotId];
+}
+
 int32_t RilBridge::Track(const ReqDataInfo *request)
 {
     std::lock_guard<std::mutex> guard(pendingLock_);
@@ -307,6 +326,17 @@ void RilBridge::ReportNetwork(const ReqDataInfo *request, int32_t err, const voi
     reportOps_->OnNetworkReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
+void RilBridge::ReportSms(const ReqDataInfo *request, int32_t err, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr || request == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { const_cast<ReqDataInfo *>(request), 0, HRIL_RESPONSE,
+                               static_cast<HRilErrNumber>(err), { 0, static_cast<ReportErrorType>(0) },
+                               HRIL_UNNEED_ACK };
+    reportOps_->OnSmsReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
 void RilBridge::NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len)
 {
     if (reportOps_ == nullptr) {
@@ -335,6 +365,16 @@ void RilBridge::NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data
     struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
                                { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
     reportOps_->OnNetworkReport(slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
+void RilBridge::NotifySms(int32_t slotId, int32_t notifyId, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
+                               { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
+    reportOps_->OnSmsReport(slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
 bool RilBridge::RequireModem(const ReqDataInfo *request,
@@ -381,6 +421,22 @@ bool RilBridge::RequireNetwork(const ReqDataInfo *request,
         return false;
     }
     *out = network;
+    return true;
+}
+
+bool RilBridge::RequireSms(const ReqDataInfo *request,
+                           std::shared_ptr<radio::messaging::IRadioMessaging> *out)
+{
+    if (request == nullptr) {
+        return false;
+    }
+    auto messaging = Messaging(request->slotId);
+    if (messaging == nullptr) {
+        HR_LOGW("request %{public}d before rild is up", request->request);
+        ReportSms(request, HRIL_ERR_GENERIC_FAILURE, nullptr, 0);
+        return false;
+    }
+    *out = messaging;
     return true;
 }
 

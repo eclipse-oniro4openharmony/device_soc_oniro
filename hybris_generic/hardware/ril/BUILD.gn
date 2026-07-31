@@ -94,6 +94,7 @@ ohos_shared_library("libril_vendor_hybris") {
     "src/hybris_ril_modem.cpp",
     "src/hybris_ril_network.cpp",
     "src/hybris_ril_sim.cpp",
+    "src/hybris_ril_sms.cpp",
     "src/hybris_ril_vendor.cpp",
   ]
 
