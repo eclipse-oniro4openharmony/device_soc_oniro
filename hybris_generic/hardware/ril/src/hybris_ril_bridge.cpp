@@ -150,20 +150,12 @@ bool RilBridge::ConnectSlot(int32_t slotId)
 }
 
 /*
- * Is the container's AIDL servicemanager running?
+ * Is a container process with this name running?
  *
- * `android.composer.ready` does NOT answer this.  androidd sets it from an
- * `lshal` probe, which queries **hwservicemanager** — the HIDL daemon on
- * /dev/hwbinder.  The AIDL servicemanager is a separate process owning the
- * context manager on /dev/binderfs/android-binder, and on a cold boot the
- * two are not ordered against each other: riladapter_host starts at ~4.9 s
- * and servicemanager at ~6.5 s, so the composer gate can open while nothing
- * is yet answering on the node we actually use.
- *
- * Reading comm out of /proc is enough and needs no privilege — the fd list
- * of a root process is not readable at our uid.  servicemanager claims the
- * context manager within microseconds of starting, and ProbeServiceManager()
- * below covers the remainder.
+ * The container has its own PID namespace but we are its parent, so its
+ * processes are visible here under host PIDs.  comm is world-readable,
+ * which the fd list of a root-owned process is not — so this is the only
+ * cheap probe available to us at the riladapter_host uid.
  */
 static bool ContainerProcessUp(const char *want)
 {
@@ -276,7 +268,17 @@ void RilBridge::WaitForContainer()
     HR_LOGW("%{public}s never set — continuing without it", CONTAINER_READY_PARAM);
 }
 
-/* The gate that actually matters for binder: the AIDL servicemanager. */
+/*
+ * The gate that actually matters for binder: the AIDL servicemanager.
+ *
+ * `android.composer.ready` does NOT imply it.  androidd sets that from an
+ * `lshal` probe, which queries **hwservicemanager** — the HIDL daemon on
+ * /dev/hwbinder.  The AIDL servicemanager is a different process, owning
+ * the context manager on /dev/binderfs/android-binder, and the two are not
+ * ordered against each other: on a cold boot riladapter_host starts at
+ * ~4.9 s and servicemanager at ~6.5 s, so the composer gate can open while
+ * nothing is yet answering on the node we actually use.
+ */
 void RilBridge::WaitForServiceManager()
 {
     constexpr int32_t SM_TIMEOUT_MS = 180000;
