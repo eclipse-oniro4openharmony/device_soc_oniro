@@ -66,6 +66,14 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         return false;
     }
 
+    std::string netName = std::string(radio::network::IRadioNetwork::descriptor) + suffix;
+    ::ndk::SpAIBinder netBinder(AServiceManager_waitForService(netName.c_str()));
+    auto network = radio::network::IRadioNetwork::fromBinder(netBinder);
+    if (network == nullptr) {
+        HR_LOGE("no %{public}s", netName.c_str());
+        return false;
+    }
+
     std::string simName = std::string(radio::sim::IRadioSim::descriptor) + suffix;
     ::ndk::SpAIBinder simBinder(AServiceManager_waitForService(simName.c_str()));
     auto sim = radio::sim::IRadioSim::fromBinder(simBinder);
@@ -78,11 +86,13 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         std::lock_guard<std::mutex> guard(lock_);
         modem_[slotId] = modem;
         sim_[slotId] = sim;
+        network_[slotId] = network;
     }
 
     AttachModemCallbacks(slotId, modem);
     AttachSimCallbacks(slotId, sim);
-    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim v2", slotId);
+    AttachNetworkCallbacks(slotId, network);
+    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork v2", slotId);
     return true;
 }
 
@@ -110,8 +120,17 @@ void RilBridge::ConnectLoop()
     /*
      * core_service asks for radio state and SIM status long before rild is
      * reachable, and those early requests are answered with an error.  Nudge
-     * it to re-query now that the answers are real — the same two
-     * notifications a modem reset would produce.
+     * it to re-query now that the answers are real.
+     *
+     * The radio-state notification says OFF, and that is deliberate.
+     * NetworkSearchManager caches this value and never polls the vendor for
+     * it; left at its initial NOT_AVAILABLE the state machine simply waits
+     * for a modem that, as far as it knows, is not there.  Told OFF, it
+     * checks airplane mode, decides the radio should be on, and calls
+     * SetRadioState(1) — at which point the setRadioPower response reports
+     * the real transition to ON (hybris_ril_modem.cpp).  IRadio v2 has no
+     * getRadioState, so asserting OFF and letting the framework correct us
+     * is the only way to get an accurate answer.
      */
     for (int32_t slot = 0; slot < MAX_SLOTS; slot++) {
         int32_t state = HRIL_RADIO_POWER_STATE_OFF;
@@ -138,6 +157,15 @@ std::shared_ptr<radio::sim::IRadioSim> RilBridge::Sim(int32_t slotId)
     return sim_[slotId];
 }
 
+std::shared_ptr<radio::network::IRadioNetwork> RilBridge::Network(int32_t slotId)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return nullptr;
+    }
+    return network_[slotId];
+}
+
 int32_t RilBridge::Track(const ReqDataInfo *request)
 {
     std::lock_guard<std::mutex> guard(pendingLock_);
@@ -159,6 +187,30 @@ ReqDataInfo *RilBridge::TakePending(int32_t serial)
     ReqDataInfo *req = it->second;
     pending_.erase(it);
     return req;
+}
+
+int32_t RilBridge::TrackNotify(int32_t slotId, int32_t notifyId)
+{
+    std::lock_guard<std::mutex> guard(pendingLock_);
+    int32_t serial = nextSerial_++;
+    if (nextSerial_ < 0) {
+        nextSerial_ = 1;
+    }
+    notifying_[serial] = { slotId, notifyId };
+    return serial;
+}
+
+bool RilBridge::TakeNotify(int32_t serial, int32_t *slotId, int32_t *notifyId)
+{
+    std::lock_guard<std::mutex> guard(pendingLock_);
+    auto it = notifying_.find(serial);
+    if (it == notifying_.end()) {
+        return false;
+    }
+    *slotId = it->second.slotId;
+    *notifyId = it->second.notifyId;
+    notifying_.erase(it);
+    return true;
 }
 
 void RilBridge::ReportModem(const ReqDataInfo *request, int32_t err, const void *data, size_t len)
@@ -183,6 +235,18 @@ void RilBridge::ReportSim(const ReqDataInfo *request, int32_t err, const void *d
     reportOps_->OnSimReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
+void RilBridge::ReportNetwork(const ReqDataInfo *request, int32_t err, const void *data,
+                              size_t len)
+{
+    if (reportOps_ == nullptr || request == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { const_cast<ReqDataInfo *>(request), 0, HRIL_RESPONSE,
+                               static_cast<HRilErrNumber>(err), { 0, static_cast<ReportErrorType>(0) },
+                               HRIL_UNNEED_ACK };
+    reportOps_->OnNetworkReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
 void RilBridge::NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len)
 {
     if (reportOps_ == nullptr) {
@@ -201,6 +265,16 @@ void RilBridge::NotifySim(int32_t slotId, int32_t notifyId, const void *data, si
     struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
                                { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
     reportOps_->OnSimReport(slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
+void RilBridge::NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
+                               { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
+    reportOps_->OnNetworkReport(slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
 bool RilBridge::RequireModem(const ReqDataInfo *request,
@@ -231,6 +305,22 @@ bool RilBridge::RequireSim(const ReqDataInfo *request, std::shared_ptr<radio::si
         return false;
     }
     *out = sim;
+    return true;
+}
+
+bool RilBridge::RequireNetwork(const ReqDataInfo *request,
+                               std::shared_ptr<radio::network::IRadioNetwork> *out)
+{
+    if (request == nullptr) {
+        return false;
+    }
+    auto network = Network(request->slotId);
+    if (network == nullptr) {
+        HR_LOGW("request %{public}d before rild is up", request->request);
+        ReportNetwork(request, HRIL_ERR_GENERIC_FAILURE, nullptr, 0);
+        return false;
+    }
+    *out = network;
     return true;
 }
 

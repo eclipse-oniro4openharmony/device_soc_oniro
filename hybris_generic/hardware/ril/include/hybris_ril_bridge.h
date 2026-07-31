@@ -24,6 +24,7 @@
 #include <mutex>
 
 #include <aidl/android/hardware/radio/modem/IRadioModem.h>
+#include <aidl/android/hardware/radio/network/IRadioNetwork.h>
 #include <aidl/android/hardware/radio/sim/IRadioSim.h>
 
 #include "hril.h"
@@ -63,25 +64,38 @@ public:
 
     std::shared_ptr<radio::modem::IRadioModem> Modem(int32_t slotId);
     std::shared_ptr<radio::sim::IRadioSim> Sim(int32_t slotId);
+    std::shared_ptr<radio::network::IRadioNetwork> Network(int32_t slotId);
 
     /* Register an in-flight request and get the serial to pass to IRadio.
      * The ReqDataInfo is owned by hril and handed back by TakePending(). */
     int32_t Track(const ReqDataInfo *request);
     ReqDataInfo *TakePending(int32_t serial);
 
+    /* Some IRadio indications only say "something changed" where HRil wants
+     * the new value (registration is the case that matters).  Issue the
+     * matching getter with a serial from TrackNotify(), and the response
+     * handler turns the answer into notification `notifyId` instead of a
+     * solicited reply. */
+    int32_t TrackNotify(int32_t slotId, int32_t notifyId);
+    bool TakeNotify(int32_t serial, int32_t *slotId, int32_t *notifyId);
+
     /* Solicited responses.  `err` is an HRilErrNumber; data/len are the
      * domain payload hril expects (NULL/0 when the request has none). */
     void ReportModem(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportSim(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+    void ReportNetwork(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
 
     /* Unsolicited notifications (requestInfo == NULL + notifyId). */
     void NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifySim(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+    void NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data, size_t len);
 
     /* Fail an op that arrived before the AIDL side was up.  Reports
      * HRIL_ERR_GENERIC_FAILURE so the framework retries rather than wedging. */
     bool RequireModem(const ReqDataInfo *request, std::shared_ptr<radio::modem::IRadioModem> *out);
     bool RequireSim(const ReqDataInfo *request, std::shared_ptr<radio::sim::IRadioSim> *out);
+    bool RequireNetwork(const ReqDataInfo *request,
+                        std::shared_ptr<radio::network::IRadioNetwork> *out);
 
 private:
     RilBridge() = default;
@@ -93,10 +107,17 @@ private:
     mutable std::mutex lock_;
     std::shared_ptr<radio::modem::IRadioModem> modem_[MAX_SLOTS];
     std::shared_ptr<radio::sim::IRadioSim> sim_[MAX_SLOTS];
+    std::shared_ptr<radio::network::IRadioNetwork> network_[MAX_SLOTS];
     bool connected_ = false;
+
+    struct NotifyTarget {
+        int32_t slotId;
+        int32_t notifyId;
+    };
 
     std::mutex pendingLock_;
     std::map<int32_t, ReqDataInfo *> pending_;
+    std::map<int32_t, NotifyTarget> notifying_;
     int32_t nextSerial_ = 1;
 };
 
@@ -106,10 +127,13 @@ int32_t ToHrilError(int32_t radioError);
 /* The op tables, defined per domain. */
 const HRilModemReq *ModemOps();
 const HRilSimReq *SimOps();
+const HRilNetworkReq *NetworkOps();
 
 /* Response/indication objects, created once per slot by the bridge. */
 void AttachModemCallbacks(int32_t slotId, const std::shared_ptr<radio::modem::IRadioModem> &modem);
 void AttachSimCallbacks(int32_t slotId, const std::shared_ptr<radio::sim::IRadioSim> &sim);
+void AttachNetworkCallbacks(int32_t slotId,
+                            const std::shared_ptr<radio::network::IRadioNetwork> &network);
 
 } // namespace HybrisRil
 } // namespace OHOS

@@ -44,7 +44,7 @@ static HRilOps g_hrilOps = {
     .simOps = nullptr,      /* filled in below */
     .smsOps = nullptr,      /* R4 */
     .dataOps = nullptr,     /* R5 */
-    .networkOps = nullptr,  /* R3 */
+    .networkOps = nullptr,  /* filled in below */
     .modemOps = nullptr,
 };
 
@@ -57,6 +57,7 @@ const HRilOps *RilInitOps(const struct HRilReport *reportOps)
     HR_LOGI("RilInitOps");
     g_hrilOps.modemOps = ModemOps();
     g_hrilOps.simOps = SimOps();
+    g_hrilOps.networkOps = NetworkOps();
 
     /* Must not block: this runs inside riladapter_host's HDF init, long
      * before rild has registered anything.  Start() only spawns the connect

@@ -18,7 +18,9 @@
 /* modemOps — HRilModemReq mapped onto android.hardware.radio.modem v2. */
 
 #include <atomic>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <aidl/android/hardware/radio/modem/BnRadioModemIndication.h>
@@ -33,10 +35,32 @@ namespace OHOS {
 namespace HybrisRil {
 namespace {
 
-/* The modem's last known power state, so GetRadioState can answer without a
- * round trip (IRadio has no getter — the state arrives only as an
- * indication, and rild replays it on setResponseFunctions). */
-std::atomic<int32_t> g_radioState{HRIL_RADIO_POWER_STATE_UNAVAILABLE};
+/*
+ * The modem's last known power state.  IRadio v2 has no getRadioState — the
+ * value only ever arrives as a radioStateChanged indication, and rild sends
+ * that on a *change*, so a client attaching to an already-powered modem is
+ * told nothing.  Track it from the two events that do carry the truth: the
+ * indication, and our own successful setRadioPower.
+ *
+ * Getting this wrong is not subtle.  core_service's NetworkSearchHandler
+ * polls GetRadioState every 3 s and calls NetworkSearchState::SetInitial —
+ * wiping the registration it just learned — for as long as the answer is
+ * anything but ON.  The two wrong answers fail differently:
+ *
+ *   UNAVAILABLE  RadioOffOrUnavailableState just waits for the modem to
+ *                appear, so nothing ever powers the radio on.
+ *   OFF          the same state machine reads airplane mode, decides the
+ *                radio should be on, and calls SetRadioState(1).
+ *
+ * So OFF is the right starting point: it makes the framework assert the
+ * state it wants, and the setRadioPower response tells us the truth.
+ */
+std::atomic<int32_t> g_radioState{HRIL_RADIO_POWER_STATE_OFF};
+
+/* setRadioPower's response does not echo the value that was requested, so
+ * remember it per serial.  Small and short-lived: hril serialises requests. */
+std::mutex g_powerLock;
+std::map<int32_t, bool> g_powerRequests;
 
 int32_t ToHrilRadioState(radio::modem::RadioState state)
 {
@@ -85,7 +109,29 @@ public:
 
     ::ndk::ScopedAStatus setRadioPowerResponse(const radio::RadioResponseInfo &info) override
     {
+        bool requestedOn = false;
+        bool known = false;
+        {
+            std::lock_guard<std::mutex> guard(g_powerLock);
+            auto it = g_powerRequests.find(info.serial);
+            if (it != g_powerRequests.end()) {
+                requestedOn = it->second;
+                known = true;
+                g_powerRequests.erase(it);
+            }
+        }
+
         ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (known && info.error == radio::RadioError::NONE) {
+            int32_t state = requestedOn ? HRIL_RADIO_POWER_STATE_ON
+                                        : HRIL_RADIO_POWER_STATE_OFF;
+            if (g_radioState.exchange(state) != state) {
+                HR_LOGI("radio power -> %{public}d", state);
+                RilBridge::Get().NotifyModem(req != nullptr ? req->slotId : 0,
+                                             HNOTI_MODEM_RADIO_STATE_UPDATED, &state,
+                                             sizeof(state));
+            }
+        }
         if (req == nullptr) {
             return ::ndk::ScopedAStatus::ok();
         }
@@ -160,8 +206,13 @@ void SetRadioState(const ReqDataInfo *requestInfo, int32_t fun, int32_t rst)
     if (!RilBridge::Get().RequireModem(requestInfo, &modem)) {
         return;
     }
+    bool on = (fun != HRIL_RADIO_POWER_STATE_OFF);
     int32_t serial = RilBridge::Get().Track(requestInfo);
-    modem->setRadioPower(serial, fun != HRIL_RADIO_POWER_STATE_OFF, false, false);
+    {
+        std::lock_guard<std::mutex> guard(g_powerLock);
+        g_powerRequests[serial] = on;
+    }
+    modem->setRadioPower(serial, on, false, false);
 }
 
 void GetRadioState(const ReqDataInfo *requestInfo)
