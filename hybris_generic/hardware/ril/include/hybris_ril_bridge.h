@@ -115,6 +115,7 @@ public:
 private:
     RilBridge() = default;
     void WaitForContainer();
+    void WaitForServiceManager();
     void ConnectLoop();
     bool ConnectSlot(int32_t slotId);
 

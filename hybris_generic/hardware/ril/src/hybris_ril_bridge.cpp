@@ -17,9 +17,16 @@
 
 #include "hybris_ril_bridge.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
+
+#include <dirent.h>
+#include <unistd.h>
 
 #include <android/binder_manager.h>
 
@@ -143,6 +150,103 @@ bool RilBridge::ConnectSlot(int32_t slotId)
 }
 
 /*
+ * Is the container's AIDL servicemanager running?
+ *
+ * `android.composer.ready` does NOT answer this.  androidd sets it from an
+ * `lshal` probe, which queries **hwservicemanager** — the HIDL daemon on
+ * /dev/hwbinder.  The AIDL servicemanager is a separate process owning the
+ * context manager on /dev/binderfs/android-binder, and on a cold boot the
+ * two are not ordered against each other: riladapter_host starts at ~4.9 s
+ * and servicemanager at ~6.5 s, so the composer gate can open while nothing
+ * is yet answering on the node we actually use.
+ *
+ * Reading comm out of /proc is enough and needs no privilege — the fd list
+ * of a root process is not readable at our uid.  servicemanager claims the
+ * context manager within microseconds of starting, and ProbeServiceManager()
+ * below covers the remainder.
+ */
+static bool ContainerProcessUp(const char *want)
+{
+    DIR *proc = opendir("/proc");
+    if (proc == nullptr) {
+        return false;
+    }
+    bool found = false;
+    struct dirent *ent;
+    while (!found && (ent = readdir(proc)) != nullptr) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') {
+            continue;
+        }
+        char path[64];
+        (void)snprintf(path, sizeof path, "/proc/%s/comm", ent->d_name);
+        FILE *f = fopen(path, "re");
+        if (f == nullptr) {
+            continue;
+        }
+        char comm[64] = { 0 };
+        if (fgets(comm, sizeof comm, f) != nullptr) {
+            comm[strcspn(comm, "\n")] = '\0';
+            found = (strcmp(comm, want) == 0);
+        }
+        (void)fclose(f);
+    }
+    (void)closedir(proc);
+    return found;
+}
+
+static bool WaitForContainerProcess(const char *comm, int32_t timeoutMs)
+{
+    constexpr int32_t POLL_MS = 500;
+    for (int32_t waited = 0; waited < timeoutMs; waited += POLL_MS) {
+        if (ContainerProcessUp(comm)) {
+            HR_LOGI("container %{public}s up after %{public}d ms", comm, waited);
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+    }
+    return false;
+}
+
+/*
+ * Make first contact with the container's servicemanager somewhere we can
+ * walk away from.
+ *
+ * libbinder caches the servicemanager proxy under std::call_once, and the
+ * initialiser retries internally until it gets a context object.  Called
+ * before servicemanager has claimed the context manager, that retry never
+ * completes — and because the once-flag is already taken, no later call can
+ * redo it.  The result is a thread spinning at 100% inside
+ * android::defaultServiceManager() for the rest of the uptime, with the
+ * rest of the process working fine and nothing in our own logs.  Every
+ * AServiceManager_* entry point goes through it, so choosing checkService
+ * over waitForService does not avoid this.
+ *
+ * There is no way to cancel a wedged call_once, so the only recovery is a
+ * fresh process: probe on a detached thread, and if it has not returned by
+ * the deadline, exit and let hdf_devmgr restart us.
+ */
+static bool ProbeServiceManager(int32_t timeoutMs)
+{
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread([done]() {
+        /* Any name will do — this exists to force the one-time bootstrap,
+         * and an absent service is the cheapest possible lookup. */
+        ::ndk::SpAIBinder ignored(AServiceManager_checkService("hybris.ril.probe"));
+        (void)ignored;
+        done->store(true);
+    }).detach();
+
+    constexpr int32_t POLL_MS = 100;
+    for (int32_t waited = 0; waited < timeoutMs; waited += POLL_MS) {
+        if (done->load()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+    }
+    return false;
+}
+
+/*
  * Wait for the Halium container to be usable before touching binder.
  *
  * riladapter_host starts with the rest of the HDF hosts, well before
@@ -172,6 +276,30 @@ void RilBridge::WaitForContainer()
     HR_LOGW("%{public}s never set — continuing without it", CONTAINER_READY_PARAM);
 }
 
+/* The gate that actually matters for binder: the AIDL servicemanager. */
+void RilBridge::WaitForServiceManager()
+{
+    constexpr int32_t SM_TIMEOUT_MS = 180000;
+    if (!WaitForContainerProcess("servicemanager", SM_TIMEOUT_MS)) {
+        HR_LOGW("no container servicemanager after %{public}d ms — trying anyway", SM_TIMEOUT_MS);
+        return;
+    }
+
+    /*
+     * servicemanager existing is necessary but not sufficient: it claims the
+     * context manager shortly after exec, and a probe that lands in that
+     * window still wedges (observed on a cold boot even with a 500 ms
+     * settle).  rild is the cheap sufficient signal — it is a binder client
+     * of servicemanager, so if it is running, servicemanager has been
+     * answering for a while.  Best-effort: if rild never appears we still
+     * go on, and ProbeServiceManager() is the backstop either way.
+     */
+    constexpr int32_t RILD_TIMEOUT_MS = 60000;
+    if (!WaitForContainerProcess("mtkfusionrild", RILD_TIMEOUT_MS)) {
+        HR_LOGW("no mtkfusionrild after %{public}d ms — probing anyway", RILD_TIMEOUT_MS);
+    }
+}
+
 void RilBridge::ConnectLoop()
 {
     WaitForContainer();
@@ -179,6 +307,21 @@ void RilBridge::ConnectLoop()
     if (!BinderNdkInit()) {
         HR_LOGE("libbinder_ndk unavailable — no cellular");
         return;
+    }
+
+    WaitForServiceManager();
+
+    /* One shot, and it is the whole process's shot — see
+     * ProbeServiceManager().  A healthy bootstrap takes milliseconds, and
+     * a lookup for an absent service returns just as fast once
+     * servicemanager answers, so the only slow case is the wedge: keep the
+     * deadline short so a lost race costs one restart, not a burnt core. */
+    constexpr int32_t PROBE_TIMEOUT_MS = 15000;
+    if (!ProbeServiceManager(PROBE_TIMEOUT_MS)) {
+        HR_LOGE("servicemanager bootstrap wedged — restarting the host");
+        /* _exit, not exit: the wedged thread is inside the container's
+         * libbinder and static destructors would run against it. */
+        _exit(1);
     }
     /* The thread pool is started later, once we actually hold a service
      * handle — see ConnectSlot(). */
