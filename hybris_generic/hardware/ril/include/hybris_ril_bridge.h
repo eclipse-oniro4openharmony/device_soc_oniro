@@ -1,0 +1,117 @@
+/*
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef HYBRIS_RIL_BRIDGE_H
+#define HYBRIS_RIL_BRIDGE_H
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+
+#include <aidl/android/hardware/radio/modem/IRadioModem.h>
+#include <aidl/android/hardware/radio/sim/IRadioSim.h>
+
+#include "hril.h"
+
+namespace OHOS {
+namespace HybrisRil {
+
+namespace radio = aidl::android::hardware::radio;
+
+/* OHOS runs this product as a single-card build (const.telephony.slotCount=1),
+ * so only slot 0 is wired for now; the Android instance names are 1-based
+ * ("slot1").  Dual SIM is plan phase R7. */
+constexpr int32_t MAX_SLOTS = 1;
+
+/*
+ * The bridge between hril's vendor ABI and the container's AIDL IRadio HAL.
+ *
+ * hril hands us a request as a `ReqDataInfo *` that we must report against
+ * exactly once, then it frees it.  IRadio is the same shape — a client-chosen
+ * `serial` echoed back in the response callback — so the whole correlation is
+ * one map from our serial to hril's request.
+ *
+ * Threading: hril dispatches requests serialised under a process-global mutex
+ * on binder threads, so vendor ops must never block.  Every op therefore just
+ * fires the AIDL call and returns; the answer is reported later from a bionic
+ * binder thread inside the response callback.
+ */
+class RilBridge {
+public:
+    static RilBridge &Get();
+
+    /* Called from RilInitOps.  Records hril's callbacks and starts the
+     * connect thread; never blocks. */
+    void Start(const struct HRilReport *reportOps);
+
+    bool Connected() const;
+
+    std::shared_ptr<radio::modem::IRadioModem> Modem(int32_t slotId);
+    std::shared_ptr<radio::sim::IRadioSim> Sim(int32_t slotId);
+
+    /* Register an in-flight request and get the serial to pass to IRadio.
+     * The ReqDataInfo is owned by hril and handed back by TakePending(). */
+    int32_t Track(const ReqDataInfo *request);
+    ReqDataInfo *TakePending(int32_t serial);
+
+    /* Solicited responses.  `err` is an HRilErrNumber; data/len are the
+     * domain payload hril expects (NULL/0 when the request has none). */
+    void ReportModem(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+    void ReportSim(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+
+    /* Unsolicited notifications (requestInfo == NULL + notifyId). */
+    void NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+    void NotifySim(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+
+    /* Fail an op that arrived before the AIDL side was up.  Reports
+     * HRIL_ERR_GENERIC_FAILURE so the framework retries rather than wedging. */
+    bool RequireModem(const ReqDataInfo *request, std::shared_ptr<radio::modem::IRadioModem> *out);
+    bool RequireSim(const ReqDataInfo *request, std::shared_ptr<radio::sim::IRadioSim> *out);
+
+private:
+    RilBridge() = default;
+    void ConnectLoop();
+    bool ConnectSlot(int32_t slotId);
+
+    const struct HRilReport *reportOps_ = nullptr;
+
+    mutable std::mutex lock_;
+    std::shared_ptr<radio::modem::IRadioModem> modem_[MAX_SLOTS];
+    std::shared_ptr<radio::sim::IRadioSim> sim_[MAX_SLOTS];
+    bool connected_ = false;
+
+    std::mutex pendingLock_;
+    std::map<int32_t, ReqDataInfo *> pending_;
+    int32_t nextSerial_ = 1;
+};
+
+/* AIDL RadioError -> HRilErrNumber, with a conservative default. */
+int32_t ToHrilError(int32_t radioError);
+
+/* The op tables, defined per domain. */
+const HRilModemReq *ModemOps();
+const HRilSimReq *SimOps();
+
+/* Response/indication objects, created once per slot by the bridge. */
+void AttachModemCallbacks(int32_t slotId, const std::shared_ptr<radio::modem::IRadioModem> &modem);
+void AttachSimCallbacks(int32_t slotId, const std::shared_ptr<radio::sim::IRadioSim> &sim);
+
+} // namespace HybrisRil
+} // namespace OHOS
+
+#endif // HYBRIS_RIL_BRIDGE_H

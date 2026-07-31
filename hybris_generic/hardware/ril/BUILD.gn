@@ -1,0 +1,141 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cellular bridge to the Halium radio stack.  mtkfusionrild and the MTK modem
+# already run in the androidd container and publish the standard AIDL
+# android.hardware.radio.* v2 HAL; everything here lives on the OHOS side of
+# the binder seam.  See
+# device/board/oniro/docs/hybris_generic/cellular_enablement_plan.md.
+
+import("//build/ohos.gni")
+import("aidl_gen/sources.gni")
+
+group("ril_hybris_group") {
+  deps = [
+    ":hybris_ril_test",
+    ":libril_vendor_hybris",
+  ]
+}
+
+# ─── AOSP-generated AIDL client/server + the libbinder_ndk bridge ──────────
+#
+# aidl_gen/ is AOSP's own `aidl --lang=ndk` output for the frozen v2 radio
+# interfaces, compiled here for OHOS/musl.  It calls the libbinder_ndk C ABI,
+# which only exists in the container — binder_ndk_shim/ turns each of those
+# calls into a tail jump through a table that hybris fills at runtime.
+
+config("radio_aidl_public_config") {
+  include_dirs = [
+    "include",
+    "aidl_gen/include",
+    "android_binder_ndk/include_ndk",
+    "android_binder_ndk/include_cpp",
+    "android_binder_ndk/include_platform",
+  ]
+
+  # Bionic-isms and the @VintfStability switch — see binder_ndk_compat.h.
+  cflags_cc = [
+    "-include",
+    rebase_path("android_binder_ndk/binder_ndk_compat.h", root_build_dir),
+  ]
+}
+
+ohos_source_set("radio_aidl_ndk") {
+  sources = radio_aidl_sources
+  sources += [
+    "binder_ndk_shim/binder_ndk_trampolines.S",
+    "binder_ndk_shim/hybris_binder_ndk.cpp",
+    "src/hybris_ril_dl.cpp",
+  ]
+
+  include_dirs = [ "binder_ndk_shim" ]
+
+  public_configs = [ ":radio_aidl_public_config" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  # Generated code is not written to our warning settings, and the frozen
+  # v2 interfaces still carry the methods AOSP deprecated in U.
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-deprecated-declarations",
+    "-Wno-unused-parameter",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-implicit-fallthrough",
+  ]
+
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ─── the vendor RIL ───────────────────────────────────────────────────────
+#
+# Loaded by riladapter_host through hril_hdf's `const.sys.radio.vendorlib.path`
+# parameter (set per device in init.ansuz.cfg).  Only headers are taken from
+# ril_adapter — the vendor ABI is one exported symbol plus the HRilReport
+# callbacks hril passes in, so there is nothing to link against.
+
+ohos_shared_library("libril_vendor_hybris") {
+  sources = [
+    "src/hybris_ril_bridge.cpp",
+    "src/hybris_ril_modem.cpp",
+    "src/hybris_ril_sim.cpp",
+    "src/hybris_ril_vendor.cpp",
+  ]
+
+  include_dirs =
+      [ "//base/telephony/ril_adapter/interfaces/innerkits/include" ]
+
+  deps = [ ":radio_aidl_ndk" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-deprecated-declarations",
+    "-Wno-unused-parameter",
+  ]
+
+  output_name = "libril_vendor_hybris"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ─── R1 harness ───────────────────────────────────────────────────────────
+#
+# Standalone AIDL IRadio v2 client, hosted by libhybris, used to prove the
+# rild seam independently of any OHOS telephony plumbing.  Not installed into
+# the image: build it and `hdc file send` it to /data (plan §5 R1).
+
+ohos_executable("hybris_ril_test") {
+  sources = [ "test/hybris_ril_test.cpp" ]
+
+  deps = [ ":radio_aidl_ndk" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-deprecated-declarations",
+    "-Wno-unused-parameter",
+  ]
+
+  install_enable = false
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}

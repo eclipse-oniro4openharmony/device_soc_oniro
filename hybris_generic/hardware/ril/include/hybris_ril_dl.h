@@ -1,0 +1,37 @@
+/*
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef HYBRIS_RIL_DL_H
+#define HYBRIS_RIL_DL_H
+
+namespace OHOS {
+namespace HybrisRil {
+
+/*
+ * libhybris' Android loader, reached without a link-time dependency — the
+ * same arrangement the camera and audio bridges use.  The vendor RIL library
+ * installs to /vendor/lib64, and deps_guard will not let a module there link
+ * a system-image library such as libhybris-common.
+ */
+void *HybrisDlopen(const char *filename, int flag);
+void *HybrisDlsym(void *handle, const char *symbol);
+const char *HybrisDlerror();
+
+} // namespace HybrisRil
+} // namespace OHOS
+
+#endif // HYBRIS_RIL_DL_H
