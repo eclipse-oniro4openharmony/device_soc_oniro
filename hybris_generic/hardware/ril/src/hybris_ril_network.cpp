@@ -145,39 +145,94 @@ void ToHrilRegStatusInfo(const rnet::RegStateResult &reg, HRilRegStatusInfo *out
 }
 
 /*
- * Both sides use "invalid" sentinels but not the same one: AIDL says
- * INT32_MAX, OHOS's framework expects the 3GPP "unknown" codes it would
- * have parsed out of an AT +CESQ (99 for a level, 255 for a dBm-derived
- * value).  Pass the sentinel through unchanged and the signal bars read
- * as full-strength garbage.
+ * Signal strength is where the two dialects disagree most, and silently:
+ * every field is an integer, so a wrong unit produces plausible-looking
+ * nonsense rather than an error.
+ *
+ * OHOS wants **dBm** throughout — SignalInformation's thresholds are
+ * {-113 … -87} and friends, and a value counts as valid only if it is
+ * < -1 (SIGNAL_RSSI_MAXIMUM).  AIDL, following TS 27.007 §8.69 and the
+ * Android framework's own conventions, uses three different encodings:
+ *
+ *   LTE/NR rsrp, rsrq, CDMA dbm   dBm (or dB) multiplied by -1
+ *   GSM rxlev, W/TD-SCDMA rscp    the TS 27.007 §8.69 index
+ *   LTE rssnr, CDMA ecio          tenths of a dB
+ *
+ * and spells "unreported" INT32_MAX everywhere.  Feeding any of that
+ * through unchanged leaves the bars showing full signal on a dead cell
+ * (INT32_MAX is >= every threshold), which is exactly what happened
+ * first time round.
+ *
+ * INVALID_DBM is anything >= -1, so ValidateXxxValue() rejects it.
  */
 constexpr int32_t AIDL_INVALID = 2147483647;
-int32_t Level(int32_t v)   { return v == AIDL_INVALID ? 99 : v; }
-int32_t Dbm(int32_t v)     { return v == AIDL_INVALID ? 255 : v; }
+constexpr int32_t INVALID_DBM = 255;
+constexpr int32_t INVALID_INDEX = 99;
+
+/* dBm reported as its own negation (LTE/NR rsrp & rsrq, CDMA dbm). */
+int32_t NegDbm(int32_t v)
+{
+    return v == AIDL_INVALID ? INVALID_DBM : -v;
+}
+
+/* TS 27.007 8.69 index -> dBm.  <rxlev> 0..63 spans -111..-48 dBm and
+ * <rscp> 0..96 spans -121..-25 dBm; both are "index + base".
+ *
+ * These fields have a second "unreported" spelling besides INT32_MAX —
+ * 99 for the 0..63/0..31 indices, 255 for the 0..96 ones — and both are
+ * in range for the arithmetic.  Left unchecked, an unreported GSM rxlev
+ * of 99 becomes -12 dBm: a valid, enormous signal that outranks the real
+ * reading from whichever RAT the phone is actually camped on. */
+int32_t IndexDbm(int32_t v, int32_t base, int32_t maxIndex)
+{
+    if (v == AIDL_INVALID || v < 0 || v > maxIndex) {
+        return INVALID_DBM;
+    }
+    return v + base;
+}
+
+/* Tenths of a dB -> dB (LTE rssnr). */
+int32_t TenthsDb(int32_t v)
+{
+    return v == AIDL_INVALID ? INVALID_DBM : v / 10;
+}
+
+/* Values OHOS only stores and displays, where the scale does not matter
+ * but the sentinel does. */
+int32_t Raw(int32_t v)
+{
+    return v == AIDL_INVALID ? INVALID_INDEX : v;
+}
 
 void ToHrilRssi(const rnet::SignalStrength &s, HRilRssi *out)
 {
-    out->gsmRssi.rxlev = Level(s.gsm.signalStrength);
-    out->gsmRssi.ber = Level(s.gsm.bitErrorRate);
+    out->gsmRssi.rxlev = IndexDbm(s.gsm.signalStrength, -111, 63);
+    out->gsmRssi.ber = Raw(s.gsm.bitErrorRate);
 
-    out->wcdmaRssi.rxlev = Level(s.wcdma.signalStrength);
-    out->wcdmaRssi.ber = Level(s.wcdma.bitErrorRate);
-    out->wcdmaRssi.rscp = Dbm(s.wcdma.rscp);
-    out->wcdmaRssi.ecio = Dbm(s.wcdma.ecno);
+    /* wcdmaRssi.rxlev is not used for the level (rscp is), so the raw
+     * TS 27.007 8.5 index is what the framework expects to display. */
+    out->wcdmaRssi.rxlev = Raw(s.wcdma.signalStrength);
+    out->wcdmaRssi.ber = Raw(s.wcdma.bitErrorRate);
+    out->wcdmaRssi.rscp = IndexDbm(s.wcdma.rscp, -121, 96);
+    /* <ecno> 0..49 spans -24.5..0 dB in half-steps. */
+    out->wcdmaRssi.ecio = (s.wcdma.ecno == AIDL_INVALID || s.wcdma.ecno > 49)
+                              ? INVALID_DBM
+                              : (s.wcdma.ecno - 49) / 2;
 
-    out->cdmaRssi.absoluteRssi = Dbm(s.cdma.dbm);
-    out->cdmaRssi.ecno = Dbm(s.cdma.ecio);
+    out->cdmaRssi.absoluteRssi = NegDbm(s.cdma.dbm);
+    out->cdmaRssi.ecno = s.cdma.ecio == AIDL_INVALID ? INVALID_DBM : -s.cdma.ecio / 10;
 
-    out->lteRssi.rxlev = Level(s.lte.signalStrength);
-    out->lteRssi.rsrp = Dbm(s.lte.rsrp);
-    out->lteRssi.rsrq = Dbm(s.lte.rsrq);
-    out->lteRssi.snr = Dbm(s.lte.rssnr);
+    out->lteRssi.rxlev = Raw(s.lte.signalStrength);
+    out->lteRssi.rsrp = NegDbm(s.lte.rsrp);
+    out->lteRssi.rsrq = NegDbm(s.lte.rsrq);
+    out->lteRssi.snr = TenthsDb(s.lte.rssnr);
 
-    out->tdScdmaRssi.rscp = Dbm(s.tdscdma.rscp);
+    out->tdScdmaRssi.rscp = IndexDbm(s.tdscdma.rscp, -121, 96);
 
-    out->nrRssi.rsrp = Dbm(s.nr.ssRsrp);
-    out->nrRssi.rsrq = Dbm(s.nr.ssRsrq);
-    out->nrRssi.sinr = Dbm(s.nr.ssSinr);
+    out->nrRssi.rsrp = NegDbm(s.nr.ssRsrp);
+    out->nrRssi.rsrq = NegDbm(s.nr.ssRsrq);
+    /* NR SINR is already whole dB, unlike LTE's rssnr. */
+    out->nrRssi.sinr = Raw(s.nr.ssSinr);
 }
 
 /* ---- responses ------------------------------------------------------- */
@@ -193,6 +248,9 @@ public:
         }
         HRilRssi rssi = {};
         ToHrilRssi(sig, &rssi);
+        HR_LOGI("signal: gsm %{public}d wcdma rscp %{public}d lte rsrp %{public}d nr rsrp "
+                "%{public}d (dBm)", rssi.gsmRssi.rxlev, rssi.wcdmaRssi.rscp, rssi.lteRssi.rsrp,
+                rssi.nrRssi.rsrp);
         RilBridge::Get().ReportNetwork(req, ToHrilError(static_cast<int32_t>(info.error)), &rssi,
                                        sizeof(rssi));
         return ::ndk::ScopedAStatus::ok();
