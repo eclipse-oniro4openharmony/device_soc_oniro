@@ -30,6 +30,7 @@
 #include <aidl/android/hardware/radio/modem/IRadioModem.h>
 #include <aidl/android/hardware/radio/network/IRadioNetwork.h>
 #include <aidl/android/hardware/radio/sim/IRadioSim.h>
+#include <aidl/android/hardware/radio/voice/IRadioVoice.h>
 
 #include "hril.h"
 
@@ -79,6 +80,7 @@ public:
     std::shared_ptr<radio::network::IRadioNetwork> Network(int32_t slotId);
     std::shared_ptr<radio::messaging::IRadioMessaging> Messaging(int32_t slotId);
     std::shared_ptr<radio::data::IRadioData> Data(int32_t slotId);
+    std::shared_ptr<radio::voice::IRadioVoice> Voice(int32_t slotId);
 
     /* Register an in-flight request and get the serial to pass to IRadio.
      * The ReqDataInfo is owned by hril and handed back by TakePending(). */
@@ -104,6 +106,7 @@ public:
     void ReportNetwork(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportSms(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
     void ReportData(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
+    void ReportCall(const ReqDataInfo *request, int32_t err, const void *data, size_t len);
 
     /* Unsolicited notifications (requestInfo == NULL + notifyId). */
     void NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len);
@@ -111,6 +114,7 @@ public:
     void NotifyNetwork(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifySms(int32_t slotId, int32_t notifyId, const void *data, size_t len);
     void NotifyData(int32_t slotId, int32_t notifyId, const void *data, size_t len);
+    void NotifyCall(int32_t slotId, int32_t notifyId, const void *data, size_t len);
 
     /* Fail an op that arrived before the AIDL side was up.  Reports
      * HRIL_ERR_GENERIC_FAILURE so the framework retries rather than wedging. */
@@ -121,6 +125,7 @@ public:
     bool RequireSms(const ReqDataInfo *request,
                     std::shared_ptr<radio::messaging::IRadioMessaging> *out);
     bool RequireData(const ReqDataInfo *request, std::shared_ptr<radio::data::IRadioData> *out);
+    bool RequireVoice(const ReqDataInfo *request, std::shared_ptr<radio::voice::IRadioVoice> *out);
 
 private:
     RilBridge() = default;
@@ -137,6 +142,7 @@ private:
     std::shared_ptr<radio::network::IRadioNetwork> network_[MAX_SLOTS];
     std::shared_ptr<radio::messaging::IRadioMessaging> messaging_[MAX_SLOTS];
     std::shared_ptr<radio::data::IRadioData> data_[MAX_SLOTS];
+    std::shared_ptr<radio::voice::IRadioVoice> voice_[MAX_SLOTS];
     bool connected_ = false;
 
     struct NotifyTarget {
@@ -159,6 +165,7 @@ const HRilSimReq *SimOps();
 const HRilNetworkReq *NetworkOps();
 const HRilSmsReq *SmsOps();
 const HRilDataReq *DataOps();
+const HRilCallReq *CallOps();
 
 /* Response/indication objects, created once per slot by the bridge. */
 void AttachModemCallbacks(int32_t slotId, const std::shared_ptr<radio::modem::IRadioModem> &modem);
@@ -168,13 +175,14 @@ void AttachNetworkCallbacks(int32_t slotId,
 void AttachMessagingCallbacks(int32_t slotId,
                               const std::shared_ptr<radio::messaging::IRadioMessaging> &messaging);
 void AttachDataCallbacks(int32_t slotId, const std::shared_ptr<radio::data::IRadioData> &data);
+void AttachVoiceCallbacks(int32_t slotId, const std::shared_ptr<radio::voice::IRadioVoice> &voice);
 
 /* The access network the *data* registration last reported, kept by the
  * network domain.  The framework's own radio-technology field is unreliable
  * on this port; see AccessNetworkFor() in hybris_ril_data.cpp. */
 radio::AccessNetwork LastDataAccessNetwork(int32_t slotId);
 
-/* Registers the interfaces we do not implement yet.  Not optional: MTK
+/* Registers the interfaces we do not implement yet (ims).  Not optional: MTK
  * gates MT SMS on all seven being registered — see hybris_ril_presence.cpp. */
 bool AttachPresenceCallbacks(int32_t slotId);
 

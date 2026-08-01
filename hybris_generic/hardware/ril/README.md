@@ -18,6 +18,7 @@ Design, phases and the implementation log live in
 | `src/hybris_ril_network.cpp` | `networkOps` + `IRadioNetworkResponse`/`Indication`, including the three signal-strength encodings. |
 | `src/hybris_ril_sms.cpp` | `smsOps` + `IRadioMessagingResponse`/`Indication`. |
 | `src/hybris_ril_data.cpp` | `dataOps` + `IRadioDataResponse`/`Indication`, and the profile table MTK needs before it will activate a context. |
+| `src/hybris_ril_call.cpp` | `callOps` + `IRadioVoiceResponse`/`Indication` — CS calls only; the IMS ones live behind `IRadioIms`. |
 | `src/hybris_ril_presence.cpp` | Stub registration for the interfaces we do not implement yet. **Not optional** — see below. |
 | `src/hybris_ril_dl.cpp` | libhybris loader (system-first search path). |
 | `binder_ndk_shim/` | 142 aarch64 tail-jump trampolines that give the generated code libbinder_ndk's C ABI, bound at load time through hybris. |
@@ -65,9 +66,10 @@ you use leaves inbound SMS queued and NACKed forever while modem, SIM and
 network work normally, because none of those consult that state.
 
 `hybris_ril_presence.cpp` therefore registers the ones we do not
-implement yet with the generated `Default` handlers. When voice (R6)
-lands it must **replace** its stub, not add a second registration —
-`setResponseFunctions` overwrites. Data did exactly that in R5.
+implement yet with the generated `Default` handlers — now just `ims`.
+When IMS (R8) lands it must **replace** its stub, not add a second
+registration: `setResponseFunctions` overwrites. Data and voice did
+exactly that in R5 and R6.
 
 ## A NULL op is not a neutral answer
 
@@ -89,6 +91,12 @@ The only signal any of these produce is one hril line,
 `reqFunSet or reqFuncSet->*fun is null`, with no request name. When a
 domain looks complete and the layer above it does nothing, check the
 table against what the framework actually calls.
+
+`callOps` has two of the same shape, both implemented for that reason:
+`SetMute`, which `CellularCallConnectionCS::AnswerRequest` sends before
+every `ATA`, and `GetCallFailReason`, which is how a *normal* hang-up
+completes — CS control only reports the call ended once the cause comes
+back (`CSControl::HasEndCallWithoutReason`).
 
 ## Two ways this seam wedges
 

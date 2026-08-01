@@ -127,6 +127,13 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         return false;
     }
 
+    std::string voiceName = std::string(radio::voice::IRadioVoice::descriptor) + suffix;
+    auto voice = radio::voice::IRadioVoice::fromBinder(AwaitService(voiceName));
+    if (voice == nullptr) {
+        HR_LOGE("no %{public}s", voiceName.c_str());
+        return false;
+    }
+
     /* Only now start serving: setResponseFunctions below hands rild binder
      * objects it will call back into, so the pool has to exist — but not one
      * moment earlier than that. */
@@ -139,6 +146,7 @@ bool RilBridge::ConnectSlot(int32_t slotId)
         network_[slotId] = network;
         messaging_[slotId] = messaging;
         data_[slotId] = data;
+        voice_[slotId] = voice;
     }
 
     AttachModemCallbacks(slotId, modem);
@@ -146,14 +154,15 @@ bool RilBridge::ConnectSlot(int32_t slotId)
     AttachNetworkCallbacks(slotId, network);
     AttachMessagingCallbacks(slotId, messaging);
     AttachDataCallbacks(slotId, data);
+    AttachVoiceCallbacks(slotId, voice);
 
-    /* The remaining two of the seven interfaces MTK counts before it
-     * considers the framework connected.  Registering only what we use
-     * leaves inbound SMS undeliverable — see hybris_ril_presence.cpp. */
+    /* The last of the seven interfaces MTK counts before it considers the
+     * framework connected.  Registering only what we use leaves inbound SMS
+     * undeliverable — see hybris_ril_presence.cpp. */
     AttachPresenceCallbacks(slotId);
 
-    HR_LOGI("slot %{public}d bound to "
-            "IRadioModem/IRadioSim/IRadioNetwork/IRadioMessaging/IRadioData v2", slotId);
+    HR_LOGI("slot %{public}d bound to IRadioModem/IRadioSim/IRadioNetwork/"
+            "IRadioMessaging/IRadioData/IRadioVoice v2", slotId);
     return true;
 }
 
@@ -413,6 +422,15 @@ std::shared_ptr<radio::data::IRadioData> RilBridge::Data(int32_t slotId)
     return data_[slotId];
 }
 
+std::shared_ptr<radio::voice::IRadioVoice> RilBridge::Voice(int32_t slotId)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return nullptr;
+    }
+    return voice_[slotId];
+}
+
 int32_t RilBridge::Track(const ReqDataInfo *request)
 {
     std::lock_guard<std::mutex> guard(pendingLock_);
@@ -526,6 +544,17 @@ void RilBridge::ReportData(const ReqDataInfo *request, int32_t err, const void *
     reportOps_->OnDataReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
+void RilBridge::ReportCall(const ReqDataInfo *request, int32_t err, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr || request == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { const_cast<ReqDataInfo *>(request), 0, HRIL_RESPONSE,
+                               static_cast<HRilErrNumber>(err), { 0, static_cast<ReportErrorType>(0) },
+                               HRIL_UNNEED_ACK };
+    reportOps_->OnCallReport(request->slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
 void RilBridge::NotifyModem(int32_t slotId, int32_t notifyId, const void *data, size_t len)
 {
     if (reportOps_ == nullptr) {
@@ -574,6 +603,16 @@ void RilBridge::NotifyData(int32_t slotId, int32_t notifyId, const void *data, s
     struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
                                { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
     reportOps_->OnDataReport(slotId, info, static_cast<const uint8_t *>(data), len);
+}
+
+void RilBridge::NotifyCall(int32_t slotId, int32_t notifyId, const void *data, size_t len)
+{
+    if (reportOps_ == nullptr) {
+        return;
+    }
+    struct ReportInfo info = { nullptr, notifyId, HRIL_NOTIFICATION, HRIL_ERR_SUCCESS,
+                               { 0, static_cast<ReportErrorType>(0) }, HRIL_UNNEED_ACK };
+    reportOps_->OnCallReport(slotId, info, static_cast<const uint8_t *>(data), len);
 }
 
 bool RilBridge::RequireModem(const ReqDataInfo *request,
@@ -652,6 +691,22 @@ bool RilBridge::RequireData(const ReqDataInfo *request,
         return false;
     }
     *out = data;
+    return true;
+}
+
+bool RilBridge::RequireVoice(const ReqDataInfo *request,
+                             std::shared_ptr<radio::voice::IRadioVoice> *out)
+{
+    if (request == nullptr) {
+        return false;
+    }
+    auto voice = Voice(request->slotId);
+    if (voice == nullptr) {
+        HR_LOGW("request %{public}d before rild is up", request->request);
+        ReportCall(request, HRIL_ERR_GENERIC_FAILURE, nullptr, 0);
+        return false;
+    }
+    *out = voice;
     return true;
 }
 

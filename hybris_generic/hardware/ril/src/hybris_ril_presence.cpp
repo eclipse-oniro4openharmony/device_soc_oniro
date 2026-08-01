@@ -16,7 +16,8 @@
  */
 
 /*
- * Presence registration for the radio interfaces we do not implement yet.
+ * Presence registration for the radio interfaces we do not implement yet
+ * (ims — plan phase R8).
  *
  * MTK's rild does not treat each IRadio interface independently.  Every
  * AOSP setResponseFunctions() lands in librilfusion.so, which does:
@@ -40,17 +41,18 @@
  * working modem, SIM and network but silently never receives an SMS, with
  * nothing wrong on the OHOS side to find.
  *
- * So we register on all seven.  Two of them have no implementation here
- * (voice is R6, ims R8); they get the generated Default handlers, which
- * answer every callback with STATUS_UNKNOWN_TRANSACTION.  rild's calls into
- * them are oneway, so nothing observes that, and the indications they would
- * carry are ones we do not act on yet.
+ * So we register on all seven.  One of them has no implementation here (ims,
+ * plan phase R8); it gets the generated Default handlers, which answer every
+ * callback with STATUS_UNKNOWN_TRANSACTION.  rild's calls into them are
+ * oneway, so nothing observes that, and the indications they would carry are
+ * ones we do not act on yet.
  *
- * When R6 lands it should replace its stub here with a real
+ * When R8 lands it should replace its stub here with a real
  * response/indication object rather than adding a second registration —
- * setResponseFunctions overwrites, so registering twice would drop
- * whichever came first.  (Data did exactly that in R5: its stub is gone and
- * hybris_ril_data.cpp registers instead, from ConnectSlot.)
+ * setResponseFunctions overwrites, so registering twice would drop whichever
+ * came first.  (Data and voice each did exactly that, in R5 and R6: their
+ * stubs are gone and hybris_ril_data.cpp / hybris_ril_call.cpp register
+ * instead, from ConnectSlot.)
  */
 
 #include <memory>
@@ -59,9 +61,6 @@
 #include <aidl/android/hardware/radio/ims/BnRadioImsIndication.h>
 #include <aidl/android/hardware/radio/ims/BnRadioImsResponse.h>
 #include <aidl/android/hardware/radio/ims/IRadioIms.h>
-#include <aidl/android/hardware/radio/voice/BnRadioVoiceIndication.h>
-#include <aidl/android/hardware/radio/voice/BnRadioVoiceResponse.h>
-#include <aidl/android/hardware/radio/voice/IRadioVoice.h>
 
 #include "hybris_ril_bridge.h"
 #include "hybris_ril_log.h"
@@ -70,13 +69,12 @@ namespace OHOS {
 namespace HybrisRil {
 namespace {
 
-namespace rvoice = aidl::android::hardware::radio::voice;
 namespace rims = aidl::android::hardware::radio::ims;
 
 /*
- * One registration.  Kept as a template because the two are identical
- * apart from their types: look the service up, wrap the generated Default
- * in the generated Delegator (a Bn* skeleton, so it is a real binder
+ * One registration.  Kept as a template so a second interface can be added
+ * without repeating any of it: look the service up, wrap the generated
+ * Default in the generated Delegator (a Bn* skeleton, so it is a real binder
  * object), and hand it over.
  */
 template <typename Iface, typename RespDefault, typename RespDelegator,
@@ -113,26 +111,14 @@ bool RegisterStub(int32_t slotId, const char *what,
 
 bool AttachPresenceCallbacks(int32_t slotId)
 {
-    static std::shared_ptr<rvoice::IRadioVoiceResponseDelegator> voiceResp[MAX_SLOTS];
-    static std::shared_ptr<rvoice::IRadioVoiceIndicationDelegator> voiceInd[MAX_SLOTS];
     static std::shared_ptr<rims::IRadioImsResponseDelegator> imsResp[MAX_SLOTS];
     static std::shared_ptr<rims::IRadioImsIndicationDelegator> imsInd[MAX_SLOTS];
 
-    bool ok = true;
-
-    ok &= RegisterStub<rvoice::IRadioVoice, rvoice::IRadioVoiceResponseDefault,
-                       rvoice::IRadioVoiceResponseDelegator,
-                       rvoice::IRadioVoiceIndicationDefault,
-                       rvoice::IRadioVoiceIndicationDelegator>(
-        slotId, "voice", &voiceResp[slotId], &voiceInd[slotId]);
-
-    ok &= RegisterStub<rims::IRadioIms, rims::IRadioImsResponseDefault,
-                       rims::IRadioImsResponseDelegator,
-                       rims::IRadioImsIndicationDefault,
-                       rims::IRadioImsIndicationDelegator>(
+    return RegisterStub<rims::IRadioIms, rims::IRadioImsResponseDefault,
+                        rims::IRadioImsResponseDelegator,
+                        rims::IRadioImsIndicationDefault,
+                        rims::IRadioImsIndicationDelegator>(
         slotId, "ims", &imsResp[slotId], &imsInd[slotId]);
-
-    return ok;
 }
 
 } // namespace HybrisRil

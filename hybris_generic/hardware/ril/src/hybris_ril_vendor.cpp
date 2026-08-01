@@ -29,7 +29,7 @@
  *
  * Ops tables may be partial: hril answers a NULL member with
  * RIL_ERR_VENDOR_NOT_IMPLEMENT, so the domains land one phase at a time
- * (plan §D4).  Currently: modem, SIM, network, SMS and data.
+ * (plan §D4).  Currently: modem, SIM, network, SMS, data and call.
  */
 
 #include "hril.h"
@@ -50,7 +50,7 @@ constexpr int32_t HRIL_OPS_VERSION = 13;
 
 static HRilOps g_hrilOps = {
     .version = HRIL_OPS_VERSION,
-    .callOps = nullptr,     /* R6 */
+    .callOps = nullptr,     /* filled in below */
     .simOps = nullptr,      /* filled in below */
     .smsOps = nullptr,      /* filled in below */
     .dataOps = nullptr,     /* filled in below */
@@ -70,6 +70,7 @@ const HRilOps *RilInitOps(const struct HRilReport *reportOps)
     g_hrilOps.networkOps = NetworkOps();
     g_hrilOps.smsOps = SmsOps();
     g_hrilOps.dataOps = DataOps();
+    g_hrilOps.callOps = CallOps();
 
     /* Must not block: this runs inside riladapter_host's HDF init, long
      * before rild has registered anything.  Start() only spawns the connect
