@@ -46,6 +46,17 @@ struct HybrisAudioAdapter {
     struct audio_hw_device *hwdev;
     std::string adapterName;  // always "primary"
     std::mutex lock;
+    // Last mode handed to the Android HAL.  It has no getter, and telling it
+    // the mode it is already in restarts MTK's speech path mid-call, so the
+    // only safe way to avoid redundant transitions is to remember them.
+    audio_mode_t mode = AUDIO_MODE_NORMAL;
+    // The live primary streams, if any.  Routing is a *stream* parameter in
+    // Android's HAL contract (AUDIO_PARAMETER_STREAM_ROUTING, which
+    // AudioFlinger sends through out->common.set_parameters); the device-level
+    // set_parameters ignores it.  We have to keep the streams to hand to be
+    // able to route at all — see SetRouting().
+    HybrisAudioRender *outRender = nullptr;
+    HybrisAudioCapture *inCapture = nullptr;
     // Jack-state worker state (plan A5)
     std::thread jackThread;
     std::atomic<bool> jackRun{false};
@@ -63,6 +74,11 @@ struct HybrisAudioManager {
 void InitRenderVTable(struct IAudioRenderVdi *v);
 void InitCaptureVTable(struct IAudioCaptureVdi *v);
 void InitAdapterVTable(struct IAudioAdapterVdi *v);
+
+// Audio scene -> Android mode + routing (plan §D6).  Called from the
+// render/capture SelectScene hooks, which is where the framework delivers it.
+void ApplyOutputScene(HybrisAudioAdapter *ad, const struct AudioSceneDescriptorVdi *scene);
+void ApplyInputScene(HybrisAudioAdapter *ad, const struct AudioSceneDescriptorVdi *scene);
 
 // Jack state watcher
 void StartJackWatcher(HybrisAudioAdapter *ad);

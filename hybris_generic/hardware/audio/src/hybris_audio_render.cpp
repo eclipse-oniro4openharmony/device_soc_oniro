@@ -90,8 +90,14 @@ static int32_t RenderCheckSceneCapability(struct IAudioRenderVdi *,
     const struct AudioSceneDescriptorVdi *, bool *supported)
 { if (supported) *supported = true; return HDF_SUCCESS; }
 
-static int32_t RenderSelectScene(struct IAudioRenderVdi *, const struct AudioSceneDescriptorVdi *)
-{ return HDF_SUCCESS; }
+static int32_t RenderSelectScene(struct IAudioRenderVdi *self,
+    const struct AudioSceneDescriptorVdi *scene)
+{
+    if (!self || !scene) return HDF_ERR_INVALID_PARAM;
+    R_SELF(self);
+    ApplyOutputScene(r->owner, scene);
+    return HDF_SUCCESS;
+}
 
 static int32_t RenderSetMute(struct IAudioRenderVdi *self, bool mute)
 {

@@ -86,8 +86,14 @@ static int32_t CaptureCheckSceneCapability(struct IAudioCaptureVdi *,
     const struct AudioSceneDescriptorVdi *, bool *supported)
 { if (supported) *supported = true; return HDF_SUCCESS; }
 
-static int32_t CaptureSelectScene(struct IAudioCaptureVdi *, const struct AudioSceneDescriptorVdi *)
-{ return HDF_SUCCESS; }
+static int32_t CaptureSelectScene(struct IAudioCaptureVdi *self,
+    const struct AudioSceneDescriptorVdi *scene)
+{
+    if (!self || !scene) return HDF_ERR_INVALID_PARAM;
+    C_SELF(self);
+    ApplyInputScene(c->owner, scene);
+    return HDF_SUCCESS;
+}
 
 static int32_t CaptureSetMute(struct IAudioCaptureVdi *self, bool mute)
 { C_SELF(self); c->muted = mute; return HDF_SUCCESS; }

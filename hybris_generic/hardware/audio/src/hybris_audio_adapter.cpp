@@ -23,7 +23,10 @@ extern void InitCaptureVTable(struct IAudioCaptureVdi *v);
 // justify pulling libasound into a driver host that otherwise never touches
 // ALSA, and the uapi header alone is enough.
 
-static bool WriteMixerInt(const char *name, int32_t value)
+// `was` receives the value the control held before the write, which is the
+// only evidence available that a forced path was actually being taken — there
+// is no mixer CLI on this image to read it back with.
+static bool WriteMixerInt(const char *name, int32_t value, int32_t *was = nullptr)
 {
     struct snd_ctl_elem_value ev;
     int fd = open("/dev/snd/controlC0", O_RDWR);
@@ -38,6 +41,9 @@ static bool WriteMixerInt(const char *name, int32_t value)
     // Absent controls fail the read; that is the "other SoC" case, not an error.
     bool ok = ioctl(fd, SNDRV_CTL_IOCTL_ELEM_READ, &ev) >= 0;
     if (ok) {
+        if (was != nullptr) {
+            *was = ev.value.integer.value[0];
+        }
         ev.value.integer.value[0] = value;
         ok = ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &ev) >= 0;
     }
@@ -57,17 +63,44 @@ static void ForceApCapturePath()
 {
     static const char *ctrls[] = { "dsp_captureraw_default_en", "dsp_captureul1_default_en" };
     for (const char *c : ctrls) {
-        if (WriteMixerInt(c, 0)) {
-            HB_LOGI("capture: forced %{public}s=0 (AP provider)", c);
+        int32_t was = -1;
+        if (WriteMixerInt(c, 0, &was)) {
+            HB_LOGI("capture: forced %{public}s=0 (was %{public}d, AP provider)", c, was);
         }
     }
 }
+
+// The capture scenario's neighbour: dsp_call_final_default_en is the same kind
+// of knob for the speech path, and this SoC has no DSP core to run it on.
+//
+// Kept, and kept logging the previous value, but do not expect it to fix
+// anything: measured on ansuz it already reads 0, i.e. the call path was never
+// being handed to the missing DSP.  That is worth having on the record —
+// "both directions silent" makes the DSP an obvious suspect, and this is the
+// line that rules it out.  Only the call scenario is touched; the neighbouring
+// dsp_voipdl_default_en reads 31, which is a mask rather than a flag and has
+// nothing to do with a CS call, so it is left alone.
+static void ForceApSpeechPath()
+{
+    int32_t was = -1;
+    if (WriteMixerInt("dsp_call_final_default_en", 0, &was)) {
+        HB_LOGI("speech: dsp_call_final_default_en=0 (was %{public}d, AP path)", was);
+    }
+}
+
+// Defined with the rest of the scene/routing plumbing further down; declared
+// here because AdapterUpdateAudioRoute needs it too. ad->lock must be held.
+static void SetRouting(HybrisAudioAdapter *ad, audio_devices_t devices, const char *what);
 
 // ─── Render/Capture creation ────────────────────────────────────────────────
 
 static int32_t AdapterInitAllPorts(struct IAudioAdapterVdi *self)
 {
     (void)self;
+    // Also here, not only before set_mode: if the HAL settles the DSP-vs-AP
+    // question when it first walks its scenario table rather than when it
+    // starts the path, this is the earliest point we are called at.
+    ForceApSpeechPath();
     return HDF_SUCCESS;
 }
 
@@ -110,9 +143,19 @@ static int32_t AdapterCreateRender(struct IAudioAdapterVdi *self,
     r->desc = *desc;
     InitRenderVTable(&r->vtable);
 
+    // The primary output is the one routing is expressed through; the mmap
+    // ones come and go and would leave a dangling handle behind them.
+    if (flags == AUDIO_OUTPUT_FLAG_PRIMARY) {
+        ad->outRender = r;
+    }
+
     *render = &r->vtable;
-    HB_LOGI("CreateRender: rate=%{public}u ch=%{public}u fmt=0x%{public}x dev=0x%{public}x flags=0x%{public}x",
-        cfg.sample_rate, cfg.channel_mask, cfg.format, devices, flags);
+    // attrs->type is the AudioCategoryVdi the stream was opened for, which is
+    // the other place a call could announce itself (SelectScene being the
+    // first) — worth having in the log while call audio is being brought up.
+    HB_LOGI("CreateRender: rate=%{public}u ch=%{public}u fmt=0x%{public}x dev=0x%{public}x "
+            "flags=0x%{public}x category=%{public}d",
+        cfg.sample_rate, cfg.channel_mask, cfg.format, devices, flags, (int)attrs->type);
     return HDF_SUCCESS;
 }
 
@@ -122,6 +165,9 @@ static int32_t AdapterDestroyRender(struct IAudioAdapterVdi *self, struct IAudio
     auto *ad = reinterpret_cast<HybrisAudioAdapter *>(self);
     auto *r  = reinterpret_cast<HybrisAudioRender *>(render);
     std::lock_guard<std::mutex> lk(ad->lock);
+    if (ad->outRender == r) {
+        ad->outRender = nullptr;
+    }
     if (r->stream) {
         if (r->started) r->stream->common.standby(&r->stream->common);
         ad->hwdev->close_output_stream(ad->hwdev, r->stream);
@@ -172,6 +218,7 @@ static int32_t AdapterCreateCapture(struct IAudioAdapterVdi *self,
     c->attrs.channelCount = (cfg.channel_mask == AUDIO_CHANNEL_IN_MONO) ? 1 : 2;
     c->desc = *desc;
     InitCaptureVTable(&c->vtable);
+    ad->inCapture = c;
 
     *capture = &c->vtable;
     // Requested vs granted: the framework does not renegotiate, so any
@@ -193,6 +240,9 @@ static int32_t AdapterDestroyCapture(struct IAudioAdapterVdi *self, struct IAudi
     auto *ad = reinterpret_cast<HybrisAudioAdapter *>(self);
     auto *c  = reinterpret_cast<HybrisAudioCapture *>(capture);
     std::lock_guard<std::mutex> lk(ad->lock);
+    if (ad->inCapture == c) {
+        ad->inCapture = nullptr;
+    }
     if (c->stream) {
         if (c->started) c->stream->common.standby(&c->stream->common);
         ad->hwdev->close_input_stream(ad->hwdev, c->stream);
@@ -244,17 +294,146 @@ static int32_t AdapterUpdateAudioRoute(struct IAudioAdapterVdi *self,
     for (uint32_t i = 0; i < route->sinksLen; ++i) {
         sinks |= VdiPinToAndroidOutDevice(route->sinks[i].ext.device.type);
     }
-    if (sinks && ad->hwdev && ad->hwdev->set_parameters) {
-        char kv[64];
-        snprintf(kv, sizeof(kv), "routing=%u", (unsigned)sinks);
-        ad->hwdev->set_parameters(ad->hwdev, kv);
-        HB_LOGI("UpdateAudioRoute: %{public}s (handle=%{public}d)", kv, *routeHandle);
+    if (sinks && ad->hwdev) {
+        std::lock_guard<std::mutex> lk(ad->lock);
+        SetRouting(ad, sinks, "UpdateAudioRoute");
     }
     return HDF_SUCCESS;
 }
 
 static int32_t AdapterReleaseAudioRoute(struct IAudioAdapterVdi *, int32_t)
 { return HDF_SUCCESS; }
+
+// ─── Audio scene (plan §D6) ─────────────────────────────────────────────────
+//
+// A CS call's speech path is not ours: the modem terminates it and the codec
+// carries it, with no PCM crossing the AP.  What the AP still has to do is
+// tell the Android HAL to build that path, and the HAL's whole switch for
+// that is set_mode(AUDIO_MODE_IN_CALL) — which is where MTK's audio_hw starts
+// its speech driver, opens the modem<->codec loop and applies the in-call
+// mixer paths.  Without it a call connects, both ends are billed, and neither
+// hears anything.
+//
+// OHOS delivers the scene to the *stream*, not the device: AudioRenderSink::
+// SetAudioScene turns the AudioScene into an AudioSceneDescriptor and hands
+// it to IAudioRender::SelectScene.  Android's set_mode is device-wide, so
+// both hooks land here.
+
+static audio_mode_t VdiSceneToAndroidMode(uint32_t sceneId)
+{
+    switch (sceneId) {
+        case AUDIO_VDI_IN_CALL:          return AUDIO_MODE_IN_CALL;
+        // VoIP and the VoIP-shaped mmap category are the same thing to the
+        // HAL: an AP-side call that wants the voice processing chain but not
+        // the modem.
+        case AUDIO_VDI_IN_COMMUNICATION:
+        case AUDIO_VDI_MMAP_VOIP:        return AUDIO_MODE_IN_COMMUNICATION;
+        case AUDIO_VDI_IN_RINGTONE:      return AUDIO_MODE_RINGTONE;
+        default:                         return AUDIO_MODE_NORMAL;
+    }
+}
+
+// Routing goes to the *stream*, not the device.
+//
+// AUDIO_PARAMETER_STREAM_ROUTING ("routing") is a stream parameter in
+// Android's HAL contract: AudioFlinger sends it through
+// out->common.set_parameters(), and that is what MTK implements
+// (AudioALSAStreamOut::setParameters -> AudioALSAStreamManager, which is
+// where the codec path is actually built).  The device-level
+// adev_set_parameters conventionally handles connect/disconnect and
+// screen_state and quietly ignores routing — so sending it there, as this
+// bridge originally did, changed nothing at all: the mixer was byte-identical
+// before and during a call.
+//
+// The device-level call is kept as a second shot for HALs that do take it;
+// it costs one ignored string.  ad->lock must be held; the stream's own lock
+// is not taken, because the HAL serialises internally and the render thread
+// can sit in write() for >100 ms.
+static void SetRouting(HybrisAudioAdapter *ad, audio_devices_t devices, const char *what)
+{
+    if (!devices) return;
+    char kv[64];
+    snprintf(kv, sizeof(kv), "routing=%u", (unsigned)devices);
+
+    bool onStream = false;
+    if (ad->outRender && ad->outRender->stream) {
+        struct audio_stream *s = &ad->outRender->stream->common;
+        if (s->set_parameters) {
+            s->set_parameters(s, kv);
+            onStream = true;
+        }
+    }
+    if (ad->hwdev->set_parameters) {
+        ad->hwdev->set_parameters(ad->hwdev, kv);
+    }
+    HB_LOGI("%{public}s route: %{public}s (stream=%{public}d)", what, kv, onStream ? 1 : 0);
+}
+
+// The input half of the same story.
+static void SetInputRouting(HybrisAudioAdapter *ad, audio_devices_t devices)
+{
+    if (!devices) return;
+    char kv[64];
+    snprintf(kv, sizeof(kv), "routing=%u", (unsigned)devices);
+
+    bool onStream = false;
+    if (ad->inCapture && ad->inCapture->stream) {
+        struct audio_stream *s = &ad->inCapture->stream->common;
+        if (s->set_parameters) {
+            s->set_parameters(s, kv);
+            onStream = true;
+        }
+    }
+    if (ad->hwdev->set_parameters) {
+        ad->hwdev->set_parameters(ad->hwdev, kv);
+    }
+    HB_LOGI("input route: %{public}s (stream=%{public}d)", kv, onStream ? 1 : 0);
+}
+
+void ApplyOutputScene(HybrisAudioAdapter *ad, const struct AudioSceneDescriptorVdi *scene)
+{
+    if (!ad || !ad->hwdev || !scene) return;
+    audio_mode_t mode = VdiSceneToAndroidMode(scene->scene.id);
+
+    std::lock_guard<std::mutex> lk(ad->lock);
+
+    // Routing before the mode, and deliberately so: MTK reads the current
+    // output device when set_mode(IN_CALL) starts the speech path, so setting
+    // it afterwards would build the path for whatever device was active
+    // before the call — earpiece audio out of the speaker, or silence.
+    if (scene->desc.pins != PIN_VDI_NONE) {
+        SetRouting(ad, VdiPinToAndroidOutDevice(scene->desc.pins), "output");
+    }
+
+    if (mode == ad->mode || !ad->hwdev->set_mode) return;
+
+    // Before set_mode, not after: this is what the HAL reads when it decides
+    // whether to build the speech path on the DSP or on the AP, and it reads
+    // it as it starts that path.
+    if (mode == AUDIO_MODE_IN_CALL || mode == AUDIO_MODE_IN_COMMUNICATION) {
+        ForceApSpeechPath();
+    }
+
+    int rc = ad->hwdev->set_mode(ad->hwdev, mode);
+    if (rc != 0) {
+        HB_LOGE("set_mode(%{public}d) failed rc=%{public}d", (int)mode, rc);
+        return;
+    }
+    HB_LOGI("audio mode %{public}d -> %{public}d (scene %{public}u)", (int)ad->mode, (int)mode,
+        scene->scene.id);
+    ad->mode = mode;
+}
+
+// Capture only carries the input route.  The mode is one device-wide setting
+// and the render side already owns it; driving it from both would have the
+// capture stream's scene fight the render stream's on every transition.
+void ApplyInputScene(HybrisAudioAdapter *ad, const struct AudioSceneDescriptorVdi *scene)
+{
+    if (!ad || !ad->hwdev || !scene) return;
+    if (scene->desc.pins == PIN_VDI_NONE) return;
+    std::lock_guard<std::mutex> lk(ad->lock);
+    SetInputRouting(ad, VdiPinToAndroidInDevice(scene->desc.pins));
+}
 
 static int32_t AdapterSetMicMute(struct IAudioAdapterVdi *self, bool mute)
 {

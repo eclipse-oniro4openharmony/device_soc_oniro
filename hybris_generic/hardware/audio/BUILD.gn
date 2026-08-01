@@ -23,7 +23,20 @@ import("//build/ohos.gni")
 import("//drivers/hdf_core/adapter/uhdf2/uhdf.gni")
 
 group("audio_primary_model") {
-  deps = [ ":libaudio_primary_impl" ]
+  deps = [
+    ":libaudio_primary_impl",
+    ":mixerctl",
+  ]
+}
+
+# Mixer CLI — the only way to see what the Android audio HAL did to the codec,
+# since that HAL runs in-process through libhybris and its own logs cannot
+# reach the container's logd.  Not installed; build and push it.
+ohos_executable("mixerctl") {
+  sources = [ "tools/mixerctl.c" ]
+  install_enable = false
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
 }
 
 ohos_shared_library("libaudio_primary_impl") {
