@@ -75,7 +75,14 @@ private:
     const NdkApi *ndk_ = nullptr;
     ACameraManager *manager_ = nullptr;
     std::vector<std::shared_ptr<CameraInfo>> cameras_;
-    std::map<std::string, sptr<HybrisCameraDevice>> openDevices_;
+    // Weak on purpose: the only owners of an open device are the HDI service's
+    // CameraDeviceService stub and, through it, the client.  Holding a strong
+    // reference here would keep the camera open forever when a client dies
+    // without calling Close() -- every later OpenCamera would then get
+    // CAMERA_BUSY until camera_host was restarted.  With a weak reference the
+    // stub's destruction drops the last strong ref and ~HybrisCameraDevice
+    // closes the camera for us.
+    std::map<std::string, wptr<HybrisCameraDevice>> openDevices_;
     sptr<ICameraHostVdiCallback> callback_;
     std::thread bringUpThread_;
     bool enabled_ = false;
@@ -313,9 +320,17 @@ int32_t HybrisCameraHost::OpenCamera(const std::string &cameraId,
             return VDI::Camera::V1_0::INVALID_ARGUMENT;
         }
         auto existing = openDevices_.find(cameraId);
-        if (existing != openDevices_.end() && existing->second->IsOpen()) {
-            HC_LOGW("camera %{public}s is already open", cameraId.c_str());
-            return VDI::Camera::V1_0::CAMERA_BUSY;
+        if (existing != openDevices_.end()) {
+            // A stale entry means the previous owner is gone (a client that
+            // died without calling Close()); its device has already closed the
+            // camera from ~HybrisCameraDevice, so the id is free again.
+            sptr<HybrisCameraDevice> live = existing->second.promote();
+            if (live != nullptr && live->IsOpen()) {
+                HC_LOGW("camera %{public}s is already open", cameraId.c_str());
+                return VDI::Camera::V1_0::CAMERA_BUSY;
+            }
+            HC_LOGI("reclaiming camera %{public}s from a departed client", cameraId.c_str());
+            openDevices_.erase(existing);
         }
         hybrisDevice = new (std::nothrow) HybrisCameraDevice(ndk_, info, callbackObj);
         if (hybrisDevice == nullptr) {
@@ -348,13 +363,18 @@ int32_t HybrisCameraHost::SetFlashlight(const std::string &cameraId, bool isEnab
 
 int32_t HybrisCameraHost::CloseAllCameras()
 {
-    std::map<std::string, sptr<HybrisCameraDevice>> devices;
+    std::map<std::string, wptr<HybrisCameraDevice>> devices;
     {
         std::lock_guard<std::mutex> guard(lock_);
         devices.swap(openDevices_);
     }
+    // Entries that no longer promote belong to departed clients and have
+    // already closed themselves; only the live ones need an explicit Close.
     for (auto &entry : devices) {
-        (void)entry.second->Close();
+        sptr<HybrisCameraDevice> live = entry.second.promote();
+        if (live != nullptr) {
+            (void)live->Close();
+        }
     }
     return VDI::Camera::V1_0::NO_ERROR;
 }
