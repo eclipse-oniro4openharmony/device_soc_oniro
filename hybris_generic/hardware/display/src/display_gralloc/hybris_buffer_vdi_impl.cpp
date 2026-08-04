@@ -143,8 +143,8 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
  *   PROTECTED(11)
  *      Secure/DRM buffers; MTK gralloc would need a secure heap this port
  *      does not wire up.
- *   VENDOR_PRI0..19 (bits 44..63)
- *      Vendor-private by definition; this port defines none.
+ *
+ * VENDOR_PRI0..19 (bits 44..63) are NOT listed here — see kVendorUsageMask.
  *
  * MEM_FB(6) is deliberately absent even though DisplayBufferMt expects a
  * bare HBM_USE_MEM_FB request to fail.  It is a scanout hint, not a distinct
@@ -164,8 +164,32 @@ static constexpr uint64_t kUnsupportedUsageMask =
     (1ULL << 2)  |                 /* MEM_MMZ                  */
     (1ULL << 4)  | (1ULL << 5)  |  /* MEM_SHARE, MEM_MMZ_CACHE */
     (1ULL << 7)  |                 /* ASSIGN_SIZE              */
-    (1ULL << 11) |                 /* PROTECTED                */
-    (0xFFFFFULL << 44);            /* VENDOR_PRI0..19          */
+    (1ULL << 11);                  /* PROTECTED                */
+
+/*
+ * Vendor-private usage bits (VENDOR_PRI0..19) need a different rule from the
+ * deny-list above: they are *hints*, not requirements.  OHOS components OR one
+ * onto an already fully-specified request to ask a vendor allocator for a
+ * preferred layout, and an allocator that does not recognise it is expected to
+ * ignore it — which is what Android gralloc does with unknown usage bits, and
+ * what OhosUsageToAndroid() already does here.
+ *
+ * Denying them outright broke video playback outright.  HDecoder
+ * (foundation/multimedia/av_codec/.../hcodec/hdecoder.cpp) sets
+ * BUFFER_USAGE_MEM_DMA | BUFFER_USAGE_VENDOR_PRI10 on its output surface, so
+ * every decoded frame asked for usage 0x40000000000608 and was refused: VLC
+ * logged one NativeWindowRequestBuffer failure per frame and never drew
+ * anything.  image_framework's ext_decoder (VENDOR_PRI16) and the Vulkan
+ * swapchain layer (VENDOR_PRI19) compose theirs the same way.
+ *
+ * A request made of *nothing but* vendor bits is still rejected.  That one
+ * names no memory type and no access mode, so there is nothing to map and
+ * OhosUsageToAndroid() would fall through to its baseline and return a buffer
+ * the caller never described.  Every in-tree setter uses |= onto a populated
+ * usage, so no real caller lands there; DisplayBufferMt 0350-0540 test exactly
+ * that case and are the only reason to keep the check.
+ */
+static constexpr uint64_t kVendorUsageMask = 0xFFFFFULL << 44;
 
 /*
  * Formats with no Android HAL equivalent at all.  These have to be rejected
@@ -243,6 +267,14 @@ static int32_t ValidateAllocInfo(const AllocInfo& info)
         DISPLAY_LOGE("AllocMem: rejecting usage 0x%{public}llx — unsupported bits 0x%{public}llx",
                      static_cast<unsigned long long>(info.usage),
                      static_cast<unsigned long long>(unsupported));
+        return HDF_FAILURE;
+    }
+
+    /* Vendor bits riding along with real usage are ignored; vendor bits on
+     * their own describe no allocation at all.  See kVendorUsageMask. */
+    if (info.usage != 0 && (info.usage & ~kVendorUsageMask) == 0) {
+        DISPLAY_LOGE("AllocMem: rejecting usage 0x%{public}llx — vendor-private bits only",
+                     static_cast<unsigned long long>(info.usage));
         return HDF_FAILURE;
     }
 
