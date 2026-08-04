@@ -59,3 +59,41 @@ ohos_shared_library("wifi_hal_default") {
   subsystem_name = "oniro_soc_products"
   part_name = "hybris_generic_soc"
 }
+
+# The wlan "extend" VDI wlan_interface_service hard-requires at Init: without
+# /vendor/lib64/libhdi_wlan_impl.z.so the whole base WLAN HDI never registers
+# (HdfLoadVdi ENOENT -> WlanInterfaceServiceInit fails). The extend surface is
+# vendor-private (channel meas, hid2d, raw ioctls) and the MediaTek/Halium
+# stack has none of it, so every op reports NOT_SUPPORT.
+ohos_shared_library("libhdi_wlan_impl") {
+  sources = [ "hdi_wlan_impl.c" ]
+
+  # Same set upstream's libwlan_service_extend uses: wifi_hal.h (interfaces)
+  # pulls in wifi_hal_sta_feature.h, which needs wifi_driver_client.h from
+  # client/include.
+  include_dirs = [
+    "//drivers/peripheral/wlan/hdi_service/service_extend/service_extend_vdi",
+    "//drivers/peripheral/wlan/interfaces/include",
+    "//drivers/peripheral/wlan/client/include",
+    "//drivers/peripheral/wlan/hal/include",
+  ]
+
+  external_deps = [
+    "drivers_interface_wlan:libwlan_stub_1.3",
+    "hdf_core:libhdf_host",
+    "hdf_core:libhdf_utils",
+    "hilog:libhilog",
+  ]
+
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  output_name = "libhdi_wlan_impl"
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}

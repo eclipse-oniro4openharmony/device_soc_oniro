@@ -26,6 +26,7 @@ group("hybris_generic_soc_group") {
     "hardware/ril:ril_hybris_group",
     "hardware/sensor:sensor_vdi_model",
     "hardware/vibrator:vibrator_vdi_model",
+    "hardware/wlan:libhdi_wlan_impl",
     "hardware/wlan:wifi_hal_default",
   ]
 }
