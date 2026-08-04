@@ -129,6 +129,126 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
     return androidUsage;
 }
 
+/* ─── Allocation request validation ──────────────────────────────────────── */
+
+/*
+ * Usage bits this port cannot honour.  Quietly handing back an ordinary buffer
+ * for these is a correctness bug rather than leniency: a caller that asked for
+ * HBM_USE_PROTECTED and got unprotected memory has no way to find out.
+ *
+ *   MEM_MMZ(2), MEM_SHARE(4), MEM_MMZ_CACHE(5), ASSIGN_SIZE(7)
+ *      HiSilicon-style memory zones, with no Android gralloc equivalent.
+ *      Their only in-tree callers are the *_lite (small-system) graphic
+ *      stack, which this product does not build.
+ *   PROTECTED(11)
+ *      Secure/DRM buffers; MTK gralloc would need a secure heap this port
+ *      does not wire up.
+ *   VENDOR_PRI0..19 (bits 44..63)
+ *      Vendor-private by definition; this port defines none.
+ *
+ * MEM_FB(6) is deliberately absent even though DisplayBufferMt expects a
+ * bare HBM_USE_MEM_FB request to fail.  It is a scanout hint, not a distinct
+ * memory type — OhosUsageToAndroid() maps it to GRALLOC_USAGE_HW_FB and we
+ * can honour it.  render_service really does allocate with
+ * CPU_READ | MEM_DMA | MEM_FB (usage 0x49); denying that bit failed those
+ * allocations on every frame that took the path.
+ *
+ * This is a deny-list on purpose.  HBM_USE is vendor-extensible and grows
+ * between IDL versions — v1_2 alone adds CPU_HW_BOTH(17),
+ * RGB_TO_YUV_CONVERSION(19), AUXILLARY_BUFFER0..3(20..23) and DRM_REDRAW(24)
+ * on top of v1_0's bit 16.  An allow-list of "known good" bits rejected all of
+ * those and broke 19 DisplayBufferUt cases that allocate CPU_READ | CPU_WRITE
+ * | CPU_HW_BOTH; anything not named here must keep working.
+ */
+static constexpr uint64_t kUnsupportedUsageMask =
+    (1ULL << 2)  |                 /* MEM_MMZ                  */
+    (1ULL << 4)  | (1ULL << 5)  |  /* MEM_SHARE, MEM_MMZ_CACHE */
+    (1ULL << 7)  |                 /* ASSIGN_SIZE              */
+    (1ULL << 11) |                 /* PROTECTED                */
+    (0xFFFFFULL << 44);            /* VENDOR_PRI0..19          */
+
+/*
+ * Formats with no Android HAL equivalent at all.  These have to be rejected
+ * rather than mapped, because OhosFormatToAndroid()'s IMPLEMENTATION_DEFINED
+ * fallback makes gralloc pick some *other* layout — and BufferHandle::stride
+ * and ::size then describe a buffer that was never allocated.  Every CPU
+ * consumer sizes its access off those fields, so the caller walks off the end
+ * of the mapping: exactly how DisplayBufferMt 0130 used to SIGSEGV before the
+ * allocation-size clamp landed.
+ *
+ * Deliberately NOT listed, though the conformance suite marks them
+ * unsupported for its reference device: PIXEL_FMT_RGB_565(3) and
+ * PIXEL_FMT_YUV_422_I(21).  Both have exact HAL equivalents, both are mapped
+ * above, and both work here.  Rejecting a format the hardware genuinely
+ * supports to gain a test point would be a functional regression.
+ *
+ * Formats missing from the mapping table but absent from this list
+ * (RGBX_4444, BGRX_8888, YCBCR_420_P, YCBCR_422_P …) keep the
+ * IMPLEMENTATION_DEFINED path on purpose: DisplayBufferUt and the
+ * success half of DisplayBufferMt allocate them today and expect it to work.
+ */
+static bool IsUnsupportedOhosFormat(uint32_t ohosFormat)
+{
+    switch (ohosFormat) {
+        /* Palettized — Android has no indexed pixel format whatsoever. */
+        case 0:  /* PIXEL_FMT_CLUT8 */
+        case 1:  /* PIXEL_FMT_CLUT1 */
+        case 2:  /* PIXEL_FMT_CLUT4 */
+        /* Odd channel widths with no HAL match. */
+        case 4:  /* PIXEL_FMT_RGBA_5658 */
+        case 7:  /* PIXEL_FMT_RGB_444   */
+        case 8:  /* PIXEL_FMT_RGBX_5551 */
+        case 9:  /* PIXEL_FMT_RGBA_5551 */
+        case 10: /* PIXEL_FMT_RGB_555   */
+        /* Packed 4:2:2 orderings; the HAL offers only YCBCR_422_I. */
+        case 30: /* PIXEL_FMT_YUYV_422_PKG */
+        case 31: /* PIXEL_FMT_UYVY_422_PKG */
+        case 32: /* PIXEL_FMT_YVYU_422_PKG */
+        case 33: /* PIXEL_FMT_VYUY_422_PKG */
+        /* Not formats at all. */
+        case 0x7FFF0000: /* PIXEL_FMT_VENDER_MASK — a mask */
+        case 0x7FFFFFFF: /* PIXEL_FMT_BUTT        — the invalid sentinel */
+            return true;
+        default:
+            return false;
+    }
+}
+
+/*
+ * Far above any real surface (the panel is 1080x2400) while still catching
+ * uninitialised AllocInfo.  ReAllocMem depends on this: the v1_3 client-side
+ * wrapper falls back to AllocMemIpc() whenever the VDI reports NOT_SUPPORT,
+ * so a ReAllocMem call with a garbage AllocInfo lands here as a plain
+ * AllocMem and must not be allowed to succeed.
+ */
+static constexpr uint32_t kMaxBufferDimension = 65536;
+
+static int32_t ValidateAllocInfo(const AllocInfo& info)
+{
+    if (info.width == 0 || info.height == 0 ||
+        info.width > kMaxBufferDimension || info.height > kMaxBufferDimension) {
+        DISPLAY_LOGE("AllocMem: rejecting %{public}ux%{public}u — invalid dimensions",
+                     info.width, info.height);
+        return HDF_FAILURE;
+    }
+
+    if (IsUnsupportedOhosFormat(info.format)) {
+        DISPLAY_LOGE("AllocMem: rejecting format %{public}u — no Android HAL equivalent",
+                     info.format);
+        return HDF_FAILURE;
+    }
+
+    uint64_t unsupported = info.usage & kUnsupportedUsageMask;
+    if (unsupported != 0) {
+        DISPLAY_LOGE("AllocMem: rejecting usage 0x%{public}llx — unsupported bits 0x%{public}llx",
+                     static_cast<unsigned long long>(info.usage),
+                     static_cast<unsigned long long>(unsupported));
+        return HDF_FAILURE;
+    }
+
+    return HDF_SUCCESS;
+}
+
 /* ─── native_handle_t pointer storage in BufferHandle::reserve[] ─────────── */
 
 /* Layout of the trailing kPtrSlots bookkeeping slots: hybris_buffer_layout.h */
@@ -321,6 +441,11 @@ HybrisBufferVdiImpl::HybrisBufferVdiImpl()
 
 int32_t HybrisBufferVdiImpl::AllocMem(const AllocInfo& info, BufferHandle*& handle) const
 {
+    int32_t invalid = ValidateAllocInfo(info);
+    if (invalid != HDF_SUCCESS) {
+        return invalid;
+    }
+
     if (!g_grallocUsable) {
         /* hybris_gralloc_allocate would abort in the GraphicBufferMapper
          * ctor; allocation belongs in allocator_host anyway. */
