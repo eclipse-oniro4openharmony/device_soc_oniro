@@ -1,0 +1,93 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# waydroid_compositor — Wayland server + zero-copy gralloc bridge for the
+# Android app container.  Plan: docs/hybris_generic/android_app_compat_plan.md
+#
+# Ships on every hybris_generic image but starts only when
+# persist.waydroid.enabled is set (plan D10), so X23 builds are unaffected.
+
+import("//build/ohos.gni")
+
+libhybris_root = "//third_party/libhybris"
+
+config("waydroid_compositor_config") {
+  include_dirs = [
+    "include",
+    "../hardware/display/include",
+
+    # libhybris' server-side android_wlegl, and the Android headers its
+    # public types (native_handle_t, ANativeWindowBuffer) come from
+    "$libhybris_root/hybris/platforms/common",
+    "$libhybris_root/hybris/include",
+    "$libhybris_root/include",
+    "//third_party/android-headers",
+  ]
+
+  cflags_cc = [
+    "-std=c++17",
+    "-Wno-unused-parameter",
+  ]
+}
+
+ohos_executable("waydroid_compositor") {
+  sources = [
+    "src/waydroid_compositor_main.cpp",
+    "src/wl_output_surface.cpp",
+    "src/wl_server.cpp",
+    "src/wlegl_import.cpp",
+
+    # xdg-shell is generated as private-code (per upstream's
+    # recommendation), so its interface symbols are not exported by
+    # libwayland-server and each user compiles them in.
+    "//third_party/wayland/generated/xdg-shell-protocol.c",
+  ]
+
+  configs = [ ":waydroid_compositor_config" ]
+
+  # Cross-part dependencies must go through external_deps (the build's
+  # deps validator rejects a direct label into another part).
+  external_deps = [
+    "c_utils:utils",
+    "graphic_2d:librender_service_base",
+    "graphic_2d:librender_service_client",
+    "graphic_surface:buffer_handle",
+    "graphic_surface:surface",
+    "graphic_surface:sync_fence",
+    "hilog:libhilog",
+    "init:libbegetutil",
+    "ipc:ipc_core",
+    "libhybris:libhybris-platformcommon",
+    "wayland:libwayland_server",
+  ]
+
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+ohos_prebuilt_etc("waydroid_compositor_cfg") {
+  source = "cfg/waydroid_compositor.cfg"
+  relative_install_dir = "init"
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+group("waydroid_group") {
+  deps = [
+    ":waydroid_compositor",
+    ":waydroid_compositor_cfg",
+  ]
+}

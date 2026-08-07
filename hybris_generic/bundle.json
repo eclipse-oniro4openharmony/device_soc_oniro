@@ -25,6 +25,8 @@
           "hdf_core",
           "c_utils",
           "libhybris",
+          "wayland",
+          "graphic_2d",
           "ipc",
           "libnl"
         ],

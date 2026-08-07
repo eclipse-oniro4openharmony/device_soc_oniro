@@ -28,5 +28,6 @@ group("hybris_generic_soc_group") {
     "hardware/vibrator:vibrator_vdi_model",
     "hardware/wlan:libhdi_wlan_impl",
     "hardware/wlan:wifi_hal_default",
+    "waydroid:waydroid_group",
   ]
 }
