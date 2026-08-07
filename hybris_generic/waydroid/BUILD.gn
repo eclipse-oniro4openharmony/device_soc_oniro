@@ -57,6 +57,9 @@ ohos_executable("waydroid_compositor") {
 
   configs = [ ":waydroid_compositor_config" ]
 
+  # Same direct label the display buffer VDI uses for gralloc.
+  deps = [ "$libhybris_root/hybris/gralloc:libgralloc" ]
+
   # Cross-part dependencies must go through external_deps (the build's
   # deps validator rejects a direct label into another part).
   external_deps = [
@@ -78,6 +81,37 @@ ohos_executable("waydroid_compositor") {
   subsystem_name = "oniro_soc_products"
 }
 
+# Stands in for the container's hwcomposer: posts real gralloc buffers
+# over android_wlegl so the frame path can be proven (and soaked) with
+# no container running.  Ships with the image — it is a bring-up tool
+# and costs a few KB.
+ohos_executable("waydroid_wlegl_harness") {
+  sources = [
+    "test/wlegl_harness.cpp",
+
+    # Both protocols are generated as private-code, so a client that
+    # names their interfaces compiles them in (libhybris-platformcommon
+    # has its own copy of the android one for the server side, but does
+    # not export the symbols).
+    "//third_party/wayland/generated/wayland-android-protocol.c",
+    "//third_party/wayland/generated/xdg-shell-protocol.c",
+  ]
+
+  configs = [ ":waydroid_compositor_config" ]
+
+  # Same direct label the display buffer VDI uses for gralloc.
+  deps = [ "$libhybris_root/hybris/gralloc:libgralloc" ]
+
+  external_deps = [
+    "hilog:libhilog",
+    "wayland:libwayland_client",
+  ]
+
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
 ohos_prebuilt_etc("waydroid_compositor_cfg") {
   source = "cfg/waydroid_compositor.cfg"
   relative_install_dir = "init"
@@ -89,5 +123,6 @@ group("waydroid_group") {
   deps = [
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
+    ":waydroid_wlegl_harness",
   ]
 }

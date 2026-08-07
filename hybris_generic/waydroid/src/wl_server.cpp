@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,6 +40,25 @@ constexpr uint32_t OUTPUT_VERSION        = 3;
 constexpr uint32_t XDG_WM_BASE_VERSION   = 3;
 
 Server* g_server = nullptr;
+
+/* mkdir -p: the socket dir sits under /data/waydroid, which does not
+ * exist yet on a device that has never run the container. */
+bool MakeDirPath(const std::string& path, mode_t mode)
+{
+    std::string acc;
+    size_t pos = 0;
+    while (pos != std::string::npos) {
+        pos = path.find('/', pos + 1);
+        acc = path.substr(0, pos);
+        if (acc.empty()) {
+            continue;
+        }
+        if (mkdir(acc.c_str(), mode) < 0 && errno != EEXIST) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /* ---- wl_surface -------------------------------------------------------- */
 
@@ -109,21 +129,23 @@ void SurfaceCommit(struct wl_client*, struct wl_resource* resource)
             desc.format = rwb->format;
             desc.usage  = rwb->usage;
 
+            server->WatchBufferDestroy(surf->current);
             sptr<SurfaceBuffer> sb = server->Importer().Import(
                 surf->current, rwb->handle, desc);
             if (sb != nullptr) {
-                /* The buffer stays owned by the client until we send
-                 * release; RS holds its own reference via the queue. */
-                server->Output().Flush(sb, -1, desc.width, desc.height);
+                /* The client owns the buffer until we send release, and
+                 * RS is not done with it until its release listener
+                 * fires — so record the mapping and let OnBufferReleased
+                 * send wl_buffer.release. */
+                server->TrackInFlight(sb.GetRefPtr(), surf->current);
+                if (!server->Output().Flush(sb, -1, desc.width, desc.height)) {
+                    /* Nothing will ever release it: hand it straight
+                     * back or the client stalls forever. */
+                    server->UntrackInFlight(sb.GetRefPtr());
+                    wl_buffer_send_release(surf->current);
+                }
             }
         }
-        /* Release immediately after handing the frame to RS.  The
-         * correct trigger is RS's release listener (which is also our
-         * fence source) — wiring that is the next step; until then the
-         * container may reuse the buffer one frame early, which is
-         * visible only as tearing, not corruption, because the hwc
-         * triple-buffers. */
-        wl_buffer_send_release(surf->current);
         surf->current = nullptr;
     }
 
@@ -478,12 +500,106 @@ void XdgWmBaseBind(struct wl_client* client, void*, uint32_t version, uint32_t i
 
 Server::~Server()
 {
+    if (releaseEventFd_ >= 0) {
+        close(releaseEventFd_);
+        releaseEventFd_ = -1;
+    }
     if (display_ != nullptr) {
         wl_display_destroy(display_);
         display_ = nullptr;
     }
     if (g_server == this) {
         g_server = nullptr;
+    }
+}
+
+
+/* A wl_buffer lives only as long as its client.  When one goes away its
+ * imported SurfaceBuffer must go too, or the importer cache — and the
+ * producer queue slots those buffers occupy — grow until every flush
+ * fails with BUFFER_QUEUE_FULL. */
+void Server::WatchBufferDestroy(struct wl_resource* wlBuffer)
+{
+    if (watchedBuffers_.count(wlBuffer) != 0) {
+        return;
+    }
+    auto* listener = new struct wl_listener();
+    listener->notify = [](struct wl_listener* l, void* data) {
+        auto* res = static_cast<struct wl_resource*>(data);
+        if (g_server != nullptr) {
+            g_server->ForgetBuffer(res);
+        }
+        wl_list_remove(&l->link);
+        delete l;
+    };
+    wl_resource_add_destroy_listener(wlBuffer, listener);
+    watchedBuffers_.insert(wlBuffer);
+}
+
+void Server::ForgetBuffer(struct wl_resource* wlBuffer)
+{
+    watchedBuffers_.erase(wlBuffer);
+    importer_.Forget(wlBuffer);
+    {
+        std::lock_guard<std::mutex> lock(inFlightMutex_);
+        for (auto it = inFlight_.begin(); it != inFlight_.end();) {
+            it = (it->second == wlBuffer) ? inFlight_.erase(it) : std::next(it);
+        }
+        for (auto it = releasedPending_.begin(); it != releasedPending_.end();) {
+            it = (*it == wlBuffer) ? releasedPending_.erase(it) : std::next(it);
+        }
+    }
+    /* The queue still holds slots for this client's buffers and nothing
+     * will release them now — start over. */
+    output_.ResetQueue();
+}
+
+/* ---- deferred wl_buffer.release ---------------------------------------- */
+
+void Server::TrackInFlight(SurfaceBuffer* buffer, struct wl_resource* wlBuffer)
+{
+    std::lock_guard<std::mutex> lock(inFlightMutex_);
+    inFlight_[buffer] = wlBuffer;
+}
+
+void Server::UntrackInFlight(SurfaceBuffer* buffer)
+{
+    std::lock_guard<std::mutex> lock(inFlightMutex_);
+    inFlight_.erase(buffer);
+}
+
+/* RS binder thread: queue the resource and wake the wayland loop.  No
+ * wl_* call may happen here — libwayland is not thread-safe. */
+void Server::OnBufferReleased(SurfaceBuffer* buffer)
+{
+    {
+        std::lock_guard<std::mutex> lock(inFlightMutex_);
+        auto it = inFlight_.find(buffer);
+        if (it == inFlight_.end()) {
+            return;
+        }
+        releasedPending_.push_back(it->second);
+        inFlight_.erase(it);
+    }
+    if (releaseEventFd_ >= 0) {
+        uint64_t one = 1;
+        (void)!write(releaseEventFd_, &one, sizeof one);
+    }
+}
+
+/* Wayland thread. */
+void Server::DrainReleases()
+{
+    std::vector<struct wl_resource*> pending;
+    {
+        std::lock_guard<std::mutex> lock(inFlightMutex_);
+        pending.swap(releasedPending_);
+    }
+    for (struct wl_resource* res : pending) {
+        wl_buffer_send_release(res);
+    }
+    if (!pending.empty()) {
+        wl_display_flush_clients(display_);
     }
 }
 
@@ -525,7 +641,7 @@ bool Server::Init(const ServerConfig& config)
 
     /* The socket dir is what waydroidd bind-mounts into the container at
      * /run/xdg; libwayland takes it from XDG_RUNTIME_DIR. */
-    if (mkdir(config_.socketPath.c_str(), 0700) < 0 && errno != EEXIST) {
+    if (!MakeDirPath(config_.socketPath, 0700)) {
         HILOG_ERROR(LOG_CORE, "Init: mkdir %{public}s: %{public}s",
                     config_.socketPath.c_str(), strerror(errno));
         return false;
@@ -540,6 +656,26 @@ bool Server::Init(const ServerConfig& config)
     if (!CreateGlobals()) {
         return false;
     }
+    /* eventfd is how the RS binder thread wakes this loop; adding it to
+     * the wayland event loop keeps everything single-threaded above. */
+    releaseEventFd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (releaseEventFd_ < 0) {
+        HILOG_ERROR(LOG_CORE, "Init: eventfd: %{public}s", strerror(errno));
+        return false;
+    }
+    wl_event_loop_add_fd(wl_display_get_event_loop(display_), releaseEventFd_,
+                         WL_EVENT_READABLE,
+                         [](int fd, uint32_t, void* data) -> int {
+                             uint64_t drained = 0;
+                             (void)!read(fd, &drained, sizeof drained);
+                             static_cast<Server*>(data)->DrainReleases();
+                             return 0;
+                         }, this);
+
+    output_.SetReleaseCallback([this](SurfaceBuffer* buffer) {
+        OnBufferReleased(buffer);
+    });
+
     if (wl_display_add_socket(display_, config_.socketName.c_str()) < 0) {
         HILOG_ERROR(LOG_CORE, "Init: add_socket %{public}s failed",
                     config_.socketName.c_str());

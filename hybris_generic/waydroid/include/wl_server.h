@@ -25,7 +25,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <wayland-server.h>
 
@@ -60,6 +64,23 @@ public:
     void Run();
     void Stop();
 
+    /*
+     * In-flight bookkeeping for the deferred wl_buffer.release.
+     *
+     * Track/Untrack run on the wayland thread; OnBufferReleased runs on
+     * an RS binder thread and only queues the resource, waking the
+     * wayland loop through an eventfd — wl_resource calls are not
+     * thread-safe, so the actual wl_buffer.release is sent from
+     * DrainReleases() on the wayland thread.
+     */
+    void TrackInFlight(SurfaceBuffer* buffer, struct wl_resource* wlBuffer);
+    void UntrackInFlight(SurfaceBuffer* buffer);
+
+    /* Follow a wl_buffer's lifetime so its import can be dropped when
+     * the client destroys it (or dies). */
+    void WatchBufferDestroy(struct wl_resource* wlBuffer);
+    void ForgetBuffer(struct wl_resource* wlBuffer);
+
     OutputSurface& Output() { return output_; }
     BufferImporter& Importer() { return importer_; }
     const ServerConfig& Config() const { return config_; }
@@ -68,11 +89,20 @@ public:
 
 private:
     bool CreateGlobals();
+    void OnBufferReleased(SurfaceBuffer* buffer);
+    void DrainReleases();
 
     ServerConfig config_;
     struct wl_display* display_ = nullptr;
     OutputSurface  output_;
     BufferImporter importer_;
+
+    std::mutex inFlightMutex_;
+    std::unordered_map<SurfaceBuffer*, struct wl_resource*> inFlight_;
+    std::vector<struct wl_resource*> releasedPending_;
+    std::unordered_set<struct wl_resource*> watchedBuffers_;
+    int releaseEventFd_ = -1;
+
     bool running_ = false;
 };
 

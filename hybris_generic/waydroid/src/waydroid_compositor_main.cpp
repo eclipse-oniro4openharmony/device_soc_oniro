@@ -20,6 +20,8 @@
 #include <parameter.h>
 #include <transaction/rs_interfaces.h>
 
+#include <hybris/gralloc/gralloc.h>
+
 #include "wl_server.h"
 
 #undef LOG_DOMAIN
@@ -78,6 +80,12 @@ int main(int argc, char** argv)
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
     signal(SIGPIPE, SIG_IGN);   /* a dying wayland client must not kill us */
+
+    /* server_wlegl imports every incoming handle through the gralloc
+     * mapper, which must be loaded before the first client connects —
+     * without this it retains/imports into a null module and the
+     * client's create_buffer fails with "invalid native handle". */
+    hybris_gralloc_initialize(0 /* no framebuffer */);
 
     ServerConfig cfg;
     QueryDisplay(cfg);

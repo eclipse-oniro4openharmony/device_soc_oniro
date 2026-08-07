@@ -57,6 +57,9 @@ bool OutputSurface::AttachSelfDrawingNode(uint64_t screenId, int32_t width, int3
 
     node_    = node;
     surface_ = surface;
+    attached_.clear();
+    reclaimable_.store(0);
+    InstallReleaseListenerLocked();
     width_   = width;
     height_  = height;
     HILOG_INFO(LOG_CORE, "output: self-drawing node on screen %{public}llu, %{public}dx%{public}d",
@@ -86,6 +89,9 @@ bool OutputSurface::AttachProducer(const sptr<IBufferProducer>& producer)
         node_ = nullptr;
     }
     surface_ = surface;
+    attached_.clear();
+    reclaimable_.store(0);
+    InstallReleaseListenerLocked();
     HILOG_INFO(LOG_CORE, "output: switched to app producer surface");
     return true;
 }
@@ -99,12 +105,60 @@ void OutputSurface::Detach()
         node_ = nullptr;
     }
     surface_ = nullptr;
+    attached_.clear();
+}
+
+void OutputSurface::ResetQueue()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (surface_ == nullptr) {
+        return;
+    }
+    GSError err = surface_->CleanCache(true);
+    if (err != GSERROR_OK) {
+        HILOG_WARN(LOG_CORE, "CleanCache failed: %{public}d", static_cast<int>(err));
+    }
+    attached_.clear();
+    reclaimable_.store(0);
+    HILOG_INFO(LOG_CORE, "output: queue reset");
 }
 
 bool OutputSurface::IsAttached()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return surface_ != nullptr;
+}
+
+void OutputSurface::SetReleaseCallback(ReleaseCallback cb)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    releaseCb_ = std::move(cb);
+    InstallReleaseListenerLocked();
+}
+
+/* RS calls this on a binder thread when it is done with a buffer.  It is
+ * the only correct trigger for wl_buffer.release: releasing earlier lets
+ * the client redraw into a buffer RS is still reading (and, because the
+ * buffer is then still in the queue cache, makes the next attach fail
+ * with BUFFER_IS_INCACHE). */
+void OutputSurface::InstallReleaseListenerLocked()
+{
+    if (surface_ == nullptr || !releaseCb_) {
+        return;
+    }
+    ReleaseCallback cb = releaseCb_;
+    GSError err = surface_->RegisterReleaseListener(
+        [this, cb](sptr<SurfaceBuffer>& buffer) -> GSError {
+            if (buffer != nullptr) {
+                reclaimable_.fetch_add(1);
+                cb(buffer.GetRefPtr());
+            }
+            return GSERROR_OK;
+        });
+    if (err != GSERROR_OK) {
+        HILOG_WARN(LOG_CORE, "RegisterReleaseListener failed: %{public}d",
+                   static_cast<int>(err));
+    }
 }
 
 bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFence,
@@ -128,11 +182,54 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
     };
 
     sptr<SurfaceBuffer> sb = buffer;
+
+    /*
+     * Make room before every attach.
+     *
+     * Any buffer the queue has already seen is still in its cache (in
+     * RELEASED state once RS is done): re-attaching it returns
+     * BUFFER_IS_INCACHE, and FlushBuffer refuses anything but
+     * REQUESTED/ATTACHED.  RequestAndDetachBuffer is the mirror of
+     * AttachAndFlushBuffer (one IPC) and pops a free buffer out of the
+     * cache entirely.  Whatever comes back is dropped — every buffer in
+     * this queue is one of ours and the client owns its contents; the
+     * point is only to free the slot.
+     *
+     * The request config must describe the buffer as it actually is,
+     * strideAlignment included (the queue compares configs and would
+     * otherwise reallocate a fresh buffer instead of handing ours back,
+     * leaving the original stuck in the cache).
+     */
+    if (reclaimable_.load() > 0) {
+        reclaimable_.fetch_sub(1);
+        sptr<SurfaceBuffer> reclaimed;
+        sptr<SyncFence> reclaimedFence;
+        BufferRequestConfig reqConfig = {
+            .width  = sb->GetWidth(),
+            .height = sb->GetHeight(),
+            .strideAlignment = sb->GetStride(),
+            .format = sb->GetFormat(),
+            .usage  = sb->GetUsage(),
+            .timeout = 0,
+            .colorGamut = sb->GetSurfaceBufferColorGamut(),
+            .transform = sb->GetSurfaceBufferTransform(),
+        };
+        GSError rerr = surface_->RequestAndDetachBuffer(reclaimed, reclaimedFence,
+                                                        reqConfig);
+        if (rerr == GSERROR_OK && reclaimed != nullptr) {
+            attached_.erase(reclaimed.GetRefPtr());
+        } else if (rerr != GSERROR_NO_BUFFER) {
+            HILOG_WARN(LOG_CORE, "reclaim failed: %{public}d", static_cast<int>(rerr));
+        }
+    }
+
     GSError err = surface_->AttachAndFlushBuffer(sb, fence, flushConfig, false);
     if (err != GSERROR_OK) {
-        HILOG_ERROR(LOG_CORE, "AttachAndFlushBuffer failed: %{public}d", static_cast<int>(err));
+        HILOG_ERROR(LOG_CORE, "attach+flush failed: %{public}d",
+                    static_cast<int>(err));
         return false;
     }
+    attached_.insert(sb.GetRefPtr());
     return true;
 }
 
