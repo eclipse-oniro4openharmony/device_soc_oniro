@@ -119,6 +119,20 @@ void SurfaceCommit(struct wl_client*, struct wl_resource* resource)
     }
 
     if (server != nullptr && surf->current != nullptr) {
+        /* Only two buffer factories exist here: wl_shm and android_wlegl.
+         * The hwc's background/cursor surfaces commit SHM buffers, and
+         * server_wlegl_buffer_from() blindly casts user_data — calling it
+         * on an shm buffer is a garbage deref (first real-hwc connect
+         * crashed exactly there).  wl_shm_buffer_get() is the gate: shm
+         * content has no zero-copy path, so release it immediately (the
+         * output node's own background is already black). */
+        if (wl_shm_buffer_get(surf->current) != nullptr) {
+            wl_buffer_send_release(surf->current);
+            surf->current = nullptr;
+        }
+    }
+
+    if (server != nullptr && surf->current != nullptr) {
         server_wlegl_buffer* wlegl = server_wlegl_buffer_from(surf->current);
         if (wlegl != nullptr && wlegl->buf != nullptr) {
             auto* rwb = wlegl->buf;
@@ -640,12 +654,17 @@ bool Server::Init(const ServerConfig& config)
     g_server = this;
 
     /* The socket dir is what waydroidd bind-mounts into the container at
-     * /run/xdg; libwayland takes it from XDG_RUNTIME_DIR. */
-    if (!MakeDirPath(config_.socketPath, 0700)) {
+     * /run/xdg; libwayland takes it from XDG_RUNTIME_DIR.  We run as
+     * root but the container's hwcomposer runs as system (uid 1000), and
+     * connect(2) on a unix socket needs search on the dir and write on
+     * the socket inode — hence the explicit chmods (mkdir alone is
+     * umask-masked and never fixes a dir that already exists). */
+    if (!MakeDirPath(config_.socketPath, 0755)) {
         HILOG_ERROR(LOG_CORE, "Init: mkdir %{public}s: %{public}s",
                     config_.socketPath.c_str(), strerror(errno));
         return false;
     }
+    (void)chmod(config_.socketPath.c_str(), 0755);
     setenv("XDG_RUNTIME_DIR", config_.socketPath.c_str(), 1);
 
     display_ = wl_display_create();
@@ -681,6 +700,7 @@ bool Server::Init(const ServerConfig& config)
                     config_.socketName.c_str());
         return false;
     }
+    (void)chmod((config_.socketPath + "/" + config_.socketName).c_str(), 0666);
 
     HILOG_INFO(LOG_CORE, "wayland server up: %{public}s/%{public}s, output %{public}dx%{public}d",
                config_.socketPath.c_str(), config_.socketName.c_str(),
