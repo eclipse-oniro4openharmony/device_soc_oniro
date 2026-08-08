@@ -1,45 +1,58 @@
-# Waydroid gralloc bridge (W3, WORK IN PROGRESS)
+# Waydroid gralloc bridge (W3 — WORKING)
 
-The A13 (lineage-20) Waydroid container has to allocate GPU buffers, but
-the only Mali gralloc on the device is the host's **A14** (Halium 14, MTK
-mt6878) stack. A13-userland ↔ A14-vendor gralloc4 is incompatible across
-**three** gates (full write-up in the plan §9 W3). This directory holds
-the reusable pieces of the in-progress bridge; **it does not yet produce
-pixels** — gate 3 (the Mali mapper rejecting the A13 descriptor) is open.
+**The LineageOS 20 launcher renders on the Volla Plinius panel** through
+this bridge (2026-08-08). The container is A13 (lineage-20) but the only
+Mali gralloc on the device is the host's A14 (Halium 14, MTK mt6878).
+A13-userland ↔ A14-vendor gralloc4 is incompatible across three gates;
+this directory bridges all three so SurfaceFlinger can allocate GPU
+buffers, composite, and forward frames to `waydroid_compositor`.
 
-## The three gates
+## The three gates and how each is bridged
 
-1. **A13 libui client-side usage validation** — `Gralloc4Mapper::
+1. **A13 libui client-side usage validation.** `Gralloc4Mapper::
    validateBufferDescriptorInfo` in the container's `/system/lib64/
-   libui.so` rejects phantom usage bits (0x7f00000000 + bit 24) with
-   `-EINVAL` ("invalid usage bits"). **Solved** by
-   `halium-blobs/waydroid/patches/libui.so` (clears the bits, continues),
-   bound by waydroidd.
+   libui.so` rejects usage bits the A14 Mali mapper actually accepts,
+   with `-EINVAL` ("invalid usage bits"). Fixed by a 3-instruction patch
+   (`halium-blobs/waydroid/patches/libui.so`, bound by waydroidd) that
+   clears usage to its low 24 bits — the clean descriptor the A14 mapper
+   wants — instead of rejecting. See `patches/README`.
 
-2. **No reachable allocator** — SF probes HIDL `allocator@4.0/3.0/2.0`
-   (all absent from VINTF); the host's Mali allocator is **AIDL**
+2. **A14 Mali mapper attribute check.** With gate 1 patched, the mapper's
+   `createDescriptor` rejects `usage & 0xFFFE08282400` (bits 33-47, 27,
+   21, 19, 13, 10) as "Invalid attributes". SF's requested `0x1b00` has
+   none of those, so the same clean-usage patch from gate 1 satisfies
+   this too (proven: `mali_gralloc` no longer logs "Invalid descriptorInfo
+   sizes"/"Invalid attributes").
+
+3. **No reachable allocator.** SF probes HIDL `allocator@4.0/3.0/2.0`
+   (all absent from VINTF); the host Mali allocator is **AIDL**
    (`allocator-V2-service-mediatek`, in the androidd/A14 container) and
-   `host_hwbinder`+`hosthals.xml` forward HIDL only. Running the host A14
-   allocator binary inside the A13 container needs exactly one A14
-   libbinder_ndk symbol, `AServiceManager_addServiceWithFlags@LIBBINDER_
-   NDK34` — everything else it imports is base `@LIBBINDER_NDK` (present
-   through NDK33 in the A13 lib). `binderflags_shim.S` here is that
-   one-symbol trampoline (forwards to A13 `AServiceManager_addService`,
-   dropping the flags arg). With it `LD_PRELOAD`ed the A14 allocator
-   **links**, but does not yet register cleanly — needs an init service +
-   the right vendor linker namespace, not a manual `nsenter` run.
+   `host_hwbinder`/`hosthals.xml` forward HIDL only. Fixed by **running
+   the host A14 AIDL allocator inside the container**:
+   * `binderflags_shim.S` — the A14 allocator's one A14-only libbinder_ndk
+     symbol (`AServiceManager_addServiceWithFlags@LIBBINDER_NDK34`)
+     trampolined to A13 `AServiceManager_addService` (weak import so the
+     .so preloads harmlessly). Build: see below. Deployed to `/odm`.
+   * `graphics-allocator-aidl.xml` — VINTF fragment declaring the AIDL
+     allocator (else servicemanager rejects registration with
+     `EX_ILLEGAL_ARGUMENT` -3). Placed in `/odm/etc/vintf/manifest/`.
+   * `/vendor/etc/gralloc/gpu.xml` — the Mali allocator aborts ("Unable to
+     retrieve GPU capabilities") without it; waydroidd overlays it into
+     the read-only shim `/vendor/etc` from `/vendor_extra`.
+   * `start-allocator.sh` + `waydroid-gralloc.rc` — the init service that
+     launches the allocator (shim preloaded, Mali deps from
+     `/vendor_extra`), plus an `on property:sys.boot_completed=1` trigger
+     that sets `waydroid.active_apps=Waydroid` to switch the hwc to
+     full-UI mode once SF is compositing a real framebuffer-target.
 
-3. **Mali mapper rejects the A13 descriptor (OPEN)** — with gate 1
-   patched, SF's in-process A14 Mali mapper `createDescriptor` fails:
-   `mali_gralloc: Invalid descriptorInfo sizes` / `Invalid attributes to
-   create descriptor for Mapper 4.0`, `GraphicBufferAllocator ... : 3`.
-   This is before the allocator is even called, so it must be fixed first.
-   Likely the A13 `BufferDescriptorInfo` (or the usage the gate-1 patch
-   left) doesn't satisfy the A14 Mali mapper's size/attribute
-   computation. Needs RE of `mapper.mediatek.so`'s createDescriptor, or a
-   different gate-1 patch that yields a descriptor the A14 mapper accepts
-   (compare against what the A14 libui / libhybris path produces, which
-   works — see the W2 harness `usage_hex` probe).
+## Deployment (baked into waydroidd + graft)
+
+`waydroidd` binds the libui patch, the gpu.xml overlay, and the graft dir
+(`/data/waydroid/graft` → container `/odm`). The graft carries
+`libbinderflags_shim.so`, `etc/init/waydroid-gralloc.rc`,
+`etc/vintf/manifest/waydroid-allocator-aidl.xml`, and
+`start-allocator.sh`. A fresh `waydroidd` start now boots straight to the
+launcher with no manual steps.
 
 ## Building the shim
 
@@ -50,14 +63,11 @@ $SDK/llvm/bin/ld.lld -shared -soname libbinderflags_shim.so --allow-shlib-undefi
     -o libbinderflags_shim.so binderflags_shim.o
 ```
 
-The import (`AServiceManager_addService`) is **weak** so the .so can be
-preloaded into wrapper processes (init/nohup/timeout) that don't link
-libbinder_ndk without failing; it binds to the real symbol only inside
-the allocator, which needs libbinder_ndk regardless.
+## Known follow-ups (not blocking the launcher)
 
-## What works today (do NOT regress)
-
-Everything up to gate 3: the container boots to zygote64/AudioFlinger,
-the hwc drives `waydroid_compositor`, and W2's zero-copy frame path
-renders on the panel. Only SF's GPU composition (hence the launcher) is
-blocked, on gate 3.
+* Frame pacing: the hwc posts ~60 fps into RS; on a static screen the
+  compositor logs `attach+flush failed: 41209000` (QUEUE_FULL) for the
+  frames RS didn't consume — harmless (last good frame persists), but
+  `wl_surface.frame` should follow RS flush-complete (W2 caveat).
+* The allocator binary path (`mt6878`) is globbed but SoC-specific.
+* Input (W4) is next: no touch reaches the container yet.

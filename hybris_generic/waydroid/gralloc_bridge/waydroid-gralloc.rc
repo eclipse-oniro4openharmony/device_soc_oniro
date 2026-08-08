@@ -1,0 +1,14 @@
+# W3: bridge the host A14 Mali AIDL allocator into the A13 container so
+# SurfaceFlinger can allocate GPU buffers (plan §9 W3 gate 2).
+service vendor.waydroid-gralloc /system/bin/sh /odm/start-allocator.sh
+    class hal
+    user root
+    group system graphics drmrpc
+    capabilities SYS_NICE
+    onrestart restart surfaceflinger
+
+# Switch the hwcomposer to full-UI mode once SF is definitely compositing
+# (a real, non-NULL framebuffer-target exists), so it forwards frames to
+# waydroid_compositor. Doing this earlier races the NULL FB-target crash.
+on property:sys.boot_completed=1
+    setprop waydroid.active_apps Waydroid
