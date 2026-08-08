@@ -11,9 +11,13 @@
  * BufferHandle construction, SurfaceBuffer adoption, attach+flush,
  * release — with no container in the picture.
  *
- * Usage: waydroid_wlegl_harness [frames] [width] [height]
+ * Usage: waydroid_wlegl_harness [frames] [width] [height] [usage_hex]
  * A frame count of 0 runs until killed (the soak configuration:
- * watch RSS and /proc/<pid>/fd for leaks).
+ * watch RSS and /proc/<pid>/fd for leaks).  usage_hex overrides the
+ * gralloc usage (default 0x933) — used to probe whether libhybris'
+ * hybris_gralloc_allocate accepts SurfaceFlinger's usage combos
+ * (e.g. 0x1b00 = HW_TEXTURE|HW_RENDER|HW_COMPOSER|HW_FB) that the
+ * HIDL/AIDL gralloc4 path rejects (W3 gralloc-ABI-skew de-risk).
  */
 
 #include <cstdio>
@@ -100,7 +104,7 @@ const struct xdg_toplevel_listener g_xdgToplevelListener = {
  * wl_buffer — the client half of what server_wlegl reassembles. */
 struct wl_buffer* CreateWleglBuffer(Globals& g, buffer_handle_t handle,
                                     int32_t width, int32_t height,
-                                    int32_t stride)
+                                    int32_t stride, int32_t usage)
 {
     const native_handle_t* nh = static_cast<const native_handle_t*>(handle);
 
@@ -122,7 +126,7 @@ struct wl_buffer* CreateWleglBuffer(Globals& g, buffer_handle_t handle,
     }
 
     struct wl_buffer* buffer = android_wlegl_create_buffer(
-        g.wlegl, width, height, stride, HAL_RGBA_8888, HARNESS_USAGE, wh);
+        g.wlegl, width, height, stride, HAL_RGBA_8888, usage, wh);
     android_wlegl_handle_destroy(wh);
     return buffer;
 }
@@ -157,6 +161,8 @@ int main(int argc, char** argv)
     int frames = (argc > 1) ? atoi(argv[1]) : 300;
     int32_t width  = (argc > 2) ? atoi(argv[2]) : 720;
     int32_t height = (argc > 3) ? atoi(argv[3]) : 1280;
+    int32_t usage  = (argc > 4) ? static_cast<int32_t>(strtoul(argv[4], nullptr, 0))
+                                : HARNESS_USAGE;
 
     struct wl_display* display = wl_display_connect(nullptr);
     if (display == nullptr) {
@@ -202,22 +208,24 @@ int main(int argc, char** argv)
 
     for (int i = 0; i < BUFFER_COUNT; ++i) {
         int rc = hybris_gralloc_allocate(width, height, HAL_RGBA_8888,
-                                         HARNESS_USAGE, &handles[i],
+                                         usage, &handles[i],
                                          &grallocStride);
         if (rc != 0 || handles[i] == nullptr) {
-            fprintf(stderr, "gralloc allocate %d failed: %d\n", i, rc);
+            fprintf(stderr, "gralloc allocate %d failed: %d (usage 0x%x)\n",
+                    i, rc, usage);
             return 1;
         }
         buffers[i] = CreateWleglBuffer(g, handles[i], width, height,
-                                       static_cast<int32_t>(grallocStride));
+                                       static_cast<int32_t>(grallocStride),
+                                       usage);
         if (buffers[i] == nullptr) {
             fprintf(stderr, "create_buffer %d failed\n", i);
             return 1;
         }
         wl_buffer_add_listener(buffers[i], &g_bufferListener, &g_busy[i]);
     }
-    printf("allocated %d buffers %dx%d, gralloc pixel stride %u\n",
-           BUFFER_COUNT, width, height, grallocStride);
+    printf("allocated %d buffers %dx%d usage 0x%x, gralloc pixel stride %u\n",
+           BUFFER_COUNT, width, height, usage, grallocStride);
 
     struct timespec start {};
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -239,7 +247,7 @@ int main(int argc, char** argv)
         }
 
         void* pixels = nullptr;
-        if (hybris_gralloc_lock(handles[idx], HARNESS_USAGE, 0, 0,
+        if (hybris_gralloc_lock(handles[idx], usage, 0, 0,
                                 width, height, &pixels) == 0 &&
             pixels != nullptr) {
             PaintFrame(pixels, width, height,
