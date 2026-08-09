@@ -7,6 +7,7 @@
 
 #include <hilog/log.h>
 #include <sync_fence.h>
+#include <transaction/rs_interfaces.h>
 #include <transaction/rs_transaction.h>
 
 #undef LOG_DOMAIN
@@ -224,9 +225,17 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
     }
 
     GSError err = surface_->AttachAndFlushBuffer(sb, fence, flushConfig, false);
+
+    /* Wake RenderService to composite THIS frame.  Our output is a
+     * standalone self-drawing node with no ArkUI app requesting frames
+     * for it, so RS would otherwise only composite it on its idle
+     * heartbeat (~10 s) — the buffer queue fills, every flush returns
+     * QUEUE_FULL, and the panel updates once per heartbeat.  A forced
+     * next-vsync per flush makes RS acquire our buffer (releasing the
+     * previous one) at the container's frame rate. */
+    Rosen::RSInterfaces::GetInstance().ForceRefreshOneFrameWithNextVSync();
+
     if (err != GSERROR_OK) {
-        HILOG_ERROR(LOG_CORE, "attach+flush failed: %{public}d",
-                    static_cast<int>(err));
         return false;
     }
     attached_.insert(sb.GetRefPtr());
