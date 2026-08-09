@@ -48,6 +48,17 @@ struct ServerConfig {
     uint64_t screenId = 0;
 };
 
+/* One wl_touch protocol step, queued from the OHOS input thread and
+ * replayed on the wayland thread (W4).  A PointerEvent becomes a short
+ * run of these ending in Frame. */
+struct TouchOp {
+    enum Kind : int32_t { Down = 0, Up, Motion, Frame, Cancel };
+    int32_t kind = Frame;
+    int32_t id = 0;                 /* OHOS pointer id, forwarded as-is */
+    int32_t x = 0;
+    int32_t y = 0;
+};
+
 class Server {
 public:
     Server() = default;
@@ -76,10 +87,35 @@ public:
     void TrackInFlight(SurfaceBuffer* buffer, struct wl_resource* wlBuffer);
     void UntrackInFlight(SurfaceBuffer* buffer);
 
+    /* Hand every in-flight buffer back to its client at once (wayland
+     * thread only).  Used to break a QUEUE_FULL deadlock: if RS stopped
+     * acquiring (screen-off) the queue never drains on its own. */
+    void ReleaseEverythingInFlight();
+
     /* Follow a wl_buffer's lifetime so its import can be dropped when
      * the client destroys it (or dies). */
     void WatchBufferDestroy(struct wl_resource* wlBuffer);
     void ForgetBuffer(struct wl_resource* wlBuffer);
+
+    /*
+     * Touch input (W4).  InjectTouchOps is thread-safe: it queues and
+     * wakes the wayland loop, which replays the ops as wl_touch events
+     * to the hwc (DrainTouchOps).  The seat/surface bookkeeping calls
+     * run on the wayland thread only.
+     */
+    void InjectTouchOps(const std::vector<TouchOp>& ops);
+    void AddTouchResource(struct wl_resource* touch);
+    void RemoveTouchResource(struct wl_resource* touch);
+    void NoteInputSurface(struct wl_resource* surface);
+    void DropInputSurface(struct wl_resource* surface);
+
+    /* Single-pointer touch from the W5 IPC (action == OHOS PointerEvent
+     * action: 1=cancel 2=down 3=move 4=up).  Emits the op run + frame. */
+    void InjectTouchFromAction(int32_t action, int32_t id, int32_t x, int32_t y);
+
+    /* W5: revert the output to the built-in self-drawing node (used when
+     * the front-end app surface goes away / dies). */
+    void RevertToSelfDrawing();
 
     OutputSurface& Output() { return output_; }
     BufferImporter& Importer() { return importer_; }
@@ -91,6 +127,7 @@ private:
     bool CreateGlobals();
     void OnBufferReleased(SurfaceBuffer* buffer);
     void DrainReleases();
+    void DrainTouchOps();
 
     ServerConfig config_;
     struct wl_display* display_ = nullptr;
@@ -102,6 +139,16 @@ private:
     std::vector<struct wl_resource*> releasedPending_;
     std::unordered_set<struct wl_resource*> watchedBuffers_;
     int releaseEventFd_ = -1;
+
+    /* Touch: pending ops (input thread → wayland thread), the hwc's
+     * wl_touch resources, and the surface events are addressed to (the
+     * last one that committed a wlegl buffer — the fullscreen SF
+     * framebuffer-target in full-UI mode). */
+    std::mutex touchMutex_;
+    std::vector<TouchOp> touchPending_;
+    int touchEventFd_ = -1;
+    std::vector<struct wl_resource*> touchResources_;
+    struct wl_resource* inputSurface_ = nullptr;
 
     bool running_ = false;
 };

@@ -1,0 +1,18 @@
+# W4 networking-lite (android_app_compat_plan.md §W4).
+#
+# waydroidd creates the wdb0<->eth0 veth pair and assigns static
+# addresses (host 192.168.240.1, container 192.168.240.2); the boot
+# stack flushes eth0 during boot, so waydroid-net.sh re-applies the
+# address and publishes the subnet route where Android policy routing
+# can actually see it (netd's local_network table — the main table is
+# never consulted, rule 32000 is `from all unreachable`).
+#
+# Deployed to the graft: /odm/etc/init/waydroid-net.rc + /odm/waydroid-net.sh.
+
+service waydroid-net /system/bin/sh /odm/waydroid-net.sh
+    user root
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start waydroid-net

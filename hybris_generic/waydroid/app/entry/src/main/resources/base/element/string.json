@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Android Apps container front-end"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Android Apps"
+    },
+    {
+      "name": "app_name",
+      "value": "Android Apps"
+    }
+  ]
+}

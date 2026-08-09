@@ -27,6 +27,8 @@
           "libhybris",
           "wayland",
           "graphic_2d",
+          "input",
+          "samgr",
           "ipc",
           "libnl"
         ],

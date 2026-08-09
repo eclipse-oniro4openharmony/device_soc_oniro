@@ -135,6 +135,9 @@ void SurfaceCommit(struct wl_client*, struct wl_resource* resource)
     if (server != nullptr && surf->current != nullptr) {
         server_wlegl_buffer* wlegl = server_wlegl_buffer_from(surf->current);
         if (wlegl != nullptr && wlegl->buf != nullptr) {
+            /* This is the visible fullscreen surface — address touch
+             * input to it (W4). */
+            server->NoteInputSurface(resource);
             auto* rwb = wlegl->buf;
             WleglBufferDesc desc;
             desc.width  = rwb->width;
@@ -153,10 +156,23 @@ void SurfaceCommit(struct wl_client*, struct wl_resource* resource)
                  * send wl_buffer.release. */
                 server->TrackInFlight(sb.GetRefPtr(), surf->current);
                 if (!server->Output().Flush(sb, -1, desc.width, desc.height)) {
-                    /* Nothing will ever release it: hand it straight
-                     * back or the client stalls forever. */
+                    /* Almost always QUEUE_FULL: RS stopped acquiring
+                     * (screen-off) and the failed flush never reaches it,
+                     * so nothing ever drains the queue — a deadlock, not
+                     * a hiccup (seen as one stale frame forever after an
+                     * Android idle-lock).  Mailbox semantics: drop the
+                     * stale queued frames, hand every outstanding buffer
+                     * back to the hwc, retry with this newest frame. */
                     server->UntrackInFlight(sb.GetRefPtr());
-                    wl_buffer_send_release(surf->current);
+                    server->Output().ResetQueue();
+                    server->ReleaseEverythingInFlight();
+                    server->TrackInFlight(sb.GetRefPtr(), surf->current);
+                    if (!server->Output().Flush(sb, -1, desc.width, desc.height)) {
+                        /* Nothing will ever release it: hand it straight
+                         * back or the client stalls forever. */
+                        server->UntrackInFlight(sb.GetRefPtr());
+                        wl_buffer_send_release(surf->current);
+                    }
                 }
             }
         }
@@ -190,6 +206,9 @@ const struct wl_surface_interface g_surfaceImpl = {
 void SurfaceResourceDestroy(struct wl_resource* resource)
 {
     auto* surf = static_cast<Surface*>(wl_resource_get_user_data(resource));
+    if (g_server != nullptr) {
+        g_server->DropInputSurface(resource);
+    }
     delete surf;
 }
 
@@ -354,12 +373,27 @@ void SeatGetKeyboard(struct wl_client* client, struct wl_resource* resource, uin
     }
 }
 
+void TouchRelease(struct wl_client*, struct wl_resource* resource)
+{
+    wl_resource_destroy(resource);
+}
+
+const struct wl_touch_interface g_touchImpl = { TouchRelease };
+
 void SeatGetTouch(struct wl_client* client, struct wl_resource* resource, uint32_t id)
 {
     struct wl_resource* res = wl_resource_create(
         client, &wl_touch_interface, wl_resource_get_version(resource), id);
     if (res != nullptr) {
-        wl_resource_set_implementation(res, nullptr, nullptr, nullptr);
+        wl_resource_set_implementation(res, &g_touchImpl, nullptr,
+                                       [](struct wl_resource* r) {
+                                           if (g_server != nullptr) {
+                                               g_server->RemoveTouchResource(r);
+                                           }
+                                       });
+        if (g_server != nullptr) {
+            g_server->AddTouchResource(res);
+        }
     }
 }
 
@@ -518,6 +552,10 @@ Server::~Server()
         close(releaseEventFd_);
         releaseEventFd_ = -1;
     }
+    if (touchEventFd_ >= 0) {
+        close(touchEventFd_);
+        touchEventFd_ = -1;
+    }
     if (display_ != nullptr) {
         wl_display_destroy(display_);
         display_ = nullptr;
@@ -582,6 +620,26 @@ void Server::UntrackInFlight(SurfaceBuffer* buffer)
     inFlight_.erase(buffer);
 }
 
+/* Wayland thread. */
+void Server::ReleaseEverythingInFlight()
+{
+    std::vector<struct wl_resource*> resources;
+    {
+        std::lock_guard<std::mutex> lock(inFlightMutex_);
+        for (auto& kv : inFlight_) {
+            resources.push_back(kv.second);
+        }
+        inFlight_.clear();
+        releasedPending_.clear();
+    }
+    for (struct wl_resource* res : resources) {
+        wl_buffer_send_release(res);
+    }
+    if (!resources.empty()) {
+        wl_display_flush_clients(display_);
+    }
+}
+
 /* RS binder thread: queue the resource and wake the wayland loop.  No
  * wl_* call may happen here — libwayland is not thread-safe. */
 void Server::OnBufferReleased(SurfaceBuffer* buffer)
@@ -614,6 +672,142 @@ void Server::DrainReleases()
     }
     if (!pending.empty()) {
         wl_display_flush_clients(display_);
+    }
+}
+
+/* ---- touch input (W4) --------------------------------------------------- */
+
+/* Any thread. */
+void Server::InjectTouchOps(const std::vector<TouchOp>& ops)
+{
+    if (ops.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(touchMutex_);
+        touchPending_.insert(touchPending_.end(), ops.begin(), ops.end());
+    }
+    if (touchEventFd_ >= 0) {
+        uint64_t one = 1;
+        (void)!write(touchEventFd_, &one, sizeof one);
+    }
+}
+
+/* Any thread (W5 IPC).  OHOS PointerEvent action codes. */
+void Server::InjectTouchFromAction(int32_t action, int32_t id, int32_t x, int32_t y)
+{
+    constexpr int32_t ACTION_CANCEL = 1;
+    constexpr int32_t ACTION_DOWN = 2;
+    constexpr int32_t ACTION_MOVE = 3;
+    constexpr int32_t ACTION_UP = 4;
+
+    std::vector<TouchOp> ops;
+    switch (action) {
+        case ACTION_DOWN:   ops.push_back({ TouchOp::Down, id, x, y }); break;
+        case ACTION_MOVE:   ops.push_back({ TouchOp::Motion, id, x, y }); break;
+        case ACTION_UP:     ops.push_back({ TouchOp::Up, id, x, y }); break;
+        case ACTION_CANCEL: ops.push_back({ TouchOp::Cancel, id, x, y }); break;
+        default: return;
+    }
+    ops.push_back({ TouchOp::Frame, 0, 0, 0 });
+    InjectTouchOps(ops);
+}
+
+/* Wayland thread. */
+void Server::AddTouchResource(struct wl_resource* touch)
+{
+    touchResources_.push_back(touch);
+}
+
+void Server::RemoveTouchResource(struct wl_resource* touch)
+{
+    for (auto it = touchResources_.begin(); it != touchResources_.end();) {
+        it = (*it == touch) ? touchResources_.erase(it) : std::next(it);
+    }
+}
+
+void Server::NoteInputSurface(struct wl_resource* surface)
+{
+    inputSurface_ = surface;
+}
+
+void Server::DropInputSurface(struct wl_resource* surface)
+{
+    if (inputSurface_ == surface) {
+        inputSurface_ = nullptr;
+    }
+}
+
+/* Wayland thread (called from the W5 IPC binder thread is NOT safe for
+ * RS node ops — but AttachSelfDrawingNode takes its own lock and only
+ * touches RS, not wl_*; RS transactions are thread-safe).  Reverts the
+ * output to the built-in self-drawing node at the configured geometry. */
+void Server::RevertToSelfDrawing()
+{
+    output_.AttachSelfDrawingNode(config_.screenId, config_.width, config_.height);
+}
+
+/* Wayland thread: replay queued ops as wl_touch events on every touch
+ * resource of the input surface's client (one hwc in practice).  The
+ * hwc turns them into evdev packets on its container-internal FIFO
+ * (wayland-hwc.cpp touch_handle_*), InputFlinger takes it from there. */
+void Server::DrainTouchOps()
+{
+    std::vector<TouchOp> ops;
+    {
+        std::lock_guard<std::mutex> lock(touchMutex_);
+        ops.swap(touchPending_);
+    }
+    if (ops.empty() || inputSurface_ == nullptr || touchResources_.empty()) {
+        HILOG_INFO(LOG_CORE, "DrainTouchOps: %{public}zu ops but inputSurface=%{public}d "
+                   "touchResources=%{public}zu (dropped)",
+                   ops.size(), inputSurface_ != nullptr, touchResources_.size());
+        return;
+    }
+    struct wl_client* owner = wl_resource_get_client(inputSurface_);
+
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint32_t ms = static_cast<uint32_t>(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+
+    bool sent = false;
+    for (const TouchOp& op : ops) {
+        for (struct wl_resource* tr : touchResources_) {
+            if (wl_resource_get_client(tr) != owner) {
+                continue;
+            }
+            switch (op.kind) {
+                case TouchOp::Down:
+                    wl_touch_send_down(tr, wl_display_next_serial(display_),
+                                       ms, inputSurface_, op.id,
+                                       wl_fixed_from_int(op.x),
+                                       wl_fixed_from_int(op.y));
+                    break;
+                case TouchOp::Up:
+                    wl_touch_send_up(tr, wl_display_next_serial(display_),
+                                     ms, op.id);
+                    break;
+                case TouchOp::Motion:
+                    wl_touch_send_motion(tr, ms, op.id,
+                                         wl_fixed_from_int(op.x),
+                                         wl_fixed_from_int(op.y));
+                    break;
+                case TouchOp::Frame:
+                    wl_touch_send_frame(tr);
+                    break;
+                case TouchOp::Cancel:
+                    wl_touch_send_cancel(tr);
+                    break;
+                default:
+                    break;
+            }
+            sent = true;
+        }
+    }
+    if (sent) {
+        wl_display_flush_clients(display_);
+        HILOG_DEBUG(LOG_CORE, "DrainTouchOps: sent %{public}zu ops to %{public}zu touch res",
+                    ops.size(), touchResources_.size());
     }
 }
 
@@ -688,6 +882,21 @@ bool Server::Init(const ServerConfig& config)
                              uint64_t drained = 0;
                              (void)!read(fd, &drained, sizeof drained);
                              static_cast<Server*>(data)->DrainReleases();
+                             return 0;
+                         }, this);
+
+    /* Same wake-the-loop pattern for touch ops from the MMI thread. */
+    touchEventFd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (touchEventFd_ < 0) {
+        HILOG_ERROR(LOG_CORE, "Init: touch eventfd: %{public}s", strerror(errno));
+        return false;
+    }
+    wl_event_loop_add_fd(wl_display_get_event_loop(display_), touchEventFd_,
+                         WL_EVENT_READABLE,
+                         [](int fd, uint32_t, void* data) -> int {
+                             uint64_t drained = 0;
+                             (void)!read(fd, &drained, sizeof drained);
+                             static_cast<Server*>(data)->DrainTouchOps();
                              return 0;
                          }, this);
 
