@@ -159,4 +159,14 @@ group("waydroid_group") {
     ":waydroid_session_test",
     ":waydroid_wlegl_harness",
   ]
+
+  # The "Android Apps" front-end HAP is NOT in the default image: it
+  # builds, signs and installs as a system app and launches its window,
+  # but its bundled native module does not yet load in the app sandbox
+  # (BMS leaves the entry module's nativeLibraryPath empty, and the app
+  # linker namespace forbids the inner samgr/surface/ipc libs it links).
+  # Build it explicitly with
+  #   --build-target device/soc/oniro/hybris_generic/waydroid/app:android_apps_hap
+  # See app/README.md. The W5 backend it drives is proven via
+  # :waydroid_session_test.
 }

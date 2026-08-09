@@ -21,10 +21,11 @@
 #include <cstdint>
 
 #include <napi/native_api.h>
-#include <ace/xcomponent/native_interface_xcomponent.h>
+#include <native/native_interface_xcomponent.h>
 
-#include <window.h>              /* inner: OHNativeWindow { sptr<Surface> } */
+#include <external_window.h>     /* NDK: OH_NativeWindow_GetSurfaceId */
 #include <surface.h>
+#include <surface_utils.h>
 #include <ibuffer_producer.h>
 #include <hilog/log.h>
 
@@ -57,18 +58,32 @@ sptr<IWaydroidSession> Session()
 
 void OnSurfaceCreated(OH_NativeXComponent* /*component*/, void* window)
 {
-    auto* nativeWindow = reinterpret_cast<OHNativeWindow*>(window);
-    if (nativeWindow == nullptr || nativeWindow->surface == nullptr) {
-        HILOG_ERROR(LOG_CORE, "OnSurfaceCreated: no surface");
+    /* The XComponent surface lives in THIS process, so resolve its
+     * producer locally: NDK surfaceId -> SurfaceUtils (no internal
+     * NativeWindow struct needed), then hand only the producer object
+     * across to the compositor. */
+    uint64_t surfaceId = 0;
+    if (OH_NativeWindow_GetSurfaceId(reinterpret_cast<OHNativeWindow*>(window),
+                                     &surfaceId) != 0) {
+        HILOG_ERROR(LOG_CORE, "OnSurfaceCreated: GetSurfaceId failed");
         return;
     }
-    sptr<IBufferProducer> producer = nativeWindow->surface->GetProducer();
+    sptr<Surface> surface = SurfaceUtils::GetInstance()->GetSurface(surfaceId);
+    if (surface == nullptr) {
+        HILOG_ERROR(LOG_CORE, "OnSurfaceCreated: no surface for id %{public}llu",
+                    static_cast<unsigned long long>(surfaceId));
+        return;
+    }
+    sptr<IBufferProducer> producer = surface->GetProducer();
     auto session = Session();
     if (producer == nullptr || session == nullptr) {
         HILOG_ERROR(LOG_CORE, "OnSurfaceCreated: producer=%{public}d session=%{public}d",
                     producer != nullptr, session != nullptr);
         return;
     }
+    /* The window is showing: thaw the container, then hand it our surface
+     * so it composites into this app's XComponent. */
+    session->SetForeground(true);
     int32_t r = session->SetOutputSurface(producer->AsObject());
     HILOG_INFO(LOG_CORE, "handed surface to compositor -> %{public}d", r);
 }
@@ -77,15 +92,18 @@ void OnSurfaceDestroyed(OH_NativeXComponent* /*component*/, void* /*window*/)
 {
     auto session = Session();
     if (session != nullptr) {
+        /* Window torn down: revert output and freeze the container so a
+         * hidden Android session costs ~0 CPU. */
         session->ClearOutputSurface();
-        HILOG_INFO(LOG_CORE, "surface destroyed -> reverted compositor output");
+        session->SetForeground(false);
+        HILOG_INFO(LOG_CORE, "surface destroyed -> reverted output + froze container");
     }
 }
 
-void DispatchTouchEvent(OH_NativeXComponent* component, void* /*window*/)
+void DispatchTouchEvent(OH_NativeXComponent* component, void* window)
 {
     OH_NativeXComponent_TouchEvent touch;
-    if (OH_NativeXComponent_GetTouchEvent(component, nullptr, &touch) !=
+    if (OH_NativeXComponent_GetTouchEvent(component, window, &touch) !=
         OH_NATIVEXCOMPONENT_RESULT_SUCCESS) {
         return;
     }
@@ -131,7 +149,7 @@ void BindXComponent(napi_env env, napi_value exports)
     napi_value xcompObj = nullptr;
     if (napi_get_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ,
                                &xcompObj) != napi_ok || xcompObj == nullptr) {
-        HILOG_ERROR(LOG_CORE, "no " OH_NATIVE_XCOMPONENT_OBJ " in exports");
+        HILOG_ERROR(LOG_CORE, "no NativeXComponent object in exports");
         return;
     }
     OH_NativeXComponent* nativeXComponent = nullptr;

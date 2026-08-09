@@ -27,6 +27,8 @@
           "libhybris",
           "wayland",
           "graphic_2d",
+          "ace_engine",
+          "napi",
           "input",
           "samgr",
           "ipc",
