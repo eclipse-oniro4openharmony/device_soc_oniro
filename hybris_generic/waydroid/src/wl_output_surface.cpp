@@ -46,6 +46,14 @@ bool OutputSurface::AttachSelfDrawingNode(uint64_t screenId, int32_t width, int3
     node->SetBounds({ 0, 0, width, height });
     node->SetBackgroundColor(0xFF000000);
     node->SetFrameGravity(Rosen::Gravity::RESIZE);
+    /* Route the node onto a hardware-composer layer (forced, not
+     * dynamic): the display releases each scanned-out buffer per vsync,
+     * giving the clean 60 Hz release cycle our producer queue needs.
+     * With GPU composition RS holds the buffers as textures and never
+     * fires the producer release listener (measured release=0), so the
+     * 3-buffer queue fills and every flush returns QUEUE_FULL. VIDEO is
+     * the self-drawing type for an external full-screen buffer stream. */
+    node->SetHardwareEnabled(true, Rosen::SelfDrawingNodeType::VIDEO, false);
     Rosen::RSTransaction::FlushImplicitTransaction();
     node->AttachToDisplay(screenId);
     Rosen::RSTransaction::FlushImplicitTransaction();
@@ -201,26 +209,41 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
      * otherwise reallocate a fresh buffer instead of handing ours back,
      * leaving the original stuck in the cache).
      */
-    if (reclaimable_.load() > 0) {
-        reclaimable_.fetch_sub(1);
+    /* Drain EVERY free slot each flush, not just what the release
+     * listener counted: RS releases attached buffers back into the queue
+     * cache without firing the producer RegisterReleaseListener (measured
+     * release=0, so reclaimable_ never rose and the queue stayed full ->
+     * QUEUE_FULL on every flush). RequestAndDetachBuffer returns
+     * NO_BUFFER once the cache is empty, so loop until then. */
+    BufferRequestConfig reqConfig = {
+        .width  = sb->GetWidth(),
+        .height = sb->GetHeight(),
+        .strideAlignment = sb->GetStride(),
+        .format = sb->GetFormat(),
+        .usage  = sb->GetUsage(),
+        .timeout = 0,
+        .colorGamut = sb->GetSurfaceBufferColorGamut(),
+        .transform = sb->GetSurfaceBufferTransform(),
+    };
+    for (int i = 0; i < 8; ++i) {
         sptr<SurfaceBuffer> reclaimed;
         sptr<SyncFence> reclaimedFence;
-        BufferRequestConfig reqConfig = {
-            .width  = sb->GetWidth(),
-            .height = sb->GetHeight(),
-            .strideAlignment = sb->GetStride(),
-            .format = sb->GetFormat(),
-            .usage  = sb->GetUsage(),
-            .timeout = 0,
-            .colorGamut = sb->GetSurfaceBufferColorGamut(),
-            .transform = sb->GetSurfaceBufferTransform(),
-        };
         GSError rerr = surface_->RequestAndDetachBuffer(reclaimed, reclaimedFence,
                                                         reqConfig);
         if (rerr == GSERROR_OK && reclaimed != nullptr) {
             attached_.erase(reclaimed.GetRefPtr());
-        } else if (rerr != GSERROR_NO_BUFFER) {
-            HILOG_WARN(LOG_CORE, "reclaim failed: %{public}d", static_cast<int>(rerr));
+            if (reclaimable_.load() > 0) {
+                reclaimable_.fetch_sub(1);
+            }
+            /* RS is done with this buffer — hand the underlying wl_buffer
+             * back to the container hwc so it can recycle it (the RS
+             * release listener never fires for attached buffers, so this
+             * is the only path that sends wl_buffer.release). */
+            if (releaseCb_) {
+                releaseCb_(reclaimed.GetRefPtr());
+            }
+        } else {
+            break;   /* NO_BUFFER: cache drained */
         }
     }
 
