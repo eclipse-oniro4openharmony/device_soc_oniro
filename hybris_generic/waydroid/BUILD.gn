@@ -129,6 +129,18 @@ ohos_prebuilt_etc("waydroid_compositor_cfg") {
   subsystem_name = "oniro_soc_products"
 }
 
+# Auto-start + crash-recovery supervisor.  The init job above starts it on
+# persist.waydroid.enabled=1; it launches a fresh compositor + container and
+# relaunches the whole generation whenever the container dies.  Installed to
+# /system/etc/waydroid/ and run via /system/bin/sh (the service reads it, so
+# no exec bit is required).
+ohos_prebuilt_etc("waydroid_supervisor_sh") {
+  source = "cfg/waydroid-supervisor.sh"
+  relative_install_dir = "waydroid"
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
 # W5 bring-up tool: stand-in for the "Android Apps" front-end — proves the
 # cross-process surface handoff + touch/freeze IPC with no HAP in the loop.
 ohos_executable("waydroid_session_test") {
@@ -159,6 +171,7 @@ group("waydroid_group") {
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
     ":waydroid_session_test",
+    ":waydroid_supervisor_sh",
     ":waydroid_wlegl_harness",
 
     # The "Android Apps" front-end HAP (W5). Pure-ArkUI launcher: on
