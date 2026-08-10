@@ -153,6 +153,13 @@ private:
     Server* server_;
 };
 
+/* Our minted native token (see GrantInputPermission).  MMI checks
+ * INTERCEPT_INPUT_EVENT against the CALLING THREAD's self token, and
+ * SetSelfTokenID is per-thread — so the param-watch thread that toggles the
+ * grab must re-assert it before AddInterceptor/RemoveInterceptor, or the call
+ * fails with EPERM (-201). */
+uint64_t g_inputTokenId = 0;
+
 /* The interceptor needs ohos.permission.INTERCEPT_INPUT_EVENT; native
  * services get it by minting their own native token (same recipe as
  * the camera HDI test). */
@@ -174,6 +181,7 @@ void GrantInputPermission()
         HILOG_ERROR(LOG_CORE, "GetAccessTokenId failed — no touch grab");
         return;
     }
+    g_inputTokenId = tokenId;
     SetSelfTokenID(tokenId);
     Security::AccessToken::AccessTokenKit::ReloadNativeTokenInfo();
 }
@@ -188,12 +196,23 @@ public:
     void Apply(bool grab)
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        /* Re-assert our native token on THIS thread: Apply() runs on the
+         * param-watch thread, and the token set by GrantInputPermission on the
+         * main thread does not carry over (it is per-thread), so MMI would
+         * reject the interceptor call with -201. */
+        if (g_inputTokenId != 0) {
+            SetSelfTokenID(g_inputTokenId);
+        }
         if (grab && interceptorId_ < 0) {
-            interceptorId_ = MMI::InputManager::GetInstance()->AddInterceptor(
+            int32_t id = MMI::InputManager::GetInstance()->AddInterceptor(
                 feeder_, MMI::DEFUALT_INTERCEPTOR_PRIORITY,
                 MMI::CapabilityToTags(MMI::INPUT_DEV_CAP_TOUCH));
-            HILOG_INFO(LOG_CORE, "touch grab on: interceptor %{public}d",
-                       interceptorId_);
+            if (id >= 0) {
+                interceptorId_ = id;
+                HILOG_INFO(LOG_CORE, "touch grab on: interceptor %{public}d", id);
+            } else {
+                HILOG_ERROR(LOG_CORE, "AddInterceptor failed: %{public}d", id);
+            }
         } else if (!grab && interceptorId_ >= 0) {
             MMI::InputManager::GetInstance()->RemoveInterceptor(interceptorId_);
             interceptorId_ = -1;
@@ -204,8 +223,12 @@ public:
     void ApplyFromParam()
     {
         char value[8] = { 0 };
-        int n = GetParameter(kGrabParam, "1", value, sizeof value);
-        Apply(n < 0 || strcmp(value, "0") != 0);
+        /* Default OFF.  On auto-start (persist.waydroid.enabled=1 at boot) the
+         * "Android Apps" launcher has not been foregrounded, so the param is
+         * unset — touch must stay with OHOS, never be grabbed for a container
+         * running in the background.  Only an explicit "1" grabs. */
+        int n = GetParameter(kGrabParam, "0", value, sizeof value);
+        Apply(n >= 0 && strcmp(value, "1") == 0);
     }
 
 private:
@@ -275,6 +298,15 @@ int main(int argc, char** argv)
         HILOG_ERROR(LOG_CORE, "output attach failed");
         return 1;
     }
+
+    /* Start with the container's output HIDDEN.  It still boots in the
+     * background (not frozen), but its self-drawing overlay stays off-screen
+     * until the "Android Apps" launcher is opened (SHOW event →
+     * ApplyVisibility(true) reveals + grabs).  Without this an auto-started
+     * container would overlay OHOS on boot with no way to interact with it
+     * (touch is not grabbed until the app is foregrounded), and OHOS would be
+     * covered.  Matches the W5 app-driven show/hide model. */
+    server.Output().SetNodeVisible(false);
 
     /* W4 touch: grab the touchscreen for the container (touch only —
      * keys stay with OHOS), toggled by waydroid.input.grab. */
