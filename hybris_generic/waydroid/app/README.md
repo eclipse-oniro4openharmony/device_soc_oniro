@@ -1,39 +1,60 @@
 # Android Apps — OHOS front-end for the Waydroid container (W5)
 
 A minimal ArkUI system app (`org.oniroproject.androidapps`) that gives the
-Waydroid Android container a real OHOS window. It hosts one fullscreen
-XComponent (SURFACE) and hands its surface to `waydroid_compositor` over
-the session SA (`../src/waydroid_session*.cpp`, SAID 9601), so the
-container composites straight into this app's window — the same zero-copy
-frame path as the W3 self-drawing node, but now owned by a windowed app
-that respects focus, rotation and recents. Touch on the XComponent is
-forwarded to the container; the surface lifecycle drives a cgroup2
-freezer so a hidden Android session costs ~0 CPU.
+Waydroid Android container a launcher entry and a real OHOS app lifecycle.
+It is a **pure-ArkUI launcher with no native module**: it draws nothing of
+the container itself. The container's pixels reach the panel through the
+compositor's self-drawing node (W3), and this app only **publishes SHOW /
+HIDE common events** on fore/background. The compositor subscribes and
+`WaydroidSessionStub::ApplyVisibility` shows+thaws or hides+freezes the
+container, moving the W4 touch grab to match, so a hidden Android session
+costs ~0 CPU and OHOS keeps the panel + touch when the app is away.
+Verified end-to-end on device (2026-08-10): app foreground → container
+shown+thawed+grabbed; app background → container hidden (node kept, last
+frame retained) + frozen + touch released.
 
-## Why in-tree gn (not hvigor)
+## Why pure-ArkUI (the earlier XComponent design and why it was dropped)
 
-The native module (`entry/src/main/cpp/napi_init.cpp`) must reach the
-session SA, which means linking the **inner** `samgr_proxy` /
-`graphic_surface` APIs. There is no NDK `GetSystemAbility`, so a
-hvigor-built (NDK-only) HAP cannot reach the compositor. The app is
-therefore a gn `ohos_hap` with the native code as a bundled
-`ohos_shared_library` (`shared_libraries`). The XComponent surface's
-producer is resolved locally (`OH_NativeWindow_GetSurfaceId` +
-`SurfaceUtils::GetSurface` in this process) and only the producer object
-crosses to the compositor — the same pattern the camera preview uses.
+The original design hosted a fullscreen XComponent and handed its surface
+producer to the session SA (SAID 9601) over binder, so the container
+composited into the app's own window. That needs the app's bundled native
+module to link the **inner** `samgr_proxy`/`graphic_surface` APIs — and
+that fights the app sandbox two ways, both confirmed on device (see the
+trace below): BMS leaves the entry module's `nativeLibraryPath` empty so
+the XComponent `libraryname` load fails ENOENT, and even fixed, the app's
+linker namespace forbids those inner libs. The pure-ArkUI design sidesteps
+both: **zero inner libs in the HAP**, so it loads cleanly, and the
+app→compositor channel is a **custom CommonEvent** (no permission, no param
+DAC, no image-partition change — a DAC route was tried and abandoned: a new
+`.para.dac` entry + the flash it needs briefly bricked the device, see
+memory [[waydroid-w4-w5-input-frontend]]). The trade vs the XComponent design: the container draws on the
+fullscreen overlay node rather than inside the app's own window surface —
+fine for first usability; the windowed-surface version can come back later
+if the sandbox barriers are solved. The session SA
+(`../src/waydroid_session*.cpp`) is still published and its
+SetOutputSurface/InjectTouch/SetForeground contract remains (proven via
+`waydroid_session_test`) for that future path.
 
 ## Data flow
 
 ```
-XComponent(SURFACE, libraryname "androidapps")
-  → OnSurfaceCreated(window)                     [napi_init.cpp]
-      OH_NativeWindow_GetSurfaceId → SurfaceUtils::GetSurface
-      → surface->GetProducer()->AsObject()
-      → IWaydroidSession::SetForeground(true)     (thaw container)
-      → IWaydroidSession::SetOutputSurface(producer)
-  → DispatchTouchEvent → IWaydroidSession::InjectTouch(...)
-  → OnSurfaceDestroyed → ClearOutputSurface + SetForeground(false) (freeze)
+EntryAbility.onForeground → commonEventManager.publish('org.oniroproject.waydroid.SHOW')
+EntryAbility.onBackground → commonEventManager.publish('org.oniroproject.waydroid.HIDE')
+                                       │  (custom CommonEvent — no permission needed)
+                                       ▼
+compositor: VisibilityReceiver (CommonEventSubscriber)        [waydroid_compositor_main.cpp]
+  → WaydroidSessionStub::ApplyVisibility(server, visible)     [waydroid_session.cpp]
+      visible : Output().SetNodeVisible(true)  + FreezeContainer(false) + grab=1
+      hidden  : FreezeContainer(true) + Output().SetNodeVisible(false)  + grab=0
 ```
+
+Manual test / drive without the app: `cem publish -e org.oniroproject.waydroid.HIDE`
+(or `.SHOW`). ApplyVisibility is mutex-serialized (concurrent
+visibility flips otherwise stranded grab=1 over a frozen container → total
+touch loss). Hide/show toggles node *visibility* rather than destroying it,
+so the container's last frame is retained (a fresh node is black until the
+container redraws). `entry/src/main/cpp/napi_init.cpp` is retained for the
+future XComponent path but is no longer built.
 
 ## Build
 
@@ -76,15 +97,29 @@ matches the profile.
 ```sh
 hdc file send AndroidApps.hap /data/local/tmp/
 hdc shell "bm install -p /data/local/tmp/AndroidApps.hap"
-hdc shell "param set waydroid.input.grab 0"   # XComponent provides touch
 hdc shell "aa start -a EntryAbility -b org.oniroproject.androidapps"
+# fore/background the app to show+thaw / hide+freeze; touch grab follows.
 ```
 
-## Status & the open native-module-load problem
+The `waydroid.app.visible` default + its app-writable DAC ship in the
+image (`vendor/oniro/hybris_generic/etc/param/hybris_native.para{,.dac}`),
+so a full build + flash is needed for the app's `setSync` to be permitted;
+a side-loaded HAP on an image without the DAC launches but cannot flip the
+param (the compositor side is still drivable by hand:
+`param set waydroid.app.visible 0|1`).
 
-Builds, signs (system app), installs (`bm install` → "install bundle
-successfully"), and **launches**: the window `androidapps0` (id 41) comes
-up fullscreen and focused. But the bundled native module never runs —
+## Status
+
+**Pure-ArkUI launcher: builds, signs (system app), installs, and launches
+cleanly — no native-module load error** (the ENOENT below is gone because
+the HAP bundles no `.so`). The compositor's `ApplyVisibility`
+(show/hide + freeze/thaw + grab) is verified by flipping the param by hand
+(`cgroup.freeze` tracks it). End-to-end (app lifecycle → param → compositor)
+needs the image flashed so the app's `setSync` passes the param DAC.
+
+### Historical: why the XComponent design was dropped (the native-module blocker)
+
+The earlier design's bundled native module never ran —
 `dlopen_impl load library header failed for libandroidapps.so`,
 `key:default/androidapps ... No such file or directory`. Two stacked
 app-sandbox barriers:
@@ -105,8 +140,47 @@ app-sandbox barriers:
    `libutils`) are not in an app's `ndk`/`moduleNs_default` namespace
    allow-list, so `dlopen` of the module would fail on its deps.
 
-Both say the "app native module links inner samgr/surface/ipc" shape
-fights the app sandbox even for a system app. Two ways forward:
+### Root cause traced (2026-08-09, on device)
+
+Live `bm dump` confirms: application `nativeLibraryPath: "libs/arm64"`,
+`cpuAbi: "arm64-v8a"`, but the **entry module** `nativeLibraryPath: ""`,
+`cpuAbi: ""`, `isCompressNativeLibs: true`. The load fails with
+`load libandroidapps.so failed ... errno=2` (ENOENT) in every namespace.
+Traced through BMS:
+`InnerBundleInfo::FetchNativeSoAttrs` (inner_bundle_info.cpp) falls back to
+the **application** path when `compressNativeLibs && !isLibIsolated`, so the
+lib IS resolvable in principle — but the XComponent `libraryname` load goes
+through the napi module manager, which reads
+`GetHapModuleInfo().nativeLibraryPath` (inner_bundle_info.cpp:1674 —
+`hapInfo.nativeLibraryPath = it->second.nativeLibraryPath`, the raw, empty
+*module* value, NOT the FetchNativeSoAttrs fallback). So the loader gets ""
+and falls through to a bare `libandroidapps.so` → ENOENT. In-tree
+`ohos_hap` + `shared_libraries` leaves the compressed module path empty; a
+sibling in-tree HAP (`ringtone_extension_hap`) uses the same gn shape but
+loads its lib via the *extension* framework, not `libraryname`, so it never
+hits line 1674.
+
+### Recommended path (cleanest, sidesteps BOTH blockers)
+
+Make the app a **pure-ArkUI** launcher entry with **no native module**, and
+reuse the W3 self-drawing node for display:
+
+* App `onForeground`/`onBackground` (or page show/hide) sets a system param
+  (`@ohos.systemParameterEnhance`, allowed for a system app), e.g.
+  `waydroid.app.visible=1|0`.
+* The **compositor** (already a system process with full namespace, already
+  uses `WatchParameter` for `waydroid.input.grab`, and already owns the
+  session freeze/thaw) watches that param: on 1 → attach/show the
+  self-drawing node + thaw the container; on 0 → detach/hide + freeze.
+
+This gives a launchable "Android Apps" icon with real lifecycle-driven
+freeze/thaw, using only what already works, and puts **zero inner libs in
+the HAP** — no nativeLibraryPath problem, no namespace problem. The trade
+vs the XComponent design: the container draws on the fullscreen overlay
+node rather than inside the app's own window surface (fine for first
+usability; the windowed-surface version can come later if wanted).
+
+The older "fix the packaging" routes remain, but both are deeper:
 
 * **Fix the packaging** — get BMS to attribute the native lib to the
   entry module (pack.info abi, or the right module.json/gn wiring) AND

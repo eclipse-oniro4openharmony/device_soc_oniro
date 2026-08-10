@@ -78,6 +78,13 @@ public:
     static bool Publish(Server* server);
     static void Withdraw();
 
+    /* Drive container visibility + lifecycle. The pure-ArkUI launcher —
+     * which cannot reach this SA from its sandbox — publishes SHOW/HIDE
+     * common events; the compositor's subscriber calls this. visible: show
+     * the output node (kept, last frame retained) + thaw + grab touch;
+     * !visible: freeze + hide the node + release touch to OHOS. */
+    static void ApplyVisibility(Server* server, bool visible);
+
 private:
     Server* server_;
 };

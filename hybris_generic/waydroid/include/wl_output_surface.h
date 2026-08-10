@@ -54,6 +54,11 @@ public:
     /* Drop the current output; frames are discarded until re-attached. */
     void Detach();
 
+    /* Toggle the self-drawing node's visibility WITHOUT destroying it, so
+     * its last frame is retained across a W5 hide/show — otherwise a fresh
+     * node shows black until the just-thawed container happens to redraw. */
+    void SetNodeVisible(bool visible);
+
     /* Drop every buffer the queue is holding for us — used when a client
      * disconnects, since its buffers occupy queue slots that nothing
      * will ever release. */

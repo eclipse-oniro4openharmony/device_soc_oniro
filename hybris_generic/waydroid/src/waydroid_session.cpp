@@ -12,12 +12,14 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
 #include <hilog/log.h>
+#include <parameter.h>
 #include <if_system_ability_manager.h>
 #include <ipc_skeleton.h>
 #include <iservice_registry.h>
@@ -211,6 +213,45 @@ int32_t WaydroidSessionStub::SetForeground(bool foreground)
     /* Thaw before showing; freeze after hiding. */
     FreezeContainer(!foreground);
     return 0;
+}
+
+void WaydroidSessionStub::ApplyVisibility(Server* server, bool visible)
+{
+    if (server == nullptr) {
+        return;
+    }
+    /* Serialize: the CES subscriber callback can fire concurrently when
+     * visibility flips fast (app fore/background churn). Without this the
+     * freeze and grab writes of two calls interleave and can strand grab=1
+     * over a frozen container — touch is then stolen from OHOS and dropped
+     * by the frozen container (total touch loss). */
+    static std::mutex applyMutex;
+    std::lock_guard<std::mutex> lock(applyMutex);
+    if (visible) {
+        /* Make the node visible (it keeps its last frame, so the container
+         * reappears instantly) then thaw. If the node was never attached
+         * — e.g. after an app-producer path dropped it — recreate it. */
+        if (server->Output().IsAttached()) {
+            server->Output().SetNodeVisible(true);
+        } else {
+            server->RevertToSelfDrawing();
+        }
+        FreezeContainer(false);
+        /* Touch follows visibility: grab the touchscreen for the container
+         * while it is shown (GrabController watches this param). Without
+         * this the container gets no touch; and when hidden, leaving the
+         * grab on would swallow all touch and make OHOS unusable. */
+        SetParameter("waydroid.input.grab", "1");
+        HILOG_INFO(LOG_CORE, "visible: output shown + container thawed + touch grabbed");
+    } else {
+        /* Freeze (stop producing), hide the node WITHOUT destroying it (so
+         * its last frame survives for the next show — a fresh node would be
+         * black until the container redraws), release touch to OHOS. */
+        FreezeContainer(true);
+        server->Output().SetNodeVisible(false);
+        SetParameter("waydroid.input.grab", "0");
+        HILOG_INFO(LOG_CORE, "hidden: container frozen + output hidden + touch released");
+    }
 }
 
 bool WaydroidSessionStub::Publish(Server* server)

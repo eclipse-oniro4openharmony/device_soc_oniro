@@ -31,6 +31,15 @@
 #include <nativetoken_kit.h>
 #include <token_setproc.h>
 
+/* W5 lifecycle: the pure-ArkUI launcher publishes SHOW/HIDE common events
+ * on fore/background (it cannot reach the session SA from its sandbox, and
+ * a param write would need a new .para.dac — an image change). */
+#include "common_event_data.h"
+#include "common_event_manager.h"
+#include "common_event_subscriber.h"
+#include "matching_skills.h"
+#include "want.h"
+
 #include "waydroid_session.h"
 #include "wl_server.h"
 
@@ -207,6 +216,34 @@ private:
 
 GrabController* g_grab = nullptr;
 
+/* W5 lifecycle: the "Android Apps" launcher publishes these on
+ * onForeground / onBackground; the compositor shows+thaws or hides+freezes
+ * the container (and moves the touch grab to match) in response. Custom
+ * (non-system) events, so neither side needs a permission or a param DAC. */
+constexpr const char* kEventShow = "org.oniroproject.waydroid.SHOW";
+constexpr const char* kEventHide = "org.oniroproject.waydroid.HIDE";
+
+class VisibilityReceiver : public EventFwk::CommonEventSubscriber {
+public:
+    VisibilityReceiver(const EventFwk::CommonEventSubscribeInfo& info, Server* server)
+        : EventFwk::CommonEventSubscriber(info), server_(server) {}
+
+    void OnReceiveEvent(const EventFwk::CommonEventData& data) override
+    {
+        const std::string action = data.GetWant().GetAction();
+        if (action == kEventShow) {
+            WaydroidSessionStub::ApplyVisibility(server_, true);
+        } else if (action == kEventHide) {
+            WaydroidSessionStub::ApplyVisibility(server_, false);
+        }
+    }
+
+private:
+    Server* server_;
+};
+
+std::shared_ptr<VisibilityReceiver> g_visReceiver;
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -255,6 +292,23 @@ int main(int argc, char** argv)
      * over its XComponent surface, forward touch, and drive lifecycle. */
     WaydroidSessionStub::Publish(&server);
 
+    /* W5 lifecycle: subscribe to the launcher's SHOW/HIDE common events so
+     * the container follows the app fore/background. The self-drawing node
+     * is already attached and the touch grab defaults on, so startup is
+     * "visible"; the events drive changes from there. */
+    {
+        EventFwk::MatchingSkills skills;
+        skills.AddEvent(kEventShow);
+        skills.AddEvent(kEventHide);
+        EventFwk::CommonEventSubscribeInfo info(skills);
+        g_visReceiver = std::make_shared<VisibilityReceiver>(info, &server);
+        if (EventFwk::CommonEventManager::SubscribeCommonEvent(g_visReceiver)) {
+            HILOG_INFO(LOG_CORE, "W5: subscribed to visibility common events");
+        } else {
+            HILOG_WARN(LOG_CORE, "W5: subscribe visibility common events failed");
+        }
+    }
+
     /* Tell waydroidd the socket exists; it gates container start on this
      * (the hwc's own 5 s retry loop would absorb the race, but the
      * handshake keeps the logs clean — same shape as androidd's
@@ -264,6 +318,10 @@ int main(int argc, char** argv)
     HILOG_INFO(LOG_CORE, "entering event loop");
     server.Run();
 
+    if (g_visReceiver != nullptr) {
+        EventFwk::CommonEventManager::UnSubscribeCommonEvent(g_visReceiver);
+        g_visReceiver = nullptr;
+    }
     WaydroidSessionStub::Withdraw();
     grab.Apply(false);
     g_grab = nullptr;

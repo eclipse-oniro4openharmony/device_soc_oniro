@@ -109,6 +109,15 @@ void OutputSurface::Detach()
     attached_.clear();
 }
 
+void OutputSurface::SetNodeVisible(bool visible)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (node_ != nullptr) {
+        node_->SetVisible(visible);
+        Rosen::RSTransaction::FlushImplicitTransaction();
+    }
+}
+
 void OutputSurface::ResetQueue()
 {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # "Android Apps" — the OHOS front-end for the Waydroid container (W5).
-# A fullscreen XComponent whose surface is handed to waydroid_compositor
-# over the session SA (see ../src/waydroid_session*.cpp); touch and
-# fore/background lifecycle flow the same way.  Built in-tree (not
-# hvigor) because the native module links the inner samgr/surface APIs an
-# NDK-only HAP cannot reach.
+# Pure-ArkUI launcher: no native module.  It is a launcher entry that, on
+# fore/background, publishes SHOW/HIDE common events; the compositor
+# subscribes and WaydroidSessionStub::ApplyVisibility shows+thaws or
+# hides+freezes the container and moves the touch grab to match.  The
+# container's pixels reach the panel via the compositor's self-drawing node
+# (W3).  Because the HAP bundles no inner samgr/surface libs, none of the
+# app-sandbox native-load / linker-namespace barriers apply (see README).
 #
 # OPT-IN like the rest of the container stack: only builds when
 # persist.waydroid.enabled products want it (wired via the product
@@ -24,7 +26,6 @@ ohos_hap("android_apps_hap") {
     ":android_apps_js_assets",
     ":android_apps_resources",
   ]
-  shared_libraries = [ ":libandroidapps" ]
   certificate_profile = "signature/androidapps.p7b"
   module_install_dir = "app/org.oniroproject.androidapps"
 }
@@ -43,30 +44,4 @@ ohos_resources("android_apps_resources") {
   sources = [ "entry/src/main/resources" ]
   deps = [ ":android_apps_app_profile" ]
   hap_profile = "entry/src/main/module.json"
-}
-
-# The native module: XComponent surface -> producer -> session SA;
-# XComponent touch -> SA InjectTouch; ability fore/background -> freeze.
-ohos_shared_library("libandroidapps") {
-  sources = [
-    "../src/waydroid_session_proxy.cpp",
-    "entry/src/main/cpp/napi_init.cpp",
-  ]
-
-  include_dirs = [ "../include" ]
-
-  external_deps = [
-    "ace_engine:ace_ndk",
-    "c_utils:utils",
-    "graphic_surface:surface",
-    "hilog:libhilog",
-    "ipc:ipc_core",
-    "napi:ace_napi",
-    "samgr:samgr_proxy",
-  ]
-
-  # Loaded by the ArkVM napi loader as libandroidapps.so.
-  output_name = "androidapps"
-  subsystem_name = "oniro_soc_products"
-  part_name = "hybris_generic_soc"
 }
