@@ -66,6 +66,7 @@ ohos_executable("waydroid_compositor") {
   # deps validator rejects a direct label into another part).
   external_deps = [
     "ability_base:want",
+    "ability_runtime:ability_manager",
     "access_token:libaccesstoken_sdk",
     "access_token:libnativetoken_shared",
     "access_token:libtoken_setproc",

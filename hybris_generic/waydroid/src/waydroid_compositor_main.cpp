@@ -28,8 +28,14 @@
 /* W4 touch: OHOS MMI interceptor → wl_touch (see TouchFeeder below) */
 #include <accesstoken_kit.h>
 #include <input_manager.h>
+#include <key_event.h>
+#include <key_option.h>
 #include <nativetoken_kit.h>
 #include <token_setproc.h>
+
+/* Escape hatch: a hardware-key chord to leave Waydroid, and the go-home
+ * that returns to the OHOS launcher afterwards (see RegisterExitChord). */
+#include "ability_manager_client.h"
 
 /* W5 lifecycle: the pure-ArkUI launcher publishes SHOW/HIDE common events
  * on fore/background (it cannot reach the session SA from its sandbox, and
@@ -186,6 +192,55 @@ void GrantInputPermission()
     Security::AccessToken::AccessTokenKit::ReloadNativeTokenInfo();
 }
 
+/* On-device escape hatch.  The touch grab is touch-ONLY, so while the
+ * container owns the screen OHOS's swipe gestures (home/back) are eaten and
+ * a user with no hdc has no way out of Waydroid.  Hardware keys are NOT
+ * grabbed, so a key chord still reaches us: hold Volume-Down then press
+ * Volume-Up.  A deliberate two-key chord — normal single volume presses
+ * never trigger it, and it doesn't clash with the screenshot/power combos.
+ * On fire we hide+freeze the container (touch returns to OHOS, same path as
+ * the launcher's HIDE) and start the home ability so the user lands on the
+ * OHOS launcher rather than the "Android is starting…" placeholder. */
+int32_t g_exitChordId = -1;
+
+void RegisterExitChord(Server* server)
+{
+    auto opt = std::make_shared<MMI::KeyOption>();
+    opt->SetPreKeys({ MMI::KeyEvent::KEYCODE_VOLUME_DOWN });
+    opt->SetFinalKey(MMI::KeyEvent::KEYCODE_VOLUME_UP);
+    opt->SetFinalKeyDown(true);           /* fire on Vol-Up press */
+    opt->SetFinalKeyDownDuration(0);      /* no long-press hold needed */
+    g_exitChordId = MMI::InputManager::GetInstance()->SubscribeKeyEvent(
+        opt, [server](std::shared_ptr<MMI::KeyEvent>) {
+            HILOG_INFO(LOG_CORE, "exit chord (Vol-Down + Vol-Up): leaving Waydroid");
+            /* SubscribeKeyEvent's callback runs on an MMI thread whose self
+             * token is not our minted one (per-thread), so re-assert it or
+             * StartAbility is denied. */
+            if (g_inputTokenId != 0) {
+                SetSelfTokenID(g_inputTokenId);
+            }
+            /* 1) Immediate: release grab + hide + freeze (reuses HIDE path). */
+            WaydroidSessionStub::ApplyVisibility(server, false);
+            /* 2) Land on the OHOS home screen (best-effort — if it is denied
+             * the user already has touch back and can swipe home). */
+            AAFwk::Want want;
+            want.SetAction(AAFwk::Want::ACTION_HOME);
+            want.AddEntity(AAFwk::Want::ENTITY_HOME);
+            int err = AAFwk::AbilityManagerClient::GetInstance()->StartAbility(want);
+            if (err != 0) {
+                HILOG_WARN(LOG_CORE, "go-home StartAbility failed: %{public}d "
+                           "(touch is back; swipe up to reach home)", err);
+            }
+        });
+    if (g_exitChordId >= 0) {
+        HILOG_INFO(LOG_CORE, "exit chord registered (Vol-Down+Vol-Up, id %{public}d)",
+                   g_exitChordId);
+    } else {
+        HILOG_ERROR(LOG_CORE, "exit-chord SubscribeKeyEvent failed: %{public}d",
+                    g_exitChordId);
+    }
+}
+
 /* Add/remove the interceptor as waydroid.input.grab flips; state is
  * guarded by a plain mutex (flips are rare, callbacks arrive on the
  * param-watch thread). */
@@ -320,6 +375,9 @@ int main(int argc, char** argv)
         }
     }, nullptr);
 
+    /* On-device escape from the touch grab (Vol-Down + Vol-Up → home). */
+    RegisterExitChord(&server);
+
     /* W5: publish the session SA so the "Android Apps" front-end can hand
      * over its XComponent surface, forward touch, and drive lifecycle. */
     WaydroidSessionStub::Publish(&server);
@@ -353,6 +411,10 @@ int main(int argc, char** argv)
     if (g_visReceiver != nullptr) {
         EventFwk::CommonEventManager::UnSubscribeCommonEvent(g_visReceiver);
         g_visReceiver = nullptr;
+    }
+    if (g_exitChordId >= 0) {
+        MMI::InputManager::GetInstance()->UnsubscribeKeyEvent(g_exitChordId);
+        g_exitChordId = -1;
     }
     WaydroidSessionStub::Withdraw();
     grab.Apply(false);
