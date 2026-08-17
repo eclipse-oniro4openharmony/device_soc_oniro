@@ -66,7 +66,6 @@ ohos_executable("waydroid_compositor") {
   # deps validator rejects a direct label into another part).
   external_deps = [
     "ability_base:want",
-    "ability_runtime:ability_manager",
     "access_token:libaccesstoken_sdk",
     "access_token:libnativetoken_shared",
     "access_token:libtoken_setproc",
@@ -85,6 +84,7 @@ ohos_executable("waydroid_compositor") {
     "libhybris:libhybris-platformcommon",
     "samgr:samgr_proxy",
     "wayland:libwayland_server",
+    "window_manager:libwm",
   ]
 
   install_enable = true

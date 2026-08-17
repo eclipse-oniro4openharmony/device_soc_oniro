@@ -34,8 +34,9 @@
 #include <token_setproc.h>
 
 /* Escape hatch: a hardware-key chord to leave Waydroid, and the go-home
- * that returns to the OHOS launcher afterwards (see RegisterExitChord). */
-#include "ability_manager_client.h"
+ * (minimize all app windows) that returns to the OHOS launcher afterwards
+ * (see RegisterExitChord). */
+#include "window_manager.h"
 
 /* W5 lifecycle: the pure-ArkUI launcher publishes SHOW/HIDE common events
  * on fore/background (it cannot reach the session SA from its sandbox, and
@@ -221,15 +222,20 @@ void RegisterExitChord(Server* server)
             }
             /* 1) Immediate: release grab + hide + freeze (reuses HIDE path). */
             WaydroidSessionStub::ApplyVisibility(server, false);
-            /* 2) Land on the OHOS home screen (best-effort — if it is denied
-             * the user already has touch back and can swipe home). */
-            AAFwk::Want want;
-            want.SetAction(AAFwk::Want::ACTION_HOME);
-            want.AddEntity(AAFwk::Want::ENTITY_HOME);
-            int err = AAFwk::AbilityManagerClient::GetInstance()->StartAbility(want);
-            if (err != 0) {
-                HILOG_WARN(LOG_CORE, "go-home StartAbility failed: %{public}d "
-                           "(touch is back; swipe up to reach home)", err);
+            /* 2) Land on the OHOS home screen.  NOTE: StartAbility(home) does
+             * NOT background the foreground app under sceneboard (it stays
+             * FOREGROUND, leaving the user on the launcher's placeholder) —
+             * MinimizeAllAppWindows is the actual home-gesture operation and
+             * DOES minimize it.  Gated on IsSystemCalling, which our minted
+             * native token satisfies.  Best-effort: if it ever fails the user
+             * already has touch back and can swipe up. */
+            Rosen::WMError werr =
+                Rosen::WindowManager::GetInstance(Rosen::INVALID_USER_ID)
+                    .MinimizeAllAppWindows(0);
+            if (werr != Rosen::WMError::WM_OK) {
+                HILOG_WARN(LOG_CORE, "go-home MinimizeAllAppWindows failed: "
+                           "%{public}d (touch is back; swipe up to reach home)",
+                           static_cast<int>(werr));
             }
         });
     if (g_exitChordId >= 0) {
