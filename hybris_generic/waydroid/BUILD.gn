@@ -84,7 +84,6 @@ ohos_executable("waydroid_compositor") {
     "libhybris:libhybris-platformcommon",
     "samgr:samgr_proxy",
     "wayland:libwayland_server",
-    "window_manager:libwm",
   ]
 
   install_enable = true
