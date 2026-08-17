@@ -15,11 +15,9 @@
 #ifndef WAYDROID_WL_OUTPUT_SURFACE_H
 #define WAYDROID_WL_OUTPUT_SURFACE_H
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
-#include <unordered_set>
 
 #include <surface.h>
 #include <surface_buffer.h>
@@ -93,19 +91,15 @@ public:
 
 private:
     void InstallReleaseListenerLocked();
+    /* Pull one RS-released buffer out of the queue cache (so the container
+     * can re-attach it) and hand it back to the container.  Runs on the
+     * surface's release-listener (binder) thread. */
+    void ReclaimReleased(const sptr<SurfaceBuffer>& released);
 
     std::mutex mutex_;
     sptr<Surface> surface_;
     std::shared_ptr<Rosen::RSSurfaceNode> node_;   /* stage 1 only */
-    /* Buffers already in the current queue's cache; cleared whenever the
-     * output changes, since the new queue knows nothing about them. */
-    std::unordered_set<SurfaceBuffer*> attached_;
     ReleaseCallback releaseCb_;
-    /* Buffers RS has released that are still sitting in the queue cache.
-     * Only reclaim that many: RequestAndDetachBuffer ALLOCATES when
-     * nothing is free, and allocation fails in this process (no
-     * IDisplayBuffer client) with GSERROR_INTERNAL. */
-    std::atomic<int> reclaimable_{0};
     int32_t width_  = 0;
     int32_t height_ = 0;
 };

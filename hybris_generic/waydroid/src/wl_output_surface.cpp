@@ -21,6 +21,11 @@ namespace Waydroid {
 namespace {
 /* Above every normal window, like bootanimation's node. */
 constexpr float SURFACE_NODE_Z = 100000.0f;
+
+/* The producer queue must hold at least the container SurfaceFlinger's
+ * buffer-cycle count (~3-4) plus slack for the on-screen buffer and one
+ * in flight, or the queue pins full and every flush fails.  8 is roomy. */
+constexpr uint32_t OUTPUT_QUEUE_SIZE = 8;
 }
 
 OutputSurface::~OutputSurface()
@@ -55,11 +60,10 @@ bool OutputSurface::AttachSelfDrawingNode(uint64_t screenId, int32_t width, int3
         HILOG_ERROR(LOG_CORE, "AttachSelfDrawingNode: node has no surface");
         return false;
     }
+    surface->SetQueueSize(OUTPUT_QUEUE_SIZE);
 
     node_    = node;
     surface_ = surface;
-    attached_.clear();
-    reclaimable_.store(0);
     InstallReleaseListenerLocked();
     width_   = width;
     height_  = height;
@@ -89,9 +93,8 @@ bool OutputSurface::AttachProducer(const sptr<IBufferProducer>& producer)
         Rosen::RSTransaction::FlushImplicitTransaction();
         node_ = nullptr;
     }
+    surface->SetQueueSize(OUTPUT_QUEUE_SIZE);
     surface_ = surface;
-    attached_.clear();
-    reclaimable_.store(0);
     InstallReleaseListenerLocked();
     HILOG_INFO(LOG_CORE, "output: switched to app producer surface");
     return true;
@@ -106,7 +109,6 @@ void OutputSurface::Detach()
         node_ = nullptr;
     }
     surface_ = nullptr;
-    attached_.clear();
 }
 
 void OutputSurface::SetNodeVisible(bool visible)
@@ -124,13 +126,22 @@ void OutputSurface::ResetQueue()
     if (surface_ == nullptr) {
         return;
     }
-    GSError err = surface_->CleanCache(true);
+    /*
+     * CleanCache(false), NOT (true).  Both empty the producer-side cache
+     * (BufferQueue::ClearLocked, so the caller's retry attach is fresh, not
+     * BUFFER_IS_INCACHE), but they differ in the consumer callback RS runs:
+     *   - CleanCache(true)  -> RSRenderServiceListener::OnGoBackground(), which
+     *     calls node->UpdateBufferInfo(nullptr, ...) — it NULLS the node's
+     *     current buffer, blanking it until the next composite.  This pump
+     *     fires several times a second on the BUFFER_IS_INCACHE path, so with
+     *     (true) the panel flickered ~15x/s.
+     *   - CleanCache(false) -> OnCleanCache(), which only resets the PRE-buffer
+     *     and keeps the current displayed buffer — no blank frame.
+     */
+    GSError err = surface_->CleanCache(false);
     if (err != GSERROR_OK) {
         HILOG_WARN(LOG_CORE, "CleanCache failed: %{public}d", static_cast<int>(err));
     }
-    attached_.clear();
-    reclaimable_.store(0);
-    HILOG_INFO(LOG_CORE, "output: queue reset");
 }
 
 bool OutputSurface::IsAttached()
@@ -146,28 +157,72 @@ void OutputSurface::SetReleaseCallback(ReleaseCallback cb)
     InstallReleaseListenerLocked();
 }
 
-/* RS calls this on a binder thread when it is done with a buffer.  It is
- * the only correct trigger for wl_buffer.release: releasing earlier lets
- * the client redraw into a buffer RS is still reading (and, because the
- * buffer is then still in the queue cache, makes the next attach fail
- * with BUFFER_IS_INCACHE). */
 void OutputSurface::InstallReleaseListenerLocked()
 {
     if (surface_ == nullptr || !releaseCb_) {
         return;
     }
-    ReleaseCallback cb = releaseCb_;
-    GSError err = surface_->RegisterReleaseListener(
-        [this, cb](sptr<SurfaceBuffer>& buffer) -> GSError {
+    /*
+     * RS releases the previous buffer every GPU-composited frame
+     * (RSUniRenderThread::CollectReleaseTasks releases preBuffer whenever the
+     * node is NOT hardware-composer-enabled, which is always the case for a
+     * SELF_DRAWING_WINDOW_NODE — so this runs under plain GPU composition,
+     * no hardware composer, no flicker).
+     *
+     * We must use the *backup* release listener.  The plain
+     * RegisterReleaseListener(OnReleaseFunc) variant is delivered through
+     * BufferReleaseProducerListener::OnBufferReleased(), which hard-codes a
+     * NULL SurfaceBuffer, so the released buffer's identity is lost and it is
+     * never recycled — that was the low-fps bug: the queue pinned full, every
+     * AttachAndFlushBuffer returned QUEUE_FULL/BUFFER_IS_INCACHE, and only the
+     * QUEUE_FULL mailbox fallback limped frames through, well below the
+     * container's rate.  The backup variant (OnBufferReleasedWithFence)
+     * delivers the real buffer, letting ReclaimReleased() recycle it.
+     */
+    GSError err = surface_->RegisterReleaseListenerBackup(
+        [this](const sptr<SurfaceBuffer>& buffer, const sptr<SyncFence>& /*fence*/) -> GSError {
             if (buffer != nullptr) {
-                reclaimable_.fetch_add(1);
-                cb(buffer.GetRefPtr());
+                ReclaimReleased(buffer);
             }
             return GSERROR_OK;
         });
     if (err != GSERROR_OK) {
-        HILOG_WARN(LOG_CORE, "RegisterReleaseListener failed: %{public}d",
+        HILOG_WARN(LOG_CORE, "RegisterReleaseListenerBackup failed: %{public}d",
                    static_cast<int>(err));
+    }
+}
+
+/*
+ * Runs on the surface's release-listener (binder) thread when RS is done with
+ * `released`.  A released buffer stays in the producer queue's cache, so the
+ * container's next commit of it would return BUFFER_IS_INCACHE; RequestAnd-
+ * DetachBuffer pops it back out.  Just as importantly, *issuing* this request
+ * each release is what keeps RS's acquire/release cycle running: without a
+ * producer-side request the queue stalls full and RS stops releasing (an A/B
+ * on device: drop this call and releases go to zero and the panel throttles
+ * to a fraction of the container's rate).  RequestAndDetachBuffer skips the
+ * on-screen buffer, so the displayed frame is never pulled from under RS —
+ * no tearing.  Any buffer it hands back is passed to the container hwc
+ * (wl_buffer.release) so SurfaceFlinger can reuse it.
+ */
+void OutputSurface::ReclaimReleased(const sptr<SurfaceBuffer>& released)
+{
+    sptr<Surface> surf;
+    ReleaseCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        surf = surface_;
+        cb = releaseCb_;
+    }
+    if (surf == nullptr) {
+        return;
+    }
+    BufferRequestConfig reqConfig = released->GetBufferRequestConfig();
+    sptr<SurfaceBuffer> reclaimed;
+    sptr<SyncFence> reclaimedFence;
+    GSError err = surf->RequestAndDetachBuffer(reclaimed, reclaimedFence, reqConfig);
+    if (err == GSERROR_OK && reclaimed != nullptr && cb) {
+        cb(reclaimed.GetRefPtr());
     }
 }
 
@@ -193,62 +248,21 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
 
     sptr<SurfaceBuffer> sb = buffer;
 
-    /*
-     * Make room before every attach.
-     *
-     * Any buffer the queue has already seen is still in its cache (in
-     * RELEASED state once RS is done): re-attaching it returns
-     * BUFFER_IS_INCACHE, and FlushBuffer refuses anything but
-     * REQUESTED/ATTACHED.  RequestAndDetachBuffer is the mirror of
-     * AttachAndFlushBuffer (one IPC) and pops a free buffer out of the
-     * cache entirely.  Whatever comes back is dropped — every buffer in
-     * this queue is one of ours and the client owns its contents; the
-     * point is only to free the slot.
-     *
-     * The request config must describe the buffer as it actually is,
-     * strideAlignment included (the queue compares configs and would
-     * otherwise reallocate a fresh buffer instead of handing ours back,
-     * leaving the original stuck in the cache).
-     */
-    if (reclaimable_.load() > 0) {
-        reclaimable_.fetch_sub(1);
-        sptr<SurfaceBuffer> reclaimed;
-        sptr<SyncFence> reclaimedFence;
-        BufferRequestConfig reqConfig = {
-            .width  = sb->GetWidth(),
-            .height = sb->GetHeight(),
-            .strideAlignment = sb->GetStride(),
-            .format = sb->GetFormat(),
-            .usage  = sb->GetUsage(),
-            .timeout = 0,
-            .colorGamut = sb->GetSurfaceBufferColorGamut(),
-            .transform = sb->GetSurfaceBufferTransform(),
-        };
-        GSError rerr = surface_->RequestAndDetachBuffer(reclaimed, reclaimedFence,
-                                                        reqConfig);
-        if (rerr == GSERROR_OK && reclaimed != nullptr) {
-            attached_.erase(reclaimed.GetRefPtr());
-        } else if (rerr != GSERROR_NO_BUFFER) {
-            HILOG_WARN(LOG_CORE, "reclaim failed: %{public}d", static_cast<int>(rerr));
-        }
-    }
-
+    /* First sighting goes through AttachAndFlushBuffer(needMap=false) — one
+     * IPC and no gralloc CPU lock.  Buffers RS has since released are pulled
+     * back out of the cache asynchronously by the release listener
+     * (ReclaimReleased), so by the time the container re-commits one its slot
+     * is free again. */
     GSError err = surface_->AttachAndFlushBuffer(sb, fence, flushConfig, false);
 
     /* Wake RenderService to composite THIS frame.  Our output is a
      * standalone self-drawing node with no ArkUI app requesting frames
      * for it, so RS would otherwise only composite it on its idle
-     * heartbeat (~10 s) — the buffer queue fills, every flush returns
-     * QUEUE_FULL, and the panel updates once per heartbeat.  A forced
-     * next-vsync per flush makes RS acquire our buffer (releasing the
-     * previous one) at the container's frame rate. */
+     * heartbeat.  A forced next-vsync per flush makes RS acquire our buffer
+     * (releasing the previous one) at the container's frame rate. */
     Rosen::RSInterfaces::GetInstance().ForceRefreshOneFrameWithNextVSync();
 
-    if (err != GSERROR_OK) {
-        return false;
-    }
-    attached_.insert(sb.GetRefPtr());
-    return true;
+    return err == GSERROR_OK;
 }
 
 } // namespace Waydroid
