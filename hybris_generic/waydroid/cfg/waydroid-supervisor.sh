@@ -67,6 +67,16 @@ teardown() {
     # reads it, kill -0 fails at once, and we thrash a new generation every
     # couple of seconds instead of waiting for the real one.
     rm -f "$WD/container.pid" 2>/dev/null
+    # Clear waydroidd's OWN self-lock too.  We just `killall -9`ed waydroidd,
+    # and a -9 gives it no chance to unlink its pidfile — so waydroidd.pid is
+    # left holding the dead instance's pid.  waydroidd's startup guard does a
+    # bare `kill(pid, 0)`: harmless while that pid stays dead, but once the
+    # kernel RECYCLES it onto some other long-lived process (seen in the wild:
+    # /vendor/bin/gbe reusing it across a reboot), the guard false-positives
+    # ("already running (pid N)"), waydroidd exits before starting the
+    # container, container.pid never appears, and this loop thrashes forever
+    # (the "Android is starting…" hang).  We orphaned the lock, so we clear it.
+    rm -f "$WD/waydroidd.pid" 2>/dev/null
     # let the pid namespace + wayland socket tear down (matches restart.sh)
     sleep 3
 }
@@ -136,6 +146,27 @@ while true; do
         continue
     fi
     log "container init pid=$CPID up; monitoring"
+
+    # Recovery reveal: the launcher publishes SHOW/HIDE only on its
+    # onForeground/onBackground *transitions* — edge-triggered, not sticky.
+    # If this generation is a RECOVERY (the container died while the user was
+    # in "Android Apps"), the fresh compositor booted hidden and there is no
+    # transition to re-reveal it, so it would sit hidden behind the launcher's
+    # "Android is starting…" placeholder forever.  waydroid.input.grab is the
+    # level-state the compositor's ApplyVisibility keeps in sync with
+    # show/hide (1 = app foreground/visible), and it survives the -9 teardown,
+    # so grab=1 here means the launcher is foreground: re-fire SHOW to
+    # reveal+thaw the new container.  On a normal boot the app has never been
+    # foregrounded, grab is unset, and we publish nothing (container stays
+    # hidden until the user opens it — OHOS keeps the panel and touch).
+    case "$(param get waydroid.input.grab 2>/dev/null)" in
+        1*)
+            log "launcher is foreground (grab=1); re-firing SHOW to reveal container"
+            /system/bin/cem publish --event org.oniroproject.waydroid.SHOW \
+                >/dev/null 2>&1
+            ;;
+    esac
+
     while kill -0 "$CPID" 2>/dev/null; do
         sleep 2
         enabled || break
