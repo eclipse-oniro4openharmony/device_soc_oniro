@@ -232,6 +232,12 @@ void WaydroidSessionStub::ApplyVisibility(Server* server, bool visible)
          * reappears instantly) then thaw. If the node was never attached
          * — e.g. after an app-producer path dropped it — recreate it. */
         if (server->Output().IsAttached()) {
+            /* IsAttached() only proves we hold a Surface, NOT that RS put
+             * our node on the render tree — the startup attach is normally
+             * dropped, and an off-tree node draws nothing however visible we
+             * make it.  Heal that first; it is a one-shot per node and a
+             * no-op thereafter (OutputSurface::EnsureAttachedToDisplay). */
+            server->Output().EnsureAttachedToDisplay();
             server->Output().SetNodeVisible(true);
         } else {
             server->RevertToSelfDrawing();

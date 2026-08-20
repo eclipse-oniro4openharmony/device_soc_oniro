@@ -13,11 +13,14 @@
  * Stage 2 swaps in an XComponent producer over binder — same frame path.
  */
 
+#include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include <hilog/log.h>
 #include <parameter.h>
@@ -58,38 +61,114 @@ namespace {
 
 Server* g_server = nullptr;
 
+/* Set by OnSignal so the pre-Server startup path (QueryDisplay's wait) can
+ * bail out too.  Before that wait existed the window between installing the
+ * handlers and assigning g_server was ~0, so a signal arriving in it was a
+ * non-issue; now it can be seconds, and a handler that does nothing would
+ * swallow SIGTERM and leave the process killable only by SIGKILL. */
+std::atomic<bool> g_stopRequested{false};
+
 void OnSignal(int sig)
 {
     HILOG_INFO(LOG_CORE, "signal %{public}d — stopping", sig);
+    g_stopRequested.store(true);
     if (g_server != nullptr) {
         g_server->Stop();
     }
 }
 
-/* Panel geometry from RS; falls back to the ansuz panel if the query
- * fails (which happens only if RS is not up yet — the service is
- * ordered after it, so treat it as a soft error). */
+/*
+ * Panel geometry from RS.
+ *
+ * We must NOT assume render_service is already up.  The old code did — its
+ * comment claimed "the service is ordered after it" — but that stopped being
+ * true when waydroid-supervisor.sh took over auto-start: it runs from init's
+ * boot/post-fs-data stages, and render_service has been seen coming up after
+ * us (ansuz: compositor pid 3415 @ 17:16:38, render_service pid 3422 @
+ * 17:16:39).  Silently falling back then hands the container a wl_output of
+ * the wrong size, which is what it sizes its display to.
+ *
+ * This wait is about GEOMETRY only.  It does not make the self-drawing node
+ * reach the render tree: RS answers screen queries long before the display
+ * node our AttachToDisplay needs exists, so that attach is dropped either
+ * way — OutputSurface::EnsureAttachedToDisplay is what handles it.
+ *
+ * The budget is bounded because the wayland socket is not created until
+ * after we return (Server::Init), and the supervisor abandons the generation
+ * if that socket does not appear within its own 150 x 0.2 s = 30 s window.
+ * 12 s leaves ample room for the rest of startup (~5-7 s observed).
+ */
+constexpr auto kScreenWaitBudget   = std::chrono::seconds(12);
+constexpr auto kScreenWaitInterval = std::chrono::milliseconds(200);
+
 void QueryDisplay(ServerConfig& cfg)
 {
     auto& rs = Rosen::RSInterfaces::GetInstance();
-    Rosen::ScreenId screenId = rs.GetDefaultScreenId();
-    if (screenId == Rosen::INVALID_SCREEN_ID) {
-        HILOG_WARN(LOG_CORE, "no default screen — using %{public}dx%{public}d",
-                   cfg.width, cfg.height);
-        return;
-    }
-    Rosen::RSScreenModeInfo mode = rs.GetScreenActiveMode(screenId);
-    if (mode.GetScreenWidth() > 0 && mode.GetScreenHeight() > 0) {
-        cfg.screenId = screenId;
-        cfg.width  = mode.GetScreenWidth();
-        cfg.height = mode.GetScreenHeight();
-        if (mode.GetScreenRefreshRate() > 0) {
-            cfg.refreshMHz = mode.GetScreenRefreshRate() * 1000;
+    const auto start    = std::chrono::steady_clock::now();
+    const auto deadline = start + kScreenWaitBudget;
+    bool logged = false;
+
+    /* A real deadline, not a sleep count: every failed probe goes through
+     * RSRenderServiceConnectHub::Connect(), which itself retries samgr a few
+     * times with its own sleeps, so counting our sleeps would understate the
+     * elapsed time and quietly eat into the supervisor's socket budget. */
+    for (;;) {
+        if (g_stopRequested.load()) {
+            HILOG_INFO(LOG_CORE, "stop requested while waiting for a screen");
+            return;
         }
+        Rosen::ScreenId screenId = rs.GetDefaultScreenId();
+        if (screenId != Rosen::INVALID_SCREEN_ID) {
+            Rosen::RSScreenModeInfo mode = rs.GetScreenActiveMode(screenId);
+            if (mode.GetScreenWidth() > 0 && mode.GetScreenHeight() > 0) {
+                cfg.screenId = screenId;
+                cfg.width  = mode.GetScreenWidth();
+                cfg.height = mode.GetScreenHeight();
+                if (mode.GetScreenRefreshRate() > 0) {
+                    cfg.refreshMHz = mode.GetScreenRefreshRate() * 1000;
+                }
+                const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                HILOG_INFO(LOG_CORE,
+                           "screen %{public}llu: %{public}dx%{public}d @%{public}d mHz "
+                           "(after %{public}lld ms)",
+                           static_cast<unsigned long long>(cfg.screenId),
+                           cfg.width, cfg.height, cfg.refreshMHz,
+                           static_cast<long long>(waited));
+                return;
+            }
+        }
+        if (!logged) {
+            HILOG_INFO(LOG_CORE, "no screen yet — waiting for render_service");
+            logged = true;
+        }
+        /* Check before sleeping so we never burn a final interval we cannot
+         * use, and never overshoot the budget by one whole interval. */
+        if (std::chrono::steady_clock::now() + kScreenWaitInterval >= deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(kScreenWaitInterval);
     }
-    HILOG_INFO(LOG_CORE, "screen %{public}llu: %{public}dx%{public}d @%{public}d mHz",
-               static_cast<unsigned long long>(cfg.screenId),
-               cfg.width, cfg.height, cfg.refreshMHz);
+
+    /*
+     * Soft failure: keep the ServerConfig defaults and boot the container
+     * anyway rather than failing the generation, which would only make the
+     * supervisor rebuild us into the same wait.
+     *
+     * Those defaults (wl_server.h, 1080x2400) are the ansuz panel, so this
+     * path is a latent wart on a tree whose rule is one image for both
+     * devices with per-device settings coming from init.<dev>.cfg at runtime
+     * — it happens to be invisible today only because the X23 never starts
+     * waydroid at all.  If a second device ever enables it, plumb the
+     * fallback geometry in from the per-device config instead of relying on
+     * this.  Loud on purpose: silence here is what hid the original bug.
+     */
+    HILOG_WARN(LOG_CORE,
+               "no screen after %{public}lld ms — falling back to %{public}dx%{public}d "
+               "(ansuz defaults; wrong on any other panel)",
+               static_cast<long long>(
+                   std::chrono::duration_cast<std::chrono::milliseconds>(kScreenWaitBudget).count()),
+               cfg.width, cfg.height);
 }
 
 /*
@@ -383,9 +462,12 @@ int main(int argc, char** argv)
     WaydroidSessionStub::Publish(&server);
 
     /* W5 lifecycle: subscribe to the launcher's SHOW/HIDE common events so
-     * the container follows the app fore/background. The self-drawing node
-     * is already attached and the touch grab defaults on, so startup is
-     * "visible"; the events drive changes from there. */
+     * the container follows the app fore/background.  Startup is the fully
+     * dormant state — the node was just hidden above, the touch grab
+     * defaults OFF, and the attach we issued was in all likelihood dropped
+     * (see OutputSurface::EnsureAttachedToDisplay).  The first SHOW is what
+     * attaches, reveals and grabs; nothing before it puts the container on
+     * the panel. */
     {
         EventFwk::MatchingSkills skills;
         skills.AddEvent(kEventShow);

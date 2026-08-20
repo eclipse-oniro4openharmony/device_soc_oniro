@@ -52,9 +52,12 @@ bool OutputSurface::AttachSelfDrawingNode(uint64_t screenId, int32_t width, int3
     node->SetBackgroundColor(0xFF000000);
     node->SetFrameGravity(Rosen::Gravity::RESIZE);
     Rosen::RSTransaction::FlushImplicitTransaction();
-    node->AttachToDisplay(screenId);
-    Rosen::RSTransaction::FlushImplicitTransaction();
 
+    /* Take the surface BEFORE attaching: GetSurface only converts the node's
+     * own surface and has nothing to do with the display, so doing it first
+     * means a failure here leaves an unattached node that simply dies with
+     * the local shared_ptr — rather than a second fullscreen Z=100000 node
+     * parented to the display with no owner to detach it. */
     sptr<Surface> surface = node->GetSurface();
     if (surface == nullptr) {
         HILOG_ERROR(LOG_CORE, "AttachSelfDrawingNode: node has no surface");
@@ -62,11 +65,16 @@ bool OutputSurface::AttachSelfDrawingNode(uint64_t screenId, int32_t width, int3
     }
     surface->SetQueueSize(OUTPUT_QUEUE_SIZE);
 
-    node_    = node;
-    surface_ = surface;
+    node_         = node;
+    surface_      = surface;
+    screenId_     = screenId;
+    attachHealed_ = false;   /* fresh node: it gets its own single heal */
     InstallReleaseListenerLocked();
     width_   = width;
     height_  = height;
+
+    AttachToDisplayLocked();
+    Rosen::RSTransaction::FlushImplicitTransaction();
     HILOG_INFO(LOG_CORE, "output: self-drawing node on screen %{public}llu, %{public}dx%{public}d",
                static_cast<unsigned long long>(screenId), width, height);
     return true;
@@ -89,9 +97,15 @@ bool OutputSurface::AttachProducer(const sptr<IBufferProducer>& producer)
      * fallback) is deliberate: two attached outputs would each get half
      * the commits. */
     if (node_ != nullptr) {
-        node_->DetachToDisplay(0);
+        /* screenId_, not 0: DetachToDisplay skips every logical display node
+         * whose GetScreenId() != screenId, so a hardcoded 0 silently no-ops
+         * on any other screen and strands our fullscreen Z=100000 node on
+         * the tree, covering the very producer we are switching to. */
+        node_->DetachToDisplay(screenId_);
         Rosen::RSTransaction::FlushImplicitTransaction();
         node_ = nullptr;
+        screenId_ = 0;
+        attachHealed_ = false;
     }
     surface->SetQueueSize(OUTPUT_QUEUE_SIZE);
     surface_ = surface;
@@ -104,11 +118,21 @@ void OutputSurface::Detach()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (node_ != nullptr) {
-        node_->DetachToDisplay(0);
+        node_->DetachToDisplay(screenId_);   /* see AttachProducer */
         Rosen::RSTransaction::FlushImplicitTransaction();
         node_ = nullptr;
+        screenId_ = 0;
+        attachHealed_ = false;
     }
     surface_ = nullptr;
+}
+
+void OutputSurface::AttachToDisplayLocked()
+{
+    if (node_ == nullptr) {
+        return;   /* stage 2 (app producer): there is no node to attach. */
+    }
+    node_->AttachToDisplay(screenId_);
 }
 
 void OutputSurface::SetNodeVisible(bool visible)
@@ -118,6 +142,19 @@ void OutputSurface::SetNodeVisible(bool visible)
         node_->SetVisible(visible);
         Rosen::RSTransaction::FlushImplicitTransaction();
     }
+}
+
+void OutputSurface::EnsureAttachedToDisplay()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (node_ == nullptr || attachHealed_) {
+        return;   /* no node (stage 2), or the single heal is already spent */
+    }
+    attachHealed_ = true;
+    AttachToDisplayLocked();
+    Rosen::RSTransaction::FlushImplicitTransaction();
+    HILOG_INFO(LOG_CORE, "output: re-issued AttachToDisplay for screen %{public}llu",
+               static_cast<unsigned long long>(screenId_));
 }
 
 void OutputSurface::ResetQueue()
