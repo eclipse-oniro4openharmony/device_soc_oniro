@@ -15,9 +15,6 @@ Android vendor stack through **libhybris**. This layer hosts the vendor display
 interface (VDI) and audio HAL implementations that bridge OpenHarmony HDIs onto
 the Android vendor blobs.
 
-The full bring-up, boot architecture, and per-phase documentation live in the
-board repository, under `device/board/oniro/docs/hybris_generic/README.md`.
-
 ### `x86_general` — QEMU / x86 emulator
 
 GPU adaptation for the Oniro emulator target, based on the Mesa graphics stack.
