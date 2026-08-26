@@ -247,12 +247,36 @@ static bool IsUnsupportedOhosFormat(uint32_t ohosFormat)
  */
 static constexpr uint32_t kMaxBufferDimension = 65536;
 
+/*
+ * PIXEL_FMT_BLOB is not a picture: it names a 1-D byte slab whose *width is a
+ * byte count*, with height 1, so the pixel cap above must not be applied to
+ * it.  The camera VDI requests a 24 MiB blob for every still
+ * (hybris_stream_operator_vdi.cpp, DeliverBlob) — the encoded length is not
+ * known until the HAL has produced the JPEG, so it asks for a slab any still
+ * fits into, exactly as the reference VDI does.  Capping that at 65536 made
+ * RequestBuffer fail on every shutter press, and no photo ever reached the
+ * gallery.  The bound below only has to stay well under what an uninitialised
+ * AllocInfo would ask for while leaving room for the largest encoded still.
+ */
+static constexpr uint32_t kOhosFormatBlob = 38;
+static constexpr uint32_t kMaxBlobBytes = 256u * 1024 * 1024;
+
+static bool AreDimensionsValid(const AllocInfo& info)
+{
+    if (info.width == 0 || info.height == 0) {
+        return false;
+    }
+    if (info.format == kOhosFormatBlob) {
+        return info.width <= kMaxBlobBytes && info.height <= kMaxBufferDimension;
+    }
+    return info.width <= kMaxBufferDimension && info.height <= kMaxBufferDimension;
+}
+
 static int32_t ValidateAllocInfo(const AllocInfo& info)
 {
-    if (info.width == 0 || info.height == 0 ||
-        info.width > kMaxBufferDimension || info.height > kMaxBufferDimension) {
-        DISPLAY_LOGE("AllocMem: rejecting %{public}ux%{public}u — invalid dimensions",
-                     info.width, info.height);
+    if (!AreDimensionsValid(info)) {
+        DISPLAY_LOGE("AllocMem: rejecting %{public}ux%{public}u fmt %{public}u — invalid dimensions",
+                     info.width, info.height, info.format);
         return HDF_FAILURE;
     }
 
