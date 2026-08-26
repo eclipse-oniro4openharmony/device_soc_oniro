@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Reproducible cross-build + deploy of the Oniro x86_general Mesa GPU driver
 # (libgallium_dri.so + libEGL/libGLESv*/libgbm) from source.
 #

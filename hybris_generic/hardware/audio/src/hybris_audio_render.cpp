@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Oniro Authors
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "hybris_audio_common.h"
