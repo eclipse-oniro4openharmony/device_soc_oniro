@@ -137,7 +137,7 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
  * for these is a correctness bug rather than leniency: a caller that asked for
  * HBM_USE_PROTECTED and got unprotected memory has no way to find out.
  *
- *   MEM_MMZ(2), MEM_SHARE(4), MEM_MMZ_CACHE(5), ASSIGN_SIZE(7)
+ *   MEM_MMZ(2), MEM_SHARE(4), ASSIGN_SIZE(7)
  *      HiSilicon-style memory zones, with no Android gralloc equivalent.
  *      Their only in-tree callers are the *_lite (small-system) graphic
  *      stack, which this product does not build.
@@ -162,10 +162,33 @@ static int OhosUsageToAndroid(uint64_t ohosUsage)
  * | CPU_HW_BOTH; anything not named here must keep working.
  */
 static constexpr uint64_t kUnsupportedUsageMask =
-    (1ULL << 2)  |                 /* MEM_MMZ                  */
-    (1ULL << 4)  | (1ULL << 5)  |  /* MEM_SHARE, MEM_MMZ_CACHE */
-    (1ULL << 7)  |                 /* ASSIGN_SIZE              */
-    (1ULL << 11);                  /* PROTECTED                */
+    (1ULL << 2)  |                 /* MEM_MMZ     */
+    (1ULL << 4)  |                 /* MEM_SHARE   */
+    (1ULL << 7)  |                 /* ASSIGN_SIZE */
+    (1ULL << 11);                  /* PROTECTED   */
+
+/*
+ * MEM_MMZ_CACHE(5) needs the MEM_FB rule rather than the deny-list above: it
+ * asks for the buffer to be *cached*, it does not name a memory zone.  Nothing
+ * reads it back out of gralloc — RSUniRenderUtil::FlushDmaSurfaceBuffer tests
+ * it on the SurfaceBuffer to decide whether a CPU read needs InvalidateCache()
+ * first — so an allocator that ignores it still returns a buffer the caller
+ * can use, exactly as Android gralloc does.
+ *
+ * Denying it broke every DMA-backed PixelMap on the device.  image_framework's
+ * DmaMemory::Create() (memory_manager.cpp) ORs it into a fixed
+ * CPU_READ | CPU_WRITE | MEM_DMA | MEM_MMZ_CACHE (usage 0x2b) for *all* of
+ * them, so the refusal reached anything decoding through the DMA path.  The
+ * visible symptom was the recent-tasks view: SceneBoard stores each app's
+ * snapshot as ASTC and CreatePixelMapForASTC() allocates the compressed slab
+ * this way, so ReadFileAndResoveAstc() failed, ArkUI's Image node got a null
+ * pixelmap ("AceImage: pixmap null") and every card but the live one painted
+ * nothing.  MMI's ScreenPointer cursor buffer composes its usage the same way.
+ *
+ * A request made of *nothing but* this bit is still rejected: it then names no
+ * memory type we can honour, and DisplayBufferMt 0240 tests exactly that case.
+ */
+static constexpr uint64_t kCacheHintUsageMask = (1ULL << 5);  /* MEM_MMZ_CACHE */
 
 /*
  * Vendor-private usage bits (VENDOR_PRI0..19) need a different rule from the
@@ -287,7 +310,20 @@ static int32_t ValidateAllocInfo(const AllocInfo& info)
         return HDF_FAILURE;
     }
 
-    uint64_t unsupported = info.usage & kUnsupportedUsageMask;
+    /* A cache hint riding along with a real request is ignored rather than
+     * refused; on its own it names no memory type.  See kCacheHintUsageMask. */
+    uint64_t usage = info.usage;
+    bool describesMemory = (usage & ~(kCacheHintUsageMask | kVendorUsageMask)) != 0;
+    if ((usage & kCacheHintUsageMask) != 0) {
+        if (!describesMemory) {
+            DISPLAY_LOGE("AllocMem: rejecting usage 0x%{public}llx — cache hint only",
+                         static_cast<unsigned long long>(info.usage));
+            return HDF_FAILURE;
+        }
+        usage &= ~kCacheHintUsageMask;
+    }
+
+    uint64_t unsupported = usage & kUnsupportedUsageMask;
     if (unsupported != 0) {
         DISPLAY_LOGE("AllocMem: rejecting usage 0x%{public}llx — unsupported bits 0x%{public}llx",
                      static_cast<unsigned long long>(info.usage),

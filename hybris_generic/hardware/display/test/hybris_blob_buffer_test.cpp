@@ -114,6 +114,13 @@ int main()
     /* Snapshot-style RGBA for comparison */
     TestAlloc(vdi, "RGBA_8888", 1080, 2400, 12, 0xBULL | (1ULL << 8) | (1ULL << 9));
 
+    /* image_framework's DmaMemory::Create() usage, verbatim: the ASTC slab
+     * behind every recent-tasks card.  MEM_MMZ_CACHE(5) rides along with a
+     * real request and must be ignored, not refused — expect ret=0. */
+    TestAlloc(vdi, "BLOB astc+mmz_cache", 648016, 1, 38, 0xBULL | (1ULL << 5));
+    /* The same bit on its own names no memory type — expect ret!=0. */
+    TestAlloc(vdi, "bare mmz_cache (must fail)", 1024, 1024, 12, 1ULL << 5);
+
     DestroyDisplayBufferVdi(vdi);
     return 0;
 }
