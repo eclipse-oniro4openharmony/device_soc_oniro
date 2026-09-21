@@ -1,5 +1,5 @@
-# W3: bridge the host A14 Mali AIDL allocator into the A13 container so
-# SurfaceFlinger can allocate GPU buffers (plan §9 W3 gate 2).
+# Bring the host's Mali AIDL allocator up inside the container so
+# SurfaceFlinger can allocate GPU buffers (gralloc_bridge/README).
 service vendor.waydroid-gralloc /system/bin/sh /odm/start-allocator.sh
     class hal
     user root

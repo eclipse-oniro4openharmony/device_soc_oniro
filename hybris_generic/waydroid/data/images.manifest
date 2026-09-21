@@ -4,17 +4,20 @@
 # from a host, or by the "Android Apps" front-end on the device); the two *.img
 # lines are what is inside them, and what waydroidd checks before it mounts
 # anything — it refuses an image that is not listed here.  Bump all four
-# together, then run utils/host/waydroid-patches.sh (patches.conf is derived
-# for exactly these builds).
+# together.
 #
-# base-url is where the zips live: <base-url>/<system|vendor path>/<zip>/download
-base-url https://sourceforge.net/projects/waydroid/files/images
+# base-url is the directory the zips live in: <base-url>/<zip>.
+base-url https://volla.tech/filedump/waydroid-16
 
-# system: lineage-20.0 (Android 13) VANILLA arm64
-lineage-20.0-20260403-VANILLA-waydroid_arm64-system.zip c4b45fad36bee7c0db8a1d9315a5be0035520c53d3d005a807735ae9b7ee79cf
-system.img e9d0a498105feb5e00895066dee90d738b3961ba334416f26498e357ee966b2e
+# system: lineage-23.0 (Android 16, SDK 36) VANILLA arm64-only.  EROFS, not
+# ext4 — waydroidd picks the filesystem by superblock magic.
+waydroid_arm64_only-system-20260908.zip c059f5e7618dc32127e24073ca06ec3d5034b2b257dab354e605486876e49d59
+system.img bdd7ad34098daee47de44ec45d75487a316984efa5570525175b924dc77ce82c
 
-# vendor: HALIUM_13 arm64 (no HALIUM_14 is published; the host is Halium 14 —
-# that skew is why the gralloc bridge and patches.conf exist)
-lineage-20.0-20260403-HALIUM_13-waydroid_arm64-vendor.zip fc7311d2358aa6fd846d60cfa4b1b2ef8237f805c4a172fd83502cdf6d65dca5
-vendor.img 705205744bd19b2058f56e1f08a974cc5a924aac49ea6e40c5b581bd38c3c90d
+# vendor: HALIUM_16 arm64-only.  Built by Volla for their MediaTek devices: it
+# symlinks /vendor/lib64/hw/mapper.mediatek.so at the host Halium vendor
+# (/vendor_extra), so the container's gralloc5 loads the phone's own MTK mapper
+# and the A13-on-A14 skew that the binary patches and most of the gralloc
+# bridge existed for is gone.
+waydroid_arm64_only-vendor-20260908.zip 65695060df119f874f12cc331b55fc229eecc8889b2b47ff71e57bfb2995864d
+vendor.img ec44a8a4e7df39fbfd75807be459cc9ad51d268ad7ab413419b68bbe4f4e95cb

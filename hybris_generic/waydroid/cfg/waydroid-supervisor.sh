@@ -127,23 +127,23 @@ teardown() {
     return 0
 }
 
-# The container's /odm: the image's graft tree plus the host's AIDL graphics
-# libs the A13 image lacks but the A14 Mali blobs need (common-V5 under the V4
-# soname the container links against — NDK AIDL libs keep their type symbols).
-# Rebuilt from the image for every generation, so nothing in it is trusted
-# across starts.  Fails (and is retried) while the Halium container that
-# provides /android/system is not up yet.
+# The container's /odm: the image's graft tree — the init service and VINTF
+# fragment that run the host's AIDL Mali allocator inside the container, plus
+# the network script.  Rebuilt from the image for every generation, so nothing
+# in it is trusted across starts.  (Up to lineage-20 this also had to carry
+# the host's AIDL graphics NDK libs, which the A13 image lacked; the A16 image
+# ships allocator-V2-ndk and graphics.common-V4-ndk itself.)
+#
+# Still fails (and is retried) while the Halium container is not up: the
+# allocator we are about to start lives in ITS vendor tree, which waydroidd
+# binds at the container's /vendor_extra.  Copying the libs used to be what
+# made us wait for it; now we say so.
 prepare_graft() {
+    [ -d /android/vendor/bin/hw ] || return 1
     rm -rf "$WD/graft" 2>/dev/null
-    mkdir -p "$WD/graft/lib" "$WD/graft/lib64" || return 1
+    mkdir -p "$WD/graft" || return 1
     cp -r "$ETC/graft/." "$WD/graft/" || return 1
     chmod 755 "$WD/graft/start-allocator.sh" "$WD/graft/waydroid-net.sh"
-    for a in lib64 lib; do
-        cp "/android/system/$a/android.hardware.graphics.common-V5-ndk.so" \
-           "$WD/graft/$a/android.hardware.graphics.common-V4-ndk.so" || return 1
-        cp "/android/system/$a/android.hardware.graphics.allocator-V2-ndk.so" \
-           "$WD/graft/$a/" || return 1
-    done
     return 0
 }
 
@@ -179,12 +179,12 @@ images_status() {     # $1 = needs-images | bad-images
     while read -r a b; do
         case "$a" in
             base-url) BASE=$b ;;
-            *-system.zip) SYSZIP=$a; SYSSHA=$b ;;
-            *-vendor.zip) VENZIP=$a; VENSHA=$b ;;
+            *system*.zip) SYSZIP=$a; SYSSHA=$b ;;
+            *vendor*.zip) VENZIP=$a; VENSHA=$b ;;
         esac
     done <"$ETC/images.manifest"
-    SYSURL="$BASE/system/lineage/waydroid_arm64/$SYSZIP/download"
-    VENURL="$BASE/vendor/waydroid_arm64/$VENZIP/download"
+    SYSURL="$BASE/$SYSZIP"
+    VENURL="$BASE/$VENZIP"
     case "$(param get const.debuggable 2>/dev/null)" in
         1*)
             if [ -s "$WD/mirror" ]; then
@@ -340,7 +340,7 @@ while true; do
 
     teardown
     if ! prepare_graft; then
-        log "graft not ready (is /android/system mounted?); retrying"
+        log "graft not ready (is the Halium container up?); retrying"
         sleep 5
         continue
     fi

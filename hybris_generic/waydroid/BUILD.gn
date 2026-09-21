@@ -196,7 +196,6 @@ ohos_executable("waydroid_tcprelay") {
 
 # ── /system/etc/waydroid: configuration the launcher reads ─────────────────
 waydroid_etc_files = [
-  "patches.conf",  # the two binary patches, applied per start by waydroidd
   "waydroid.prop",  # container properties (a /data copy overrides it)
   "hosthals.xml",  # trimmed host-HAL passthrough list (ditto)
   "images.manifest",  # sha256 pins of the upstream images, for provisioning
@@ -216,8 +215,7 @@ foreach(f, waydroid_etc_files) {
 
 # ── /system/etc/waydroid/graft: what becomes the container's /odm ──────────
 # The supervisor copies this tree to /data/waydroid/graft before every
-# generation and adds the host's AIDL graphics libs next to it.  [ source,
-# installed name, directory below waydroid/graft ].
+# generation.  [ source, installed name, directory below waydroid/graft ].
 waydroid_graft_files = [
   [
     "gralloc_bridge/start-allocator.sh",
@@ -261,33 +259,6 @@ foreach(g, waydroid_graft_files) {
   waydroid_graft_targets += [ ":$_t" ]
 }
 
-# The one-symbol libbinder_ndk trampoline the A14 allocator needs inside the
-# A13 container.  An *Android* object, so not an ohos_shared_library.
-action("waydroid_binderflags_shim_build") {
-  script = "gralloc_bridge/build_android_shim.py"
-  sources = [ "gralloc_bridge/binderflags_shim.S" ]
-  outputs = [ "$target_gen_dir/graft/libbinderflags_shim.so" ]
-  args = [
-    "--clang-dir",
-    rebase_path("${default_clang_base_path}", root_build_dir),
-    "--source",
-    rebase_path("gralloc_bridge/binderflags_shim.S", root_build_dir),
-    "--soname",
-    "libbinderflags_shim.so",
-    "--output",
-    rebase_path("$target_gen_dir/graft/libbinderflags_shim.so", root_build_dir),
-  ]
-}
-
-ohos_prebuilt_etc("waydroid_graft_binderflags_shim") {
-  source = "$target_gen_dir/graft/libbinderflags_shim.so"
-  output = "graft/libbinderflags_shim.so"
-  deps = [ ":waydroid_binderflags_shim_build" ]
-  relative_install_dir = "waydroid/graft"
-  part_name = "hybris_generic_soc"
-  subsystem_name = "oniro_soc_products"
-}
-
 # W5 bring-up tool: stand-in for the "Android Apps" front-end — proves the
 # cross-process surface handoff + touch/freeze IPC with no HAP in the loop.
 ohos_executable("waydroid_session_test") {
@@ -317,7 +288,6 @@ group("waydroid_group") {
   deps = [
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
-    ":waydroid_graft_binderflags_shim",
     ":waydroid_sa_profile",
     ":waydroid_session_test",
     ":waydroid_supervisor_sh",

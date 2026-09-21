@@ -4,8 +4,8 @@
  *
  * waydroidd — Waydroid Android-app container launcher (Phase W0+)
  *
- * Sibling of androidd: runs the stock Waydroid LXC image (LineageOS 20 /
- * Android 13) as a SECOND container next to the Halium HAL container,
+ * Sibling of androidd: runs the stock Waydroid LXC image (LineageOS 23 /
+ * Android 16) as a SECOND container next to the Halium HAL container,
  * with no LXC, no Python and no D-Bus.  The upstream host tool's LXC
  * config (waydroid/tools/helpers/lxc.py + data/configs/config_*) is the
  * checklist this launcher reimplements with raw clone(2) + mount(2).
@@ -25,7 +25,7 @@
  *
  * Installed as /system/bin/waydroidd (GN target :waydroidd, built only when
  * the product sets hybris_generic_soc_feature_waydroid).  Runtime layout:
- *   /system/etc/waydroid/   patches.conf, waydroid.prop, hosthals.xml, graft/
+ *   /system/etc/waydroid/   waydroid.prop, hosthals.xml, images.manifest, graft/
  *   /data/waydroid/images/  the two pristine, sha256-pinned upstream images
  *   /data/waydroid/         data.img + runtime state (rootfs mountpoint, run/)
  *
@@ -90,8 +90,6 @@
 #define PROP_DEFAULT       IMAGE_ETC "/waydroid.prop"
 #define HOSTHALS_OVERRIDE  WAYDROID_DIR "/hosthals.xml"
 #define HOSTHALS_DEFAULT   IMAGE_ETC "/hosthals.xml"
-#define PATCHES_CONF   IMAGE_ETC "/patches.conf"
-#define PATCHES_OUT    WAYDROID_DIR "/run/patches"
 #define MANIFEST_FILE  IMAGE_ETC "/images.manifest"
 #define VERIFIED_DIR   WAYDROID_DIR "/run/verified"
 
@@ -253,8 +251,7 @@ static void bind_node(const char *src, const char *dst)
     struct stat st;
     if (stat(src, &st) < 0) return;
     /* Only create the mountpoint when it is missing — binding OVER an
-     * existing file (e.g. a patched binary on the ro vendor image) must
-     * not try to write to it. */
+     * existing file on a read-only image must not try to write to it. */
     if (stat(dst, &st) < 0 && touch_file(dst) < 0) {
         logmsg("touch %s: %s (skipped)", dst, strerror(errno));
         return;
@@ -280,162 +277,6 @@ static const char *pick_file(const char *override, const char *dflt)
 {
     struct stat st;
     return stat(override, &st) == 0 ? override : dflt;
-}
-
-/* ------------------------------------------------------------------------
- * Binary patches (patches.conf).
- *
- * The container needs two files of the upstream images changed by a handful
- * of instruction words (why: see data/patches.conf).  They are derived here,
- * on every start, from the images that were just mounted — so /data carries
- * only pristine upstream images and nothing has to be prepared on a build
- * host.  A word that does not match means a different image build: refuse
- * to start rather than boot a container that crash-loops with no tombstone.
- */
-#define PATCH_MAX_FILES 8
-#define PATCH_MAX_BYTES (32u * 1024 * 1024)
-
-struct patch_file {
-    char name[64];
-    char path[PATH_MAX];     /* inside the container */
-    mode_t mode;
-    uint8_t *data;
-    size_t size;
-    int words;
-};
-
-static struct patch_file *patch_find(struct patch_file *pf, int n,
-                                     const char *name)
-{
-    for (int i = 0; i < n; i++)
-        if (strcmp(pf[i].name, name) == 0)
-            return &pf[i];
-    return NULL;
-}
-
-static void patch_load(struct patch_file *f)
-{
-    char src[PATH_MAX];
-    snprintf(src, sizeof src, ROOTFS "%s", f->path);
-    int fd = open(src, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        die("patches.conf: %s: %s", src, strerror(errno));
-    struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size <= 0 ||
-        (uint64_t)st.st_size > PATCH_MAX_BYTES)
-        die("patches.conf: %s: unusable size", src);
-    f->size = (size_t)st.st_size;
-    f->data = malloc(f->size);
-    if (!f->data)
-        die("patches.conf: out of memory for %s", f->name);
-    size_t off = 0;
-    while (off < f->size) {
-        ssize_t r = read(fd, f->data + off, f->size - off);
-        if (r <= 0)
-            die("patches.conf: short read on %s", src);
-        off += (size_t)r;
-    }
-    close(fd);
-}
-
-static void patch_commit(const struct patch_file *f)
-{
-    char out[PATH_MAX], dst[PATH_MAX];
-    snprintf(out, sizeof out, PATCHES_OUT "/%s", f->name);
-    snprintf(dst, sizeof dst, ROOTFS "%s", f->path);
-    unlink(out);
-    int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, f->mode);
-    if (fd < 0)
-        die("patches.conf: create %s: %s", out, strerror(errno));
-    size_t off = 0;
-    while (off < f->size) {
-        ssize_t w = write(fd, f->data + off, f->size - off);
-        if (w <= 0)
-            die("patches.conf: write %s: %s", out, strerror(errno));
-        off += (size_t)w;
-    }
-    /* open()'s mode is filtered by the umask; the composer must end up
-     * executable or init inside the container can never exec it. */
-    if (fchmod(fd, f->mode) < 0)
-        die("patches.conf: chmod %s: %s", out, strerror(errno));
-    close(fd);
-    if (mount(out, dst, NULL, MS_BIND, NULL) < 0)
-        die("patches.conf: bind %s -> %s: %s", out, dst, strerror(errno));
-    logmsg("patched %s (%d word%s) over %s", f->name, f->words,
-           f->words == 1 ? "" : "s", f->path);
-}
-
-/* Called in the container's mount namespace, once system.img and vendor.img
- * are mounted under ROOTFS and before anything in them is executed. */
-static void apply_patches(void)
-{
-    FILE *c = fopen(PATCHES_CONF, "re");
-    if (!c) {
-        logmsg("no %s — container runs unpatched", PATCHES_CONF);
-        return;
-    }
-    if (mkdir_p(PATCHES_OUT, 0755) < 0)
-        die("mkdir %s: %s", PATCHES_OUT, strerror(errno));
-
-    static struct patch_file pf[PATCH_MAX_FILES];
-    int n = 0, lineno = 0;
-    char line[PATH_MAX + 128];
-    while (fgets(line, sizeof line, c)) {
-        lineno++;
-        char *hash = strchr(line, '#');
-        if (hash) *hash = '\0';
-        char kw[16], name[64], a[PATH_MAX], b[PATH_MAX], c3[32];
-        int got = sscanf(line, "%15s %63s %4095s %4095s %31s",
-                         kw, name, a, b, c3);
-        if (got <= 0)
-            continue;
-        if (strcmp(kw, "sha256") == 0)
-            continue;                    /* host-side check only */
-        if (strcmp(kw, "file") == 0) {
-            /* file <name> <mode> <path> */
-            if (got != 4 || b[0] != '/')
-                die("patches.conf:%d: expected file <name> <mode> <path>",
-                    lineno);
-            if (n == PATCH_MAX_FILES || patch_find(pf, n, name))
-                die("patches.conf:%d: duplicate or too many files", lineno);
-            struct patch_file *f = &pf[n++];
-            snprintf(f->name, sizeof f->name, "%s", name);
-            snprintf(f->path, sizeof f->path, "%s", b);
-            f->mode = (mode_t)strtoul(a, NULL, 8) & 0777;
-            patch_load(f);
-        } else if (strcmp(kw, "word") == 0) {
-            /* word <name> <offset> <old> <new> */
-            if (got != 5)
-                die("patches.conf:%d: expected word <name> <off> <old> <new>",
-                    lineno);
-            struct patch_file *f = patch_find(pf, n, name);
-            if (!f)
-                die("patches.conf:%d: word before file %s", lineno, name);
-            unsigned long off = strtoul(a, NULL, 16);
-            uint32_t oldw = (uint32_t)strtoul(b, NULL, 16);
-            uint32_t neww = (uint32_t)strtoul(c3, NULL, 16);
-            if ((off & 3) || off + 4 > f->size)
-                die("patches.conf:%d: offset %#lx outside %s", lineno, off,
-                    f->name);
-            uint32_t cur;
-            memcpy(&cur, f->data + off, 4);      /* aarch64: little-endian */
-            if (cur != oldw)
-                die("%s: at %#lx expected %#010x, found %#010x — the image "
-                    "in %s is not the build patches.conf was derived for "
-                    "(bump it together with images.manifest)",
-                    f->name, off, oldw, cur, g_images_dir);
-            memcpy(f->data + off, &neww, 4);
-            f->words++;
-        } else {
-            die("patches.conf:%d: unknown keyword %s", lineno, kw);
-        }
-    }
-    fclose(c);
-    for (int i = 0; i < n; i++) {
-        patch_commit(&pf[i]);
-        free(pf[i].data);
-        pf[i].data = NULL;
-    }
 }
 
 /* ------------------------------------------------------------------------
@@ -849,6 +690,30 @@ static void loop_dev_path(int index, char *out, size_t n)
     snprintf(out, n, "/dev/loop%d", index);
 }
 
+/* Mount one of the upstream images read-only, picking the filesystem from
+ * the superblock rather than from a build-time assumption.  The Waydroid
+ * system image was ext4 up to lineage-20 and is EROFS from lineage-23
+ * (Android 16); the vendor image is still ext4.  A wrong `type` is just
+ * EINVAL from mount(2), which reads as "corrupt image" and sends you
+ * looking in the wrong place — so detect, and say which one we chose. */
+static void mount_image_ro(const char *dev, const char *dst, const char *what)
+{
+    /* EROFS: u32 LE magic at superblock offset 1024 (include/erofs_fs.h).
+     * ext4:  u16 LE magic 0xEF53 at 1024 + 56. */
+    const char *type = "ext4";
+    int fd = open(dev, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        uint32_t magic = 0;
+        if (pread(fd, &magic, sizeof magic, 1024) == (ssize_t)sizeof magic &&
+            magic == 0xe0f5e1e2u)
+            type = "erofs";
+        close(fd);
+    }
+    if (mount(dev, dst, type, MS_RDONLY | MS_NOATIME, NULL) < 0)
+        die("mount %s (%s) on %s: %s", what, type, dst, strerror(errno));
+    logmsg("mounted %s as %s on %s", what, type, dst);
+}
+
 /* Bind whatever /dev/video* nodes exist (MTK 6.1 kernels expose the
  * codec/MDP engines as V4L2 devices; the legacy /dev/Vcodec node is gone). */
 static void bind_video_nodes(void)
@@ -886,11 +751,9 @@ static int child_main(void *arg)
     if (mkdir_p(ROOTFS, 0755) < 0)
         die("mkdir %s: %s", ROOTFS, strerror(errno));
     loop_dev_path(g_sys_loop, dev, sizeof dev);
-    if (mount(dev, ROOTFS, "ext4", MS_RDONLY | MS_NOATIME, NULL) < 0)
-        die("mount system.img: %s", strerror(errno));
+    mount_image_ro(dev, ROOTFS, "system.img");
     loop_dev_path(g_ven_loop, dev, sizeof dev);
-    if (mount(dev, ROOTFS "/vendor", "ext4", MS_RDONLY | MS_NOATIME, NULL) < 0)
-        die("mount vendor.img: %s", strerror(errno));
+    mount_image_ro(dev, ROOTFS "/vendor", "vendor.img");
 
     /* Host GPU userspace into the container's vendor (upstream
      * mount_rootfs binds the host EGL dirs over the shim vendor). */
@@ -898,19 +761,17 @@ static int child_main(void *arg)
     bind_dir(HALIUM_VENDOR "/lib64/egl", ROOTFS "/vendor/lib64/egl");
 
     /* Halium mode: the whole host vendor at /vendor_extra, odm at
-     * /odm_extra — the HALIUM_13 vendor image's linker config resolves
+     * /odm_extra — the HALIUM vendor image's linker config resolves
      * Mali/codec deps from there. */
     bind_dir(HALIUM_VENDOR, ROOTFS "/vendor_extra");
     bind_dir(HALIUM_ODM,    ROOTFS "/odm_extra");
 
     /* Graft dir at the container's (otherwise empty) /odm — first in the
-     * HALIUM image's sphal search path.  Carries host libs the A13
-     * container lacks but the A14 vendor blobs need (the R1 mismatch),
-     * e.g. graphics.common-V5-ndk renamed as -V4 (AIDL NDK interface
-     * libs keep their type symbols across versions). */
-    /* The supervisor rebuilds it from /system/etc/waydroid/graft plus the
-     * host libs before every generation, so nothing in it is trusted across
-     * starts. */
+     * HALIUM image's sphal search path.  Carries the init service and VINTF
+     * fragment that bring the host's AIDL Mali allocator up inside the
+     * container (gralloc_bridge/README).  The supervisor rebuilds it from
+     * /system/etc/waydroid/graft before every generation, so nothing in it
+     * is trusted across starts. */
     bind_dir(WAYDROID_DIR "/graft", ROOTFS "/odm");
 
     /* Generated prop file over the shim vendor's placeholder. */
@@ -930,17 +791,12 @@ static int child_main(void *arg)
                    strerror(errno));
     }
 
-    /* The two binary patches (composer threadpool race, libui usage
-     * bits), derived from the images just mounted — data/patches.conf has
-     * the table and the reasoning. */
-    apply_patches();
-
     /* The AIDL graphics.allocator VINTF declaration (W3 gate 2) is
      * shipped in the graft dir at etc/vintf/manifest/ (graft is bound at
      * the container's /odm below, an ODM manifest source VINTF reads).
      * /vendor is read-only so a fragment can't be added there; /odm is
-     * writable.  The host A14 Mali allocator is AIDL but the Waydroid
-     * image only declares the HIDL gbm_mesa allocator, so without this
+     * writable.  The host Mali allocator is AIDL but the Waydroid image's
+     * VINTF declares no AIDL HAL at all, so without this
      * the container's servicemanager rejects the AIDL registration with
      * EX_ILLEGAL_ARGUMENT (-3).  See gralloc_bridge/README. */
 
@@ -1040,6 +896,28 @@ static int child_main(void *arg)
     (void)mount("tmpfs", ROOTFS "/run", "tmpfs", MS_NODEV, NULL);
     (void)mount("tmpfs", ROOTFS "/mnt_extra", "tmpfs", MS_NODEV, NULL);
     (void)mount("tmpfs", ROOTFS "/cache", "tmpfs", MS_NODEV, NULL);
+
+    /* /metadata must be WRITABLE from Android 16 on, or the container never
+     * finishes booting.  `aconfigd` builds the aconfig flag storage there
+     * (/metadata/aconfig/{maps,boot}) at early-init; with the read-only,
+     * empty /metadata of the system image it can not start, every feature
+     * flag reads as unset, and PackageManager then drops the flag-guarded
+     * <permission android:name="android.permission.RANGING"> in the uwb
+     * APEX's ServiceUwbResources.apk.  AppOpsService's op->permission table
+     * still names it, so `AppOpService.createPermissionAppOpMapping` throws
+     * IllegalStateException("Missing permission definition for permission
+     * \"android.permission.RANGING\" associated with app op 151"),
+     * system_server dies, zygote follows, and the container boot-loops with
+     * SurfaceFlinger up and nothing ever presenting.
+     *
+     * A tmpfs is the right backing: everything under /metadata that this
+     * container has any use for (the flag storage, apexd session state) is
+     * rebuilt from the images on every start, and nothing should persist
+     * from one container generation to the next. */
+    if (mount("tmpfs", ROOTFS "/metadata", "tmpfs", MS_NOSUID | MS_NODEV,
+              "mode=0771") < 0)
+        logmsg("mount tmpfs on /metadata: %s (the container will boot-loop "
+               "in AppOpsService)", strerror(errno));
 
     /* Compositor socket dir at /run/xdg (W3).  The DIRECTORY is bound,
      * not the socket file: a bind of the dir shares the underlying
