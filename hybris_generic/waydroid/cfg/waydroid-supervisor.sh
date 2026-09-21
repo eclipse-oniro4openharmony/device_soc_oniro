@@ -41,8 +41,17 @@
 #
 # Code vs data.  Everything executable or configuring comes from the image
 # (/system/bin/{waydroid_compositor,waydroidd}, /system/etc/waydroid/).
-# /data/waydroid holds the two upstream images, data.img and runtime state;
-# until the images are there we wait quietly.
+# /data/waydroid holds data.img and runtime state.  The two upstream images
+# are looked for in $WD/images (pushed from a host) and then in the front-end's
+# own storage (downloaded by the app, so that uninstalling it reclaims the
+# space).  Either way `waydroidd verify` checks them against images.manifest —
+# and takes them away from the app — before anything is mounted.
+#
+# Talking back.  The front-end can read nothing of ours, so we publish
+# org.oniroproject.waydroid.STATUS with one of
+#   disabled | verifying | starting | running |
+#   needs-images|bad-images <sys-url> <sys-sha256> <ven-url> <ven-sha256>
+# as its data.  Events are not sticky, so states that last are repeated.
 #
 # Only shell builtins + toybox applets known to be on the init PATH are used
 # (cat/kill/killall/param/sleep/rm/ls/nohup/cd/mkdir/cp/chmod) — there is no
@@ -53,6 +62,10 @@ WD=/data/waydroid
 ETC=/system/etc/waydroid
 LOG="$WD/supervisor.log"
 SOCK="$WD/run/xdg/wayland-0"
+APP_IMAGES=/data/app/el2/100/base/org.oniroproject.androidapps/haps/entry/files/images
+STATUS_EVENT=org.oniroproject.waydroid.STATUS
+IMAGES=
+BAD_SIGS="|"       # |sig|sig|… of image pairs waydroidd rejected
 
 # Which binaries the next generation runs.  Iteration aid, debug images only:
 # one dropped in $WD/bin wins.  Never on a production image — that would be
@@ -134,6 +147,56 @@ prepare_graft() {
     return 0
 }
 
+status() {
+    /system/bin/cem publish -e "$STATUS_EVENT" -d "$*" >/dev/null 2>&1
+}
+
+# Identity of an image pair: changes when either file is replaced.
+image_sig() {
+    echo "$(stat -c '%i-%s-%Y' "$1/system.img" 2>/dev/null)+$(stat -c '%i-%s-%Y' "$1/vendor.img" 2>/dev/null)"
+}
+
+# First directory holding both images that is not the pair we already know to
+# be bad (so a corrupt host push does not shadow a good download, and 2 GB are
+# not re-hashed every few seconds).
+pick_images() {
+    for d in "$WD/images" "$APP_IMAGES"; do
+        [ -f "$d/system.img" ] && [ -f "$d/vendor.img" ] || continue
+        case "$BAD_SIGS" in
+            *"|$(image_sig "$d")|"*) continue ;;
+        esac
+        IMAGES="$d"
+        return 0
+    done
+    IMAGES=
+    return 1
+}
+
+# What to download, from images.manifest.  $WD/mirror (debug images only)
+# replaces the upstream location with a flat directory of the same zips.
+images_status() {     # $1 = needs-images | bad-images
+    BASE=; SYSZIP=; SYSSHA=; VENZIP=; VENSHA=
+    while read -r a b; do
+        case "$a" in
+            base-url) BASE=$b ;;
+            *-system.zip) SYSZIP=$a; SYSSHA=$b ;;
+            *-vendor.zip) VENZIP=$a; VENSHA=$b ;;
+        esac
+    done <"$ETC/images.manifest"
+    SYSURL="$BASE/system/lineage/waydroid_arm64/$SYSZIP/download"
+    VENURL="$BASE/vendor/waydroid_arm64/$VENZIP/download"
+    case "$(param get const.debuggable 2>/dev/null)" in
+        1*)
+            if [ -s "$WD/mirror" ]; then
+                read -r MIRROR <"$WD/mirror"
+                SYSURL="$MIRROR/$SYSZIP"
+                VENURL="$MIRROR/$VENZIP"
+            fi
+            ;;
+    esac
+    status "$1" "$SYSURL" "$SYSSHA" "$VENURL" "$VENSHA"
+}
+
 autostart() {
     case "$(param get persist.waydroid.autostart 2>/dev/null)" in
         1*) return 0 ;;
@@ -206,7 +269,7 @@ start_generation() {
         return 1
     fi
     log "compositor up (socket after ${i} ticks); starting container: $WAYDROIDD"
-    cd "$WD" && nohup "$WAYDROIDD" >"$WD/waydroidd.log" 2>&1 &
+    cd "$WD" && WAYDROID_IMAGES="$IMAGES" nohup "$WAYDROIDD" >>"$WD/waydroidd.log" 2>&1 &
     return 0
 }
 
@@ -222,7 +285,10 @@ while [ -z "$DEMAND" ] && ! enabled && [ $n -lt 5 ]; do
     sleep 2
     n=$((n + 1))
 done
-enabled || stand_down "persist.waydroid.enabled is not 1; standing down"
+if ! enabled; then
+    [ -n "$DEMAND" ] && status disabled
+    stand_down "persist.waydroid.enabled is not 1; standing down"
+fi
 if [ -z "$DEMAND" ] && ! autostart; then
     stand_down "on-demand mode: waiting for Android Apps to be opened"
 fi
@@ -233,17 +299,44 @@ if [ -n "$DEMAND" ]; then log "started on demand ($DEMAND)"; else log "started a
 IDLE_LIMIT=$(idle_limit)
 
 waiting=0
+waited=0
 while true; do
     enabled || stand_down "disabled; tearing down and standing down" teardown
-    if [ ! -f "$WD/images/system.img" ] || [ ! -f "$WD/images/vendor.img" ]; then
-        # Enabled but not provisioned (a fresh flash): wait for the images
-        # instead of crash-looping under init.
-        [ $waiting = 0 ] && log "waiting for $WD/images/{system,vendor}.img"
+    if ! pick_images; then
+        # Enabled but not provisioned (a fresh flash): tell the front-end what
+        # to fetch and wait, instead of crash-looping under init.
+        [ $waiting = 0 ] && log "no images in $WD/images or the front-end's storage; waiting"
         waiting=1
-        sleep 15
+        if [ "$BAD_SIGS" != "|" ]; then images_status bad-images; else images_status needs-images; fi
+        sleep 3
+        # On demand, nobody may be listening any more.  The front-end's beat
+        # starts us again for as long as it really is open.
+        waited=$((waited + 3))
+        if ! autostart && [ $waited -ge 60 ]; then
+            stand_down "still no images after ${waited}s; standing down until asked again"
+        fi
         continue
     fi
     waiting=0
+    waited=0
+
+    pick_binaries
+    status verifying
+    : >"$WD/waydroidd.log" 2>/dev/null
+    "$WAYDROIDD" verify "$IMAGES" >>"$WD/waydroidd.log" 2>&1
+    rc=$?
+    if [ $rc != 0 ]; then
+        if [ $rc = 4 ]; then
+            continue                    # vanished under us; look again
+        fi
+        BAD_SIGS="$BAD_SIGS$(image_sig "$IMAGES")|"
+        log "images in $IMAGES rejected (see waydroidd.log); waiting for other ones"
+        images_status bad-images
+        sleep 3
+        continue
+    fi
+    BAD_SIGS="|"
+    status starting
 
     teardown
     if ! prepare_graft; then
@@ -277,7 +370,8 @@ while true; do
     # starting…" — is revealed by the next beat, and one that comes up while
     # nobody is looking stays hidden.
 
-    # Monitor.  Three ways out besides the container exiting:
+    # Monitor.  Four ways out besides the container exiting (the fourth, the
+    # images disappearing, is in the loop):
     #   disabled     -> stand down (top of the outer loop)
     #   wedged       -> no first frame within 90 unfrozen seconds: rebuild.
     #                   Rare, silent and otherwise permanent (the composer
@@ -288,12 +382,21 @@ while true; do
     while kill -0 "$CPID" 2>/dev/null; do
         sleep 2
         enabled || break
+        # The images went away under a running container: the front-end was
+        # uninstalled (or the user cleared its data).  The container keeps
+        # running from the deleted files, and keeps their 2 GB allocated, for
+        # as long as we let it.
+        if [ ! -f "$IMAGES/system.img" ] || [ ! -f "$IMAGES/vendor.img" ]; then
+            stand_down "images in $IMAGES are gone; tearing down" teardown
+        fi
         if [ $framed = 0 ]; then
             if first_frame_seen; then
                 framed=1
                 log "first frame after ~${booting}s"
+                status running
             elif ! container_frozen; then
                 booting=$((booting + 2))
+                status starting
                 if [ $booting -ge 90 ]; then
                     log "no frame from the container after ${booting}s; rebuilding generation"
                     break

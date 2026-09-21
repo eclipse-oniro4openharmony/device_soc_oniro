@@ -68,11 +68,50 @@ The exit chord (Vol-Down + Vol-Up) hides immediately and ignores SHOW for 3 s
 ApplyVisibility is mutex-serialized (concurrent visibility flips otherwise
 stranded grab=1 over a frozen container → total touch loss). Hide/show toggles
 node *visibility* rather than destroying it, so the container's last frame is
-retained (a fresh node is black until the container redraws). To drive the
-compositor without the app: `cem publish -e org.oniroproject.waydroid.SHOW`
-(repeat it within 10 s, or the lease hides it again) / `.HIDE`.
+retained (a fresh node is black until the container redraws). The compositor
+only listens to SHOW/HIDE **published by this bundle**
+(`SetPublisherBundleName`) — SHOW puts a fullscreen, touch-grabbing layer over
+OHOS and any app can publish a custom event — so `cem publish` from a shell no
+longer drives it; use the app, or `waydroid_session_test`.
 `entry/src/main/cpp/napi_init.cpp` is retained for the future XComponent path
 but is no longer built.
+
+## Talking back: STATUS, and first-run provisioning
+
+This app can read nothing of the stack (no params, no `/data/waydroid`), so the
+supervisor tells it: `org.oniroproject.waydroid.STATUS`, data =
+
+| data | the page shows |
+|---|---|
+| `disabled` | "Android apps are turned off on this device" (`persist.waydroid.enabled` ≠ 1 — device policy, not ours to change) |
+| `needs-images <sys-url> <sha> <ven-url> <sha>` | the one-time download offer |
+| `verifying` | "Checking the Android images…" |
+| `bad-images <same four>` | "failed verification" + *Download again*; the page also deletes its copy |
+| `starting` / `running` | the spinner / nothing (the container covers the page) |
+
+`model/Provisioner.ets` downloads the two zips (`@ohos.request`), unpacks them
+(`@ohos.zlib`) into `filesDir/images.tmp` and renames that to `filesDir/images`
+at the very end, so the supervisor never sees half a file. 946 MB down, 2.07 GB
+on the device, ~3 min on a good link. Storing them with the app is the point:
+**uninstalling "Android Apps" gives the space back** (measured: 2.03 GB within
+5 s, with Android running at the time — the supervisor notices the images are
+gone and tears down, and the loop devices are auto-clear).
+
+The app is not trusted with them. What to fetch comes from the supervisor (which
+reads `images.manifest` from the system image); and `waydroidd` only mounts an
+image through `verify_image()`: open once → root-owned + 0444 → a read lease
+(refused by the kernel while anyone still has the file open for writing) →
+sha256 against the manifest → loop-attached from that same fd. Nothing is
+verified here; a bad download comes back as `bad-images`.
+
+Two things that cost time, for whoever touches this next:
+
+* the in-tree (non-hvigor) ets build **bundles the ability and every page
+  separately**, so a static or module-level variable exists once per bundle —
+  the page's copy of something the ability set is `undefined`. `AppStorage` is
+  what they really share;
+* an app's hilog domain is **16 bits**. The `0xD002500` this app used to log
+  with is silently dropped, which is why it never appeared to log anything.
 
 ## Build
 
@@ -127,7 +166,11 @@ hdc shell "aa start -a EntryAbility -b org.oniroproject.androidapps"
 
 ## Status
 
-Verified on the Plinius, 2026-09-21: opening the app on a device with nothing
+Verified on the Plinius, 2026-09-21 — provisioning: with no images on the
+device the app offered the download, fetched and unpacked both, the supervisor
+went `verifying` → `starting` and Android came up from files in this app's
+storage; a byte flipped in one of them → `bad-images`, copy deleted, *Download
+again* worked; uninstalling gave the 2 GB back. Lifecycle: opening the app on a device with nothing
 of the stack running → samgr starts the supervisor within 1 s → revealed by the
 next beat → first frame ~10–12 s → Android booted ~15–20 s. Backgrounding
 freezes and releases touch; killing the app in the foreground → the lease hides

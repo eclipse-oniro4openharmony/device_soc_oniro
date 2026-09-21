@@ -377,6 +377,7 @@ GrabController* g_grab = nullptr;
  * onForeground / onBackground; the compositor shows+thaws or hides+freezes
  * the container (and moves the touch grab to match) in response. Custom
  * (non-system) events, so neither side needs a permission or a param DAC. */
+constexpr const char* kFrontEndBundle = "org.oniroproject.androidapps";
 constexpr const char* kEventShow = "org.oniroproject.waydroid.SHOW";
 constexpr const char* kEventHide = "org.oniroproject.waydroid.HIDE";
 
@@ -473,6 +474,13 @@ int main(int argc, char** argv)
         skills.AddEvent(kEventShow);
         skills.AddEvent(kEventHide);
         EventFwk::CommonEventSubscribeInfo info(skills);
+        /* SHOW puts a fullscreen, touch-grabbing layer over OHOS, and a custom
+         * common event can be published by any app: only listen to the
+         * front-end.  (CES checks the publisher itself, so `cem publish` from
+         * a shell no longer drives this — use the app or waydroid_session_test.
+         * samgr's on-demand policy can not filter, so another app can still
+         * START the stack; it just can not show it.) */
+        info.SetPublisherBundleName(kFrontEndBundle);
         g_visReceiver = std::make_shared<VisibilityReceiver>(info, &server);
         if (EventFwk::CommonEventManager::SubscribeCommonEvent(g_visReceiver)) {
             HILOG_INFO(LOG_CORE, "W5: subscribed to visibility common events");

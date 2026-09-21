@@ -26,8 +26,10 @@ import window from '@ohos.window';
 import hilog from '@ohos.hilog';
 import commonEventManager from '@ohos.commonEventManager';
 import type { BusinessError } from '@ohos.base';
+import { KEY_STATUS, KEY_SYS_URL, KEY_VEN_URL } from '../model/Provisioner';
 
-const DOMAIN = 0xD002500;
+// An app's hilog domain is 16 bits; anything above is silently dropped.
+const DOMAIN = 0x2500;
 const TAG = 'androidapps.ability';
 // Custom events the compositor subscribes to (see waydroid_compositor_main.cpp).
 const EVENT_SHOW = 'org.oniroproject.waydroid.SHOW';
@@ -38,6 +40,11 @@ const EVENT_HIDE = 'org.oniroproject.waydroid.HIDE';
 // MinimizeAllAppWindows is a silent no-op unless the launcher registered its
 // callback), so the compositor asks us to background ourselves.
 const EVENT_EXIT = 'org.oniroproject.waydroid.EXIT';
+// The supervisor's side of the conversation: this app can read nothing of the
+// stack, so it is told (see waydroid-supervisor.sh).  data is one of
+//   disabled | verifying | starting | running |
+//   needs-images|bad-images <sys-url> <sys-sha256> <ven-url> <ven-sha256>
+const EVENT_STATUS = 'org.oniroproject.waydroid.STATUS';
 // Must stay well under the compositor's lease (kVisibilityLeaseMs, 10 s).
 const SHOW_BEAT_MS = 2000;
 
@@ -54,11 +61,44 @@ function publishEvent(event: string, quiet: boolean = false): void {
 
 export default class EntryAbility extends UIAbility {
   private exitSubscriber?: commonEventManager.CommonEventSubscriber;
+  private statusSubscriber?: commonEventManager.CommonEventSubscriber;
   private showBeat?: number;
 
   onCreate(): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
+    AppStorage.setOrCreate<string>(KEY_STATUS, '');
     this.subscribeExit();
+    this.subscribeStatus();
+  }
+
+  private onStatus(data: string): void {
+    const f = data.trim().split(/\s+/);
+    const state = f[0] ?? '';
+    // AppStorage, not a module variable: the in-tree ets build bundles the
+    // ability and every page separately, so a static shared "in code" exists
+    // once per bundle.  AppStorage is the one thing they really share.
+    if ((state === 'needs-images' || state === 'bad-images') && f.length >= 5) {
+      AppStorage.setOrCreate<string>(KEY_SYS_URL, f[1]);
+      AppStorage.setOrCreate<string>(KEY_VEN_URL, f[3]);
+    }
+    if (AppStorage.get<string>(KEY_STATUS) !== state) {
+      hilog.info(DOMAIN, TAG, 'status: %{public}s', state);
+      AppStorage.setOrCreate<string>(KEY_STATUS, state);
+    }
+  }
+
+  private subscribeStatus(): void {
+    const info: commonEventManager.CommonEventSubscribeInfo = { events: [EVENT_STATUS] };
+    commonEventManager.createSubscriber(info).then((subscriber) => {
+      this.statusSubscriber = subscriber;
+      commonEventManager.subscribe(subscriber, (err, data) => {
+        if (!err && data.event === EVENT_STATUS) {
+          this.onStatus(data.data ?? '');
+        }
+      });
+    }).catch((e: BusinessError) => {
+      hilog.error(DOMAIN, TAG, 'createSubscriber(STATUS) failed: %{public}s', JSON.stringify(e));
+    });
   }
 
   // Subscribe to the compositor's EXIT broadcast (the Vol-Down+Vol-Up chord)
@@ -119,6 +159,10 @@ export default class EntryAbility extends UIAbility {
     if (this.exitSubscriber) {
       commonEventManager.unsubscribe(this.exitSubscriber);
       this.exitSubscriber = undefined;
+    }
+    if (this.statusSubscriber) {
+      commonEventManager.unsubscribe(this.statusSubscriber);
+      this.statusSubscriber = undefined;
     }
   }
 

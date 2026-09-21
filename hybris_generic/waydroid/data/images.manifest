@@ -1,5 +1,20 @@
-# Waydroid image pins (W0, 2026-08-07)
+# Waydroid image pins: <name> <sha256>
+#
+# The two *.zip lines are what gets downloaded (by utils/host/waydroid-images.sh
+# from a host, or by the "Android Apps" front-end on the device); the two *.img
+# lines are what is inside them, and what waydroidd checks before it mounts
+# anything — it refuses an image that is not listed here.  Bump all four
+# together, then run utils/host/waydroid-patches.sh (patches.conf is derived
+# for exactly these builds).
+#
+# base-url is where the zips live: <base-url>/<system|vendor path>/<zip>/download
+base-url https://sourceforge.net/projects/waydroid/files/images
+
 # system: lineage-20.0 (Android 13) VANILLA arm64
 lineage-20.0-20260403-VANILLA-waydroid_arm64-system.zip c4b45fad36bee7c0db8a1d9315a5be0035520c53d3d005a807735ae9b7ee79cf
-# vendor: HALIUM_13 arm64 (no HALIUM_14 published; host is Halium 14 - W0 tests this mismatch)
+system.img e9d0a498105feb5e00895066dee90d738b3961ba334416f26498e357ee966b2e
+
+# vendor: HALIUM_13 arm64 (no HALIUM_14 is published; the host is Halium 14 —
+# that skew is why the gralloc bridge and patches.conf exist)
 lineage-20.0-20260403-HALIUM_13-waydroid_arm64-vendor.zip fc7311d2358aa6fd846d60cfa4b1b2ef8237f805c4a172fd83502cdf6d65dca5
+vendor.img 705205744bd19b2058f56e1f08a974cc5a924aac49ea6e40c5b581bd38c3c90d

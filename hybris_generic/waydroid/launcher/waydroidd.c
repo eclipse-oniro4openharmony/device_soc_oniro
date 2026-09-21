@@ -74,8 +74,12 @@
 
 #define WAYDROID_DIR   "/data/waydroid"
 #define ROOTFS         WAYDROID_DIR "/rootfs"
-#define SYSTEM_IMG     WAYDROID_DIR "/images/system.img"
-#define VENDOR_IMG     WAYDROID_DIR "/images/vendor.img"
+/* Where the two upstream images are.  The default is the root-owned directory
+ * a host pushes to; the supervisor points WAYDROID_IMAGES at the front-end's
+ * own storage when the app downloaded them.  Either way they are only ever
+ * mounted through verify_image(). */
+#define IMAGES_DEFAULT WAYDROID_DIR "/images"
+#define IMAGES_ENV     "WAYDROID_IMAGES"
 #define DATA_IMG       WAYDROID_DIR "/data.img"
 /* Everything that is code or configuration ships in the image; /data holds
  * only the two pristine upstream images, data.img and runtime state.  The
@@ -88,6 +92,12 @@
 #define HOSTHALS_DEFAULT   IMAGE_ETC "/hosthals.xml"
 #define PATCHES_CONF   IMAGE_ETC "/patches.conf"
 #define PATCHES_OUT    WAYDROID_DIR "/run/patches"
+#define MANIFEST_FILE  IMAGE_ETC "/images.manifest"
+#define VERIFIED_DIR   WAYDROID_DIR "/run/verified"
+
+/* `waydroidd verify` exit codes (the supervisor turns them into a STATUS). */
+#define EXIT_IMG_BAD     3
+#define EXIT_IMG_MISSING 4
 #define PID_FILE       WAYDROID_DIR "/waydroidd.pid"
 #define CONTAINER_PID_FILE WAYDROID_DIR "/container.pid"
 
@@ -151,6 +161,9 @@
 #define DHCP_CLIENT_PORT 68
 #define DHCP_MAGIC       0x63825363u
 #define DHCP_LEASE_SECS  86400u
+
+/* Directory holding system.img / vendor.img (see verify_image()). */
+static char g_images_dir[PATH_MAX] = IMAGES_DEFAULT;
 
 static void logmsg(const char *fmt, ...)
 {
@@ -410,7 +423,7 @@ static void apply_patches(void)
                 die("%s: at %#lx expected %#010x, found %#010x — the image "
                     "in %s is not the build patches.conf was derived for "
                     "(bump it together with images.manifest)",
-                    f->name, off, oldw, cur, WAYDROID_DIR "/images");
+                    f->name, off, oldw, cur, g_images_dir);
             memcpy(f->data + off, &neww, 4);
             f->words++;
         } else {
@@ -423,6 +436,248 @@ static void apply_patches(void)
         free(pf[i].data);
         pf[i].data = NULL;
     }
+}
+
+/* ------------------------------------------------------------------------
+ * SHA-256 (FIPS 180-4).  waydroidd is libc-only, and the device's toybox has
+ * no sha256sum; this is the whole dependency.
+ */
+struct sha256 {
+    uint32_t h[8];
+    uint64_t len;
+    uint8_t buf[64];
+    size_t fill;
+};
+
+static const uint32_t sha256_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+#define SHA_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void sha256_block(struct sha256 *s, const uint8_t *p)
+{
+    uint32_t w[64], a, b, c, d, e, f, g, h;
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 |
+               (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = SHA_ROR(w[i - 15], 7) ^ SHA_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = SHA_ROR(w[i - 2], 17) ^ SHA_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3];
+    e = s->h[4]; f = s->h[5]; g = s->h[6]; h = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (SHA_ROR(e, 6) ^ SHA_ROR(e, 11) ^ SHA_ROR(e, 25)) +
+                      ((e & f) ^ (~e & g)) + sha256_k[i] + w[i];
+        uint32_t t2 = (SHA_ROR(a, 2) ^ SHA_ROR(a, 13) ^ SHA_ROR(a, 22)) +
+                      ((a & b) ^ (a & c) ^ (b & c));
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d;
+    s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+
+static void sha256_init(struct sha256 *s)
+{
+    static const uint32_t iv[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+    memcpy(s->h, iv, sizeof iv);
+    s->len = 0;
+    s->fill = 0;
+}
+
+static void sha256_update(struct sha256 *s, const uint8_t *p, size_t n)
+{
+    s->len += n;
+    while (n > 0) {
+        if (s->fill == 0 && n >= 64) {
+            sha256_block(s, p);
+            p += 64; n -= 64;
+            continue;
+        }
+        size_t take = 64 - s->fill;
+        if (take > n) take = n;
+        memcpy(s->buf + s->fill, p, take);
+        s->fill += take; p += take; n -= take;
+        if (s->fill == 64) {
+            sha256_block(s, s->buf);
+            s->fill = 0;
+        }
+    }
+}
+
+/* out: 64 hex chars + NUL */
+static void sha256_hex(struct sha256 *s, char out[65])
+{
+    uint64_t bits = s->len * 8;
+    uint8_t pad[72] = { 0x80 };
+    size_t padlen = (s->fill < 56 ? 56 : 120) - s->fill;
+    uint8_t lenb[8];
+    for (int i = 0; i < 8; i++)
+        lenb[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha256_update(s, pad, padlen);
+    sha256_update(s, lenb, 8);
+    for (int i = 0; i < 8; i++)
+        snprintf(out + 8 * i, 9, "%08x", s->h[i]);
+}
+
+/* ------------------------------------------------------------------------
+ * Image verification.
+ *
+ * The container's init runs as real root, so what gets mounted as its rootfs
+ * is a trust decision — and since the front-end may have downloaded the images
+ * into ITS storage, the files can belong to an unprivileged app.  An image is
+ * therefore only ever used through the fd this returns:
+ *
+ *   1. open it once, O_RDONLY|O_NOFOLLOW; everything below goes through the fd,
+ *      so swapping the directory entry afterwards changes nothing;
+ *   2. make it root-owned and 0444 — no NEW writer can appear;
+ *   3. take a read lease: the kernel refuses while ANY open-for-write file
+ *      (or writable shared mapping) exists, which is the only way to know
+ *      that no writer from before step 2 survives;
+ *   4. sha256 it against images.manifest;
+ *   5. remember (dev, ino, size, mtime, sha) under run/verified, root-owned, so
+ *      2 GB are hashed once and not on every start.  A replaced file is a new
+ *      inode and misses the stamp; a stamp only counts for a file that is
+ *      still root-owned and unwritable.
+ *
+ * The loop device is then attached from that same fd (loop_attach()).
+ */
+/* Set by `waydroidd verify`: report through the exit code instead of die(). */
+static int g_verify_cmd;
+
+static void img_fail(int code, const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (g_verify_cmd) {
+        logmsg("verify: %s", buf);
+        _exit(code);
+    }
+    die("%s", buf);
+}
+
+static int manifest_pin(const char *name, char pin[65])
+{
+    FILE *m = fopen(MANIFEST_FILE, "re");
+    if (!m) return -1;
+    char line[512], n[256], h[128];
+    int found = -1;
+    while (fgets(line, sizeof line, m)) {
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+        if (sscanf(line, "%255s %127s", n, h) != 2) continue;
+        if (strcmp(n, name) == 0 && strlen(h) == 64) {
+            memcpy(pin, h, 65);
+            found = 0;
+            break;
+        }
+    }
+    fclose(m);
+    return found;
+}
+
+static int stamp_matches(const char *name, const struct stat *st,
+                         const char *pin)
+{
+    char path[PATH_MAX], want[256], got[256];
+    snprintf(path, sizeof path, VERIFIED_DIR "/%s", name);
+    snprintf(want, sizeof want, "%llu %llu %lld %lld %ld %s",
+             (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
+             (long long)st->st_size, (long long)st->st_mtim.tv_sec,
+             (long)st->st_mtim.tv_nsec, pin);
+    FILE *f = fopen(path, "re");
+    if (!f) return 0;
+    int ok = fgets(got, sizeof got, f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    got[strcspn(got, "\n")] = '\0';
+    return strcmp(got, want) == 0;
+}
+
+static void stamp_write(const char *name, const struct stat *st,
+                        const char *pin)
+{
+    char path[PATH_MAX];
+    if (mkdir_p(VERIFIED_DIR, 0700) < 0) return;
+    snprintf(path, sizeof path, VERIFIED_DIR "/%s", name);
+    FILE *f = fopen(path, "we");
+    if (!f) return;
+    fprintf(f, "%llu %llu %lld %lld %ld %s\n",
+            (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
+            (long long)st->st_size, (long long)st->st_mtim.tv_sec,
+            (long)st->st_mtim.tv_nsec, pin);
+    fclose(f);
+}
+
+/* Returns an O_RDONLY fd of a verified <images dir>/<name>; does not return
+ * otherwise.  *path_out (PATH_MAX) receives the path, for the loop label. */
+static int verify_image(const char *name, char *path_out)
+{
+    char pin[65];
+    snprintf(path_out, PATH_MAX, "%s/%s", g_images_dir, name);
+    if (manifest_pin(name, pin) < 0)
+        img_fail(EXIT_IMG_BAD, "no sha256 for %s in %s — refusing to mount "
+                 "an unpinned image", name, MANIFEST_FILE);
+
+    int fd = open(path_out, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        img_fail(errno == ENOENT ? EXIT_IMG_MISSING : EXIT_IMG_BAD,
+                 "%s: %s", path_out, strerror(errno));
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode))
+        img_fail(EXIT_IMG_BAD, "%s is not a regular file", path_out);
+
+    if (st.st_uid == 0 && !(st.st_mode & 0222) && stamp_matches(name, &st, pin))
+        return fd;
+
+    if (fchown(fd, 0, 0) < 0 || fchmod(fd, 0444) < 0)
+        img_fail(EXIT_IMG_BAD, "%s: can not take ownership: %s", path_out,
+                 strerror(errno));
+    if (fcntl(fd, F_SETLEASE, F_RDLCK) < 0)
+        img_fail(EXIT_IMG_BAD, "%s is still open for writing (%s) — refusing",
+                 path_out, strerror(errno));
+    (void)fcntl(fd, F_SETLEASE, F_UNLCK);
+
+    logmsg("verifying %s (%lld MB) against %s", path_out,
+           (long long)(st.st_size >> 20), MANIFEST_FILE);
+    static uint8_t buf[1 << 20];
+    struct sha256 sh;
+    char hex[65];
+    sha256_init(&sh);
+    for (;;) {
+        ssize_t r = read(fd, buf, sizeof buf);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0)
+            img_fail(EXIT_IMG_BAD, "%s: read: %s", path_out, strerror(errno));
+        if (r == 0) break;
+        sha256_update(&sh, buf, (size_t)r);
+    }
+    sha256_hex(&sh, hex);
+    if (strcmp(hex, pin) != 0)
+        img_fail(EXIT_IMG_BAD, "%s: sha256 %s, expected %s", path_out, hex, pin);
+    if (lseek(fd, 0, SEEK_SET) < 0 || fstat(fd, &st) < 0)
+        img_fail(EXIT_IMG_BAD, "%s: %s", path_out, strerror(errno));
+    stamp_write(name, &st, pin);
+    logmsg("%s verified", name);
+    return fd;
 }
 
 /* ------------------------------------------------------------------------
@@ -448,7 +703,35 @@ static int loop_devno(int index, dev_t *out)
     return 0;
 }
 
-static int loop_attach(const char *img, int readonly, dev_t *devno)
+/* Loop devices go away with the generation: every one we use is marked
+ * LO_FLAGS_AUTOCLEAR and kept open here for as long as this process lives, so
+ * it detaches by itself once we are gone and the container's mounts with us
+ * — also after a kill -9, which is how the supervisor ends a generation.
+ * That matters now that the images can live in the front-end's storage: an
+ * attached loop pins a deleted file, so without this uninstalling the app
+ * would not give its 2 GB back until the next reboot.  (O_CLOEXEC: the
+ * container's init does not inherit them.) */
+static int g_loop_hold[8];
+static int g_loop_held;
+
+static void loop_hold_autoclear(int dfd)
+{
+    struct loop_info64 li;
+    if (ioctl(dfd, LOOP_GET_STATUS64, &li) == 0 &&
+        !(li.lo_flags & LO_FLAGS_AUTOCLEAR)) {
+        li.lo_flags |= LO_FLAGS_AUTOCLEAR;
+        if (ioctl(dfd, LOOP_SET_STATUS64, &li) < 0)
+            logmsg("loop autoclear: %s (it will outlive us)", strerror(errno));
+    }
+    if (g_loop_held < (int)(sizeof g_loop_hold / sizeof g_loop_hold[0]))
+        g_loop_hold[g_loop_held++] = dfd;
+    else
+        close(dfd);
+}
+
+/* vfd >= 0: attach that (verified) fd instead of opening img again; img is
+ * then only the label and the key for reusing a previous attachment. */
+static int loop_attach(const char *img, int vfd, int readonly, dev_t *devno)
 {
     DIR *d = opendir("/sys/block");
     if (d) {
@@ -469,7 +752,13 @@ static int loop_attach(const char *img, int readonly, dev_t *devno)
             if (strcmp(val, img) == 0) {
                 int index = atoi(e->d_name + 4);
                 closedir(d);
-                return loop_devno(index, devno) == 0 ? index : -1;
+                if (loop_devno(index, devno) < 0) return -1;
+                char rdev[64];
+                snprintf(rdev, sizeof rdev, "/dev/loop%d", index);
+                int rfd = open(rdev, O_RDWR | O_CLOEXEC);
+                if (rfd >= 0)
+                    loop_hold_autoclear(rfd);
+                return index;
             }
         }
         closedir(d);
@@ -491,7 +780,8 @@ static int loop_attach(const char *img, int readonly, dev_t *devno)
         if (dfd < 0) return -1;
     }
 
-    int ffd = open(img, (readonly ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+    int ffd = vfd >= 0 ? dup(vfd)
+                       : open(img, (readonly ? O_RDONLY : O_RDWR) | O_CLOEXEC);
     if (ffd < 0) { close(dfd); return -1; }
     int rc = ioctl(dfd, LOOP_SET_FD, ffd);
     if (rc == 0) {
@@ -499,11 +789,16 @@ static int loop_attach(const char *img, int readonly, dev_t *devno)
         memset(&li, 0, sizeof li);
         snprintf((char *)li.lo_file_name, sizeof li.lo_file_name, "%s", img);
         if (readonly) li.lo_flags |= LO_FLAGS_READ_ONLY;
+        li.lo_flags |= LO_FLAGS_AUTOCLEAR;
         (void)ioctl(dfd, LOOP_SET_STATUS64, &li);
     }
     close(ffd);
-    close(dfd);
-    return rc == 0 ? index : -1;
+    if (rc != 0) {
+        close(dfd);
+        return -1;
+    }
+    loop_hold_autoclear(dfd);
+    return index;
 }
 
 /* ------------------------------------------------------------------------
@@ -1636,6 +1931,24 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "stop") == 0)
         return cmd_stop();
 
+    const char *env_images = getenv(IMAGES_ENV);
+    if (env_images && env_images[0] == '/')
+        snprintf(g_images_dir, sizeof g_images_dir, "%s", env_images);
+
+    /* `waydroidd verify [DIR]` — check (and adopt) the images without
+     * starting anything: exit 0, EXIT_IMG_BAD or EXIT_IMG_MISSING. */
+    if (argc > 1 && strcmp(argv[1], "verify") == 0) {
+        if (geteuid() != 0)
+            die("must run as root");
+        if (argc > 2 && argv[2][0] == '/')
+            snprintf(g_images_dir, sizeof g_images_dir, "%s", argv[2]);
+        g_verify_cmd = 1;
+        char p[PATH_MAX];
+        close(verify_image("system.img", p));
+        close(verify_image("vendor.img", p));
+        return 0;
+    }
+
     if (geteuid() != 0)
         die("must run as root");
 
@@ -1644,10 +1957,9 @@ int main(int argc, char **argv)
         die("already running (pid %ld) — `waydroidd stop` first", (long)old);
 
     struct stat st;
-    if (stat(SYSTEM_IMG, &st) < 0)
-        die("%s missing", SYSTEM_IMG);
-    if (stat(VENDOR_IMG, &st) < 0)
-        die("%s missing", VENDOR_IMG);
+    char sys_path[PATH_MAX], ven_path[PATH_MAX];
+    int sys_fd = verify_image("system.img", sys_path);
+    int ven_fd = verify_image("vendor.img", ven_path);
     if (stat(pick_file(PROP_OVERRIDE, PROP_DEFAULT), &st) < 0)
         die("%s missing", PROP_DEFAULT);
 
@@ -1663,11 +1975,13 @@ int main(int argc, char **argv)
                strerror(errno));
     wait_for_compositor();
 
-    g_sys_loop = loop_attach(SYSTEM_IMG, 1, &g_sys_dev);
+    g_sys_loop = loop_attach(sys_path, sys_fd, 1, &g_sys_dev);
     if (g_sys_loop < 0) die("loop attach system.img: %s", strerror(errno));
-    g_ven_loop = loop_attach(VENDOR_IMG, 1, &g_ven_dev);
+    g_ven_loop = loop_attach(ven_path, ven_fd, 1, &g_ven_dev);
     if (g_ven_loop < 0) die("loop attach vendor.img: %s", strerror(errno));
-    g_dat_loop = loop_attach(DATA_IMG, 0, &g_dat_dev);
+    g_dat_loop = loop_attach(DATA_IMG, -1, 0, &g_dat_dev);
+    close(sys_fd);
+    close(ven_fd);
     if (g_dat_loop < 0) die("loop attach data.img: %s", strerror(errno));
     logmsg("loops: system=%d vendor=%d data=%d",
            g_sys_loop, g_ven_loop, g_dat_loop);
