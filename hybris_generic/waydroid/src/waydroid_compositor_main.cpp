@@ -301,7 +301,7 @@ void RegisterExitChord(Server* server)
             /* 1) Immediate: release grab + hide + freeze (reuses HIDE path).
              * SubscribeKeyEvent's callback runs on an MMI thread; ApplyVisibility
              * touches params/RS but needs no special token here. */
-            WaydroidSessionStub::ApplyVisibility(server, false);
+            WaydroidSessionStub::HideAndHold(server, 3000);
             /* 2) Tell the launcher to background itself → OHOS shows home.
              * See kEventExit above for why we don't go-home from here. */
             AAFwk::Want want;
@@ -485,9 +485,12 @@ int main(int argc, char** argv)
      * (the hwc's own 5 s retry loop would absorb the race, but the
      * handshake keeps the logs clean — same shape as androidd's
      * android.composer.ready). */
+    SetParameter("waydroid.compositor.frames", "0");
     SetParameter("waydroid.compositor.ready", "1");
 
     HILOG_INFO(LOG_CORE, "entering event loop");
+    /* Visibility is a lease the front-end renews (waydroid_session.h). */
+    server.SetTick([&server]() { WaydroidSessionStub::CheckVisibilityLease(&server); });
     server.Run();
 
     if (g_visReceiver != nullptr) {

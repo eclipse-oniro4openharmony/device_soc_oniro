@@ -1,0 +1,19 @@
+{
+    "process": "waydroid_supervisor",
+    "systemability": [
+        {
+            "name": 9601,
+            "libpath": "waydroid_compositor",
+            "run-on-create": false,
+            "distributed": false,
+            "dump_level": 1,
+            "start-on-demand": {
+                "commonevent": [
+                    {
+                        "name": "org.oniroproject.waydroid.SHOW"
+                    }
+                ]
+            }
+        }
+    ]
+}

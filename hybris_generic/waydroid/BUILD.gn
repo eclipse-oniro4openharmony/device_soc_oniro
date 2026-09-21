@@ -16,10 +16,23 @@
 # waydroid_compositor — Wayland server + zero-copy gralloc bridge for the
 # Android app container.  Plan: docs/hybris_generic/android_app_compat_plan.md
 #
-# Ships on every hybris_generic image but starts only when
-# persist.waydroid.enabled is set (plan D10), so X23 builds are unaffected.
+# The whole feature lives in this directory and is built only when the
+# product sets hybris_generic_soc_feature_waydroid (waydroid.gni); the parent
+# BUILD.gn does not even reference this file otherwise.  On an image that has
+# it, nothing runs until persist.waydroid.enabled=1 (plan D10), so the X23 —
+# same image, param never set — is unaffected.
+#
+# Split: every piece of code and configuration is installed by the targets
+# below; /data/waydroid only ever holds the two pristine upstream images,
+# data.img and runtime state.
 
+import("//build/config/clang/clang.gni")
 import("//build/ohos.gni")
+import("//build/ohos/sa_profile/sa_profile.gni")
+import("waydroid.gni")
+
+assert(hybris_generic_soc_feature_waydroid,
+       "waydroid/ is built only with hybris_generic_soc_feature_waydroid")
 
 libhybris_root = "//third_party/libhybris"
 
@@ -77,8 +90,8 @@ ohos_executable("waydroid_compositor") {
     "graphic_surface:surface",
     "graphic_surface:sync_fence",
     "hilog:libhilog",
-    "init:libbegetutil",
     "init:libbeget_proxy",
+    "init:libbegetutil",
     "input:libmmi-client",
     "ipc:ipc_core",
     "libhybris:libhybris-platformcommon",
@@ -129,6 +142,17 @@ ohos_prebuilt_etc("waydroid_compositor_cfg") {
   subsystem_name = "oniro_soc_products"
 }
 
+# Start on demand.  The profile is all samgr needs to start the init service
+# named by "process" when the front-end publishes its SHOW common event: no
+# sa_main, no library ("libpath" is only there because the parser insists) —
+# the supervisor launches waydroid_compositor, which registers SA 9601 itself.
+# It is what lets an ordinary ArkTS app, with no native code and no permission
+# to touch init, bring the stack up.
+ohos_sa_profile("waydroid_sa_profile") {
+  sources = [ "sa_profile/9601.json" ]
+  part_name = "hybris_generic_soc"
+}
+
 # Auto-start + crash-recovery supervisor.  The init job above starts it on
 # persist.waydroid.enabled=1; it launches a fresh compositor + container and
 # relaunches the whole generation whenever the container dies.  Installed to
@@ -137,6 +161,129 @@ ohos_prebuilt_etc("waydroid_compositor_cfg") {
 ohos_prebuilt_etc("waydroid_supervisor_sh") {
   source = "cfg/waydroid-supervisor.sh"
   relative_install_dir = "waydroid"
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ── container launcher ─────────────────────────────────────────────────────
+# Pure C, libc only.  In /system/bin rather than pushed to /data: it runs as
+# root, so it must not live on a writable partition.
+ohos_executable("waydroidd") {
+  sources = [ "launcher/waydroidd.c" ]
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Wno-unused-parameter",
+    "-O2",
+  ]
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# loopback -> container-veth TCP relay for the adb/scrcpy rig (W4).
+ohos_executable("waydroid_tcprelay") {
+  sources = [ "launcher/tcprelay.c" ]
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-O2",
+  ]
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ── /system/etc/waydroid: configuration the launcher reads ─────────────────
+waydroid_etc_files = [
+  "patches.conf",  # the two binary patches, applied per start by waydroidd
+  "waydroid.prop",  # container properties (a /data copy overrides it)
+  "hosthals.xml",  # trimmed host-HAL passthrough list (ditto)
+  "images.manifest",  # sha256 pins of the upstream images, for provisioning
+]
+waydroid_etc_targets = []
+foreach(f, waydroid_etc_files) {
+  _t = "waydroid_etc_" + string_replace(f, ".", "_")
+  ohos_prebuilt_etc(_t) {
+    source = "data/$f"
+    output = f
+    relative_install_dir = "waydroid"
+    part_name = "hybris_generic_soc"
+    subsystem_name = "oniro_soc_products"
+  }
+  waydroid_etc_targets += [ ":$_t" ]
+}
+
+# ── /system/etc/waydroid/graft: what becomes the container's /odm ──────────
+# The supervisor copies this tree to /data/waydroid/graft before every
+# generation and adds the host's AIDL graphics libs next to it.  [ source,
+# installed name, directory below waydroid/graft ].
+waydroid_graft_files = [
+  [
+    "gralloc_bridge/start-allocator.sh",
+    "start-allocator.sh",
+    "",
+  ],
+  [
+    "net/waydroid-net.sh",
+    "waydroid-net.sh",
+    "",
+  ],
+  [
+    "gralloc_bridge/waydroid-gralloc.rc",
+    "waydroid-gralloc.rc",
+    "/etc/init",
+  ],
+  [
+    "net/waydroid-net.rc",
+    "waydroid-net.rc",
+    "/etc/init",
+  ],
+
+  # The container's VINTF reads ODM manifest fragments from this exact name.
+  [
+    "gralloc_bridge/graphics-allocator-aidl.xml",
+    "waydroid-allocator-aidl.xml",
+    "/etc/vintf/manifest",
+  ],
+]
+waydroid_graft_targets = []
+foreach(g, waydroid_graft_files) {
+  _t = "waydroid_graft_" +
+       string_replace(string_replace(g[1], ".", "_"), "-", "_")
+  ohos_prebuilt_etc(_t) {
+    source = g[0]
+    output = "graft" + g[2] + "/" + g[1]
+    relative_install_dir = "waydroid/graft" + g[2]
+    part_name = "hybris_generic_soc"
+    subsystem_name = "oniro_soc_products"
+  }
+  waydroid_graft_targets += [ ":$_t" ]
+}
+
+# The one-symbol libbinder_ndk trampoline the A14 allocator needs inside the
+# A13 container.  An *Android* object, so not an ohos_shared_library.
+action("waydroid_binderflags_shim_build") {
+  script = "gralloc_bridge/build_android_shim.py"
+  sources = [ "gralloc_bridge/binderflags_shim.S" ]
+  outputs = [ "$target_gen_dir/graft/libbinderflags_shim.so" ]
+  args = [
+    "--clang-dir",
+    rebase_path("${default_clang_base_path}", root_build_dir),
+    "--source",
+    rebase_path("gralloc_bridge/binderflags_shim.S", root_build_dir),
+    "--soname",
+    "libbinderflags_shim.so",
+    "--output",
+    rebase_path("$target_gen_dir/graft/libbinderflags_shim.so", root_build_dir),
+  ]
+}
+
+ohos_prebuilt_etc("waydroid_graft_binderflags_shim") {
+  source = "$target_gen_dir/graft/libbinderflags_shim.so"
+  output = "graft/libbinderflags_shim.so"
+  deps = [ ":waydroid_binderflags_shim_build" ]
+  relative_install_dir = "waydroid/graft"
   part_name = "hybris_generic_soc"
   subsystem_name = "oniro_soc_products"
 }
@@ -170,9 +317,13 @@ group("waydroid_group") {
   deps = [
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
+    ":waydroid_graft_binderflags_shim",
+    ":waydroid_sa_profile",
     ":waydroid_session_test",
     ":waydroid_supervisor_sh",
+    ":waydroid_tcprelay",
     ":waydroid_wlegl_harness",
+    ":waydroidd",
 
     # The "Android Apps" front-end HAP (W5). Pure-ArkUI launcher: on
     # fore/background it publishes SHOW/HIDE common events; the compositor
@@ -181,4 +332,6 @@ group("waydroid_group") {
     # image-partition barriers no longer apply. See app/README.md.
     "app:android_apps_hap",
   ]
+  deps += waydroid_etc_targets
+  deps += waydroid_graft_targets
 }

@@ -85,6 +85,20 @@ public:
      * !visible: freeze + hide the node + release touch to OHOS. */
     static void ApplyVisibility(Server* server, bool visible);
 
+    /* Visibility is a LEASE, not a latch.  While it is in the foreground the
+     * front-end republishes SHOW every couple of seconds; a SHOW when already
+     * visible only renews the lease.  If the lease runs out — the front-end
+     * crashed or was killed and so never said HIDE — hide, freeze and give
+     * touch back, instead of leaving a fullscreen touch-grabbing layer over
+     * OHOS until reboot.  Call from the event loop (Server::SetTick). */
+    static void CheckVisibilityLease(Server* server);
+
+    /* Hide now and ignore SHOW for holdMs.  For the exit chord: the front-end
+     * is still in the foreground — and still beating — for the moment it
+     * takes it to receive EXIT and background itself; without the hold one
+     * of those beats would flash the container back on. */
+    static void HideAndHold(Server* server, int64_t holdMs);
+
 private:
     Server* server_;
 };

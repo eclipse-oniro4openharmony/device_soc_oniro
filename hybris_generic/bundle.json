@@ -9,7 +9,7 @@
       "name": "hybris_generic_soc",
       "subsystem": "oniro_soc_products",
       "syscap": [],
-      "features": [],
+      "features": [ "hybris_generic_soc_feature_waydroid" ],
       "deps": {
         "components": [
           "hilog",

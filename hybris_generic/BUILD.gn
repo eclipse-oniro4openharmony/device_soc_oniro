@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import("//build/ohos.gni")
+import("waydroid/waydroid.gni")
 
 group("hybris_generic_soc_group") {
   deps = [
     "hardware/audio:audio_primary_model",
     "hardware/camera:camera_vdi_model",
-    "hardware/display:display_composer_model",
     "hardware/display:display_buffer_model",
+    "hardware/display:display_composer_model",
     "hardware/gpu:hybris-gpu-libs",
     "hardware/light:light_vdi_model",
     "hardware/ril:ril_hybris_group",
@@ -28,6 +29,10 @@ group("hybris_generic_soc_group") {
     "hardware/vibrator:vibrator_vdi_model",
     "hardware/wlan:libhdi_wlan_impl",
     "hardware/wlan:wifi_hal_default",
-    "waydroid:waydroid_group",
   ]
+
+  # Android app support — optional, off unless the product asks for it.
+  if (hybris_generic_soc_feature_waydroid) {
+    deps += [ "waydroid:waydroid_group" ]
+  }
 }

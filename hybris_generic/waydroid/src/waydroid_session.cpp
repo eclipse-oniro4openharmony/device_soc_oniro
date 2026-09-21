@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include <atomic>
+#include <chrono>
 #include <hilog/log.h>
 #include <parameter.h>
 #include <if_system_ability_manager.h>
@@ -42,6 +44,20 @@ namespace {
 
 constexpr const char* kContainerPidFile = "/data/waydroid/container.pid";
 constexpr const char* kFreezeCgroup = "/sys/fs/cgroup/waydroid";
+
+/* Visibility lease (see CheckVisibilityLease).  The front-end's heartbeat is
+ * 2 s; five missed beats is a dead front-end, not a busy one. */
+constexpr int64_t kVisibilityLeaseMs = 10 * 1000;
+std::mutex g_applyMutex;
+bool g_visible = false;             /* guarded by g_applyMutex */
+std::atomic<int64_t> g_lastShowMs { 0 };
+std::atomic<int64_t> g_holdHiddenUntilMs { 0 };
+
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 int WriteFile(const std::string& path, const std::string& value)
 {
@@ -225,9 +241,16 @@ void WaydroidSessionStub::ApplyVisibility(Server* server, bool visible)
      * freeze and grab writes of two calls interleave and can strand grab=1
      * over a frozen container — touch is then stolen from OHOS and dropped
      * by the frozen container (total touch loss). */
-    static std::mutex applyMutex;
-    std::lock_guard<std::mutex> lock(applyMutex);
+    std::lock_guard<std::mutex> lock(g_applyMutex);
     if (visible) {
+        if (NowMs() < g_holdHiddenUntilMs.load()) {
+            return;     /* exit chord in progress (HideAndHold) */
+        }
+        g_lastShowMs.store(NowMs());
+        if (g_visible) {
+            return;     /* heartbeat: lease renewed, nothing to redo */
+        }
+        g_visible = true;
         /* Make the node visible (it keeps its last frame, so the container
          * reappears instantly) then thaw. If the node was never attached
          * — e.g. after an app-producer path dropped it — recreate it. */
@@ -250,6 +273,7 @@ void WaydroidSessionStub::ApplyVisibility(Server* server, bool visible)
         SetParameter("waydroid.input.grab", "1");
         HILOG_INFO(LOG_CORE, "visible: output shown + container thawed + touch grabbed");
     } else {
+        g_visible = false;
         /* Freeze (stop producing), hide the node WITHOUT destroying it (so
          * its last frame survives for the next show — a fresh node would be
          * black until the container redraws), release touch to OHOS. */
@@ -258,6 +282,25 @@ void WaydroidSessionStub::ApplyVisibility(Server* server, bool visible)
         SetParameter("waydroid.input.grab", "0");
         HILOG_INFO(LOG_CORE, "hidden: container frozen + output hidden + touch released");
     }
+}
+
+void WaydroidSessionStub::HideAndHold(Server* server, int64_t holdMs)
+{
+    g_holdHiddenUntilMs.store(NowMs() + holdMs);
+    ApplyVisibility(server, false);
+}
+
+void WaydroidSessionStub::CheckVisibilityLease(Server* server)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_applyMutex);
+        if (!g_visible || NowMs() - g_lastShowMs.load() < kVisibilityLeaseMs) {
+            return;
+        }
+    }
+    HILOG_WARN(LOG_CORE, "no SHOW heartbeat for %{public}lld ms — front-end gone; hiding",
+               static_cast<long long>(kVisibilityLeaseMs));
+    ApplyVisibility(server, false);
 }
 
 bool WaydroidSessionStub::Publish(Server* server)

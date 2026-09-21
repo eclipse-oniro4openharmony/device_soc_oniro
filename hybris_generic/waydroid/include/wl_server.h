@@ -24,6 +24,7 @@
 #define WAYDROID_WL_SERVER_H
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -74,6 +75,11 @@ public:
      * clients. */
     void Run();
     void Stop();
+
+    /* Called on the event-loop thread once per loop turn (at least every
+     * 100 ms).  For cheap periodic checks that must not need a thread of
+     * their own — the visibility lease. */
+    void SetTick(std::function<void()> tick) { tick_ = std::move(tick); }
 
     /*
      * In-flight bookkeeping for the deferred wl_buffer.release.
@@ -151,6 +157,7 @@ private:
     struct wl_resource* inputSurface_ = nullptr;
 
     bool running_ = false;
+    std::function<void()> tick_;
 };
 
 } // namespace Waydroid

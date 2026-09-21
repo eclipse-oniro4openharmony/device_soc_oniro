@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <hilog/log.h>
+#include <parameter.h>
 
 #include "wayland-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
@@ -150,6 +151,18 @@ void SurfaceCommit(struct wl_client*, struct wl_resource* resource)
             sptr<SurfaceBuffer> sb = server->Importer().Import(
                 surf->current, rwb->handle, desc);
             if (sb != nullptr) {
+                /* Liveness for the supervisor: the container's composer got
+                 * through its Wayland handshake and SurfaceFlinger is
+                 * presenting.  A generation that never gets here is wedged
+                 * (seen: the composer stuck in window::create's roundtrip,
+                 * SurfaceFlinger waiting on IComposer forever, no tombstone)
+                 * and is rebuilt. */
+                static bool firstFrame = true;
+                if (firstFrame) {
+                    firstFrame = false;
+                    SetParameter("waydroid.compositor.frames", "1");
+                    HILOG_INFO(LOG_CORE, "first frame from the container");
+                }
                 /* The client owns the buffer until we send release, and
                  * RS is not done with it until its release listener
                  * fires — so record the mapping and let OnBufferReleased
@@ -924,6 +937,9 @@ void Server::Run()
     while (running_) {
         wl_display_flush_clients(display_);
         wl_event_loop_dispatch(loop, 100);
+        if (tick_) {
+            tick_();
+        }
     }
 }
 

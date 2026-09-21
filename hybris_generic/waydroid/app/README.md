@@ -38,23 +38,41 @@ SetOutputSurface/InjectTouch/SetForeground contract remains (proven via
 ## Data flow
 
 ```
-EntryAbility.onForeground → commonEventManager.publish('org.oniroproject.waydroid.SHOW')
-EntryAbility.onBackground → commonEventManager.publish('org.oniroproject.waydroid.HIDE')
+EntryAbility.onForeground → publish('org.oniroproject.waydroid.SHOW'), then again every 2 s
+EntryAbility.onBackground → stop the beat, publish('org.oniroproject.waydroid.HIDE')
                                        │  (custom CommonEvent — no permission needed)
-                                       ▼
-compositor: VisibilityReceiver (CommonEventSubscriber)        [waydroid_compositor_main.cpp]
-  → WaydroidSessionStub::ApplyVisibility(server, visible)     [waydroid_session.cpp]
-      visible : Output().SetNodeVisible(true)  + FreezeContainer(false) + grab=1
-      hidden  : FreezeContainer(true) + Output().SetNodeVisible(false)  + grab=0
+              ┌────────────────────────┴───────────────────────────┐
+              ▼ stack not running                                  ▼ stack running
+samgr: on-demand policy of SA 9601             compositor: VisibilityReceiver
+  (sa_profile/9601.json) → init starts           → WaydroidSessionStub::ApplyVisibility
+  waydroid_supervisor "9601#…" → compositor        visible : SetNodeVisible(true) + thaw + grab=1
+  + container; the NEXT beat reveals them          hidden  : freeze + SetNodeVisible(false) + grab=0
 ```
 
-Manual test / drive without the app: `cem publish -e org.oniroproject.waydroid.HIDE`
-(or `.SHOW`). ApplyVisibility is mutex-serialized (concurrent
-visibility flips otherwise stranded grab=1 over a frozen container → total
-touch loss). Hide/show toggles node *visibility* rather than destroying it,
-so the container's last frame is retained (a fresh node is black until the
-container redraws). `entry/src/main/cpp/napi_init.cpp` is retained for the
-future XComponent path but is no longer built.
+SHOW is a **heartbeat** and visibility is a **lease** (10 s,
+`kVisibilityLeaseMs`). A SHOW when already visible only renews the lease, so
+the beat is free. That single decision gives:
+
+* **start on demand** — nothing of the stack runs until this app is opened
+  (unless `persist.waydroid.autostart=1`); the app needs no native code and no
+  permission to make that happen;
+* **recovery** — a generation rebuilt by the supervisor comes up hidden and is
+  revealed by the next beat, with no guessing on the supervisor's side;
+* **safety** — if this app dies without saying HIDE, the compositor hides,
+  freezes and releases touch when the lease runs out, instead of leaving a
+  fullscreen touch-grabbing layer over OHOS until reboot.
+
+The exit chord (Vol-Down + Vol-Up) hides immediately and ignores SHOW for 3 s
+(`HideAndHold`), the time this app needs to receive EXIT and background itself.
+
+ApplyVisibility is mutex-serialized (concurrent visibility flips otherwise
+stranded grab=1 over a frozen container → total touch loss). Hide/show toggles
+node *visibility* rather than destroying it, so the container's last frame is
+retained (a fresh node is black until the container redraws). To drive the
+compositor without the app: `cem publish -e org.oniroproject.waydroid.SHOW`
+(repeat it within 10 s, or the lease hides it again) / `.HIDE`.
+`entry/src/main/cpp/napi_init.cpp` is retained for the future XComponent path
+but is no longer built.
 
 ## Build
 
@@ -92,115 +110,25 @@ The in-tree `ohos_hap` default app cert (`OpenHarmonyApplication.pem`) is
 the same OpenHarmony test CA as the profile cert, so the app signature
 matches the profile.
 
-## Install & run (side-load; container must be up)
+## Install & run
+
+Preinstalled, as a **removable** app, on any image built with
+`hybris_generic_soc_feature_waydroid` (`vendor/oniro/hybris_generic/
+preinstall-config`). BMS only rescans that list on a fresh `/data`, so after
+flashing over an existing one update it by hand — the app and the compositor
+must come from the same image, they share the heartbeat protocol:
 
 ```sh
-hdc file send AndroidApps.hap /data/local/tmp/
-hdc shell "bm install -p /data/local/tmp/AndroidApps.hap"
+hdc shell "bm install -r -p /system/app/org.oniroproject.androidapps/AndroidApps.hap"
 hdc shell "aa start -a EntryAbility -b org.oniroproject.androidapps"
-# fore/background the app to show+thaw / hide+freeze; touch grab follows.
 ```
 
-The `waydroid.app.visible` default + its app-writable DAC ship in the
-image (`vendor/oniro/hybris_generic/etc/param/hybris_native.para{,.dac}`),
-so a full build + flash is needed for the app's `setSync` to be permitted;
-a side-loaded HAP on an image without the DAC launches but cannot flip the
-param (the compositor side is still drivable by hand:
-`param set waydroid.app.visible 0|1`).
+`utils/host/waydroid-deploy.sh` (board repo) does both.
 
 ## Status
 
-**Pure-ArkUI launcher: builds, signs (system app), installs, and launches
-cleanly — no native-module load error** (the ENOENT below is gone because
-the HAP bundles no `.so`). The compositor's `ApplyVisibility`
-(show/hide + freeze/thaw + grab) is verified by flipping the param by hand
-(`cgroup.freeze` tracks it). End-to-end (app lifecycle → param → compositor)
-needs the image flashed so the app's `setSync` passes the param DAC.
-
-### Historical: why the XComponent design was dropped (the native-module blocker)
-
-The earlier design's bundled native module never ran —
-`dlopen_impl load library header failed for libandroidapps.so`,
-`key:default/androidapps ... No such file or directory`. Two stacked
-app-sandbox barriers:
-
-1. **BMS did not associate the native lib with the entry module.**
-   `bm dump` shows the *application* `nativeLibraryPath: libs/arm64`
-   (cpuAbi arm64-v8a) but the *entry module* `nativeLibraryPath: ""`,
-   `cpuAbi: ""`. So the napi module loader
-   (`native_module_manager.cpp` GetNativeModulePath) has no app-lib path
-   for the module, falls through to a bare `libandroidapps.so`, and gets
-   ENOENT — it never tries the installed `.../libs/arm64/
-   libandroidapps.z.so`. An in-tree `ohos_hap` + `shared_libraries`
-   packs the `.so` under `libs/arm64-v8a/` but doesn't produce the
-   per-module native-lib metadata hvigor does (likely a missing
-   `pack.info` abi entry). This is the immediate blocker.
-2. **Linker namespace.** Even once (1) is fixed, the module's NEEDED
-   inner libs (`libsamgr_proxy`, `libsurface`, `libipc_single`,
-   `libutils`) are not in an app's `ndk`/`moduleNs_default` namespace
-   allow-list, so `dlopen` of the module would fail on its deps.
-
-### Root cause traced (2026-08-09, on device)
-
-Live `bm dump` confirms: application `nativeLibraryPath: "libs/arm64"`,
-`cpuAbi: "arm64-v8a"`, but the **entry module** `nativeLibraryPath: ""`,
-`cpuAbi: ""`, `isCompressNativeLibs: true`. The load fails with
-`load libandroidapps.so failed ... errno=2` (ENOENT) in every namespace.
-Traced through BMS:
-`InnerBundleInfo::FetchNativeSoAttrs` (inner_bundle_info.cpp) falls back to
-the **application** path when `compressNativeLibs && !isLibIsolated`, so the
-lib IS resolvable in principle — but the XComponent `libraryname` load goes
-through the napi module manager, which reads
-`GetHapModuleInfo().nativeLibraryPath` (inner_bundle_info.cpp:1674 —
-`hapInfo.nativeLibraryPath = it->second.nativeLibraryPath`, the raw, empty
-*module* value, NOT the FetchNativeSoAttrs fallback). So the loader gets ""
-and falls through to a bare `libandroidapps.so` → ENOENT. In-tree
-`ohos_hap` + `shared_libraries` leaves the compressed module path empty; a
-sibling in-tree HAP (`ringtone_extension_hap`) uses the same gn shape but
-loads its lib via the *extension* framework, not `libraryname`, so it never
-hits line 1674.
-
-### Recommended path (cleanest, sidesteps BOTH blockers)
-
-Make the app a **pure-ArkUI** launcher entry with **no native module**, and
-reuse the W3 self-drawing node for display:
-
-* App `onForeground`/`onBackground` (or page show/hide) sets a system param
-  (`@ohos.systemParameterEnhance`, allowed for a system app), e.g.
-  `waydroid.app.visible=1|0`.
-* The **compositor** (already a system process with full namespace, already
-  uses `WatchParameter` for `waydroid.input.grab`, and already owns the
-  session freeze/thaw) watches that param: on 1 → attach/show the
-  self-drawing node + thaw the container; on 0 → detach/hide + freeze.
-
-This gives a launchable "Android Apps" icon with real lifecycle-driven
-freeze/thaw, using only what already works, and puts **zero inner libs in
-the HAP** — no nativeLibraryPath problem, no namespace problem. The trade
-vs the XComponent design: the container draws on the fullscreen overlay
-node rather than inside the app's own window surface (fine for first
-usability; the windowed-surface version can come later if wanted).
-
-The older "fix the packaging" routes remain, but both are deeper:
-
-* **Fix the packaging** — get BMS to attribute the native lib to the
-  entry module (pack.info abi, or the right module.json/gn wiring) AND
-  widen the app namespace to the needed inner libs (system-app namespace
-  config). Verifies the current design as-is.
-* **Invert the connection** (cleaner) — the app HAP uses only the NDK
-  (`OH_NativeWindow_WriteToParcel` gives the producer object; XComponent
-  touch via ArkTS), and the *compositor* (already a system process with
-  full namespace) reaches the app — e.g. the app hosts a small
-  ServiceExtensionAbility the compositor connects to, or registers its
-  producer through a system-provided channel. No inner libs in the HAP.
-
-The SA / surface-handoff / touch / freeze contract the app drives is
-complete and **verified** independently via `waydroid_session_test`
-(same `WaydroidSessionProxy`), so only the app-sandbox loading is open.
-
-## Other follow-ups
-
-* Freeze-on-background: today freeze is driven by surface-destroyed, which
-  fires on teardown, not on every background. A true background freeze
-  needs an `onBackground` path.
-* Cold-start spinner timing (`Index.ets`) is a fixed delay; ideally follow
-  the compositor's first-frame signal.
+Verified on the Plinius, 2026-09-21: opening the app on a device with nothing
+of the stack running → samgr starts the supervisor within 1 s → revealed by the
+next beat → first frame ~10–12 s → Android booted ~15–20 s. Backgrounding
+freezes and releases touch; killing the app in the foreground → the lease hides
+the container 10 s later; 0 processes after the idle stop or a disable.

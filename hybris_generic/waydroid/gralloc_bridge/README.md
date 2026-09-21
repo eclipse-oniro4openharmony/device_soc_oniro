@@ -13,9 +13,9 @@ buffers, composite, and forward frames to `waydroid_compositor`.
    validateBufferDescriptorInfo` in the container's `/system/lib64/
    libui.so` rejects usage bits the A14 Mali mapper actually accepts,
    with `-EINVAL` ("invalid usage bits"). Fixed by a 3-instruction patch
-   (`halium-blobs/waydroid/patches/libui.so`, bound by waydroidd) that
+   (derived by waydroidd on every start from `../data/patches.conf`) that
    clears usage to its low 24 bits — the clean descriptor the A14 mapper
-   wants — instead of rejecting. See `patches/README`.
+   wants — instead of rejecting. See `../data/patches.conf`.
 
 2. **A14 Mali mapper attribute check.** With gate 1 patched, the mapper's
    `createDescriptor` rejects `usage & 0xFFFE08282400` (bits 33-47, 27,
@@ -45,23 +45,28 @@ buffers, composite, and forward frames to `waydroid_compositor`.
      that sets `waydroid.active_apps=Waydroid` to switch the hwc to
      full-UI mode once SF is compositing a real framebuffer-target.
 
-## Deployment (baked into waydroidd + graft)
+## Deployment (in the image; assembled per start)
 
-`waydroidd` binds the libui patch, the gpu.xml overlay, and the graft dir
-(`/data/waydroid/graft` → container `/odm`). The graft carries
-`libbinderflags_shim.so`, `etc/init/waydroid-gralloc.rc`,
-`etc/vintf/manifest/waydroid-allocator-aidl.xml`, and
-`start-allocator.sh`. A fresh `waydroidd` start now boots straight to the
-launcher with no manual steps.
+Everything here ships in `system.img` under `/system/etc/waydroid/graft`
+(`../BUILD.gn`: `waydroid_graft_*`): `libbinderflags_shim.so`,
+`start-allocator.sh`, `etc/init/waydroid-gralloc.rc`,
+`etc/vintf/manifest/waydroid-allocator-aidl.xml` (plus the net script and its
+rc). Before every container generation the supervisor copies that tree to
+`/data/waydroid/graft` and adds the two host AIDL graphics libs from
+`/android/system` (common-V5 under the V4 soname); `waydroidd` binds the result
+at the container's `/odm`, applies the libui patch from `../data/patches.conf`
+and overlays gpu.xml. Nothing is pushed from a host, and nothing in the graft
+survives from one start to the next.
 
 ## Building the shim
 
-```sh
-SDK=/home/mrfrank/setup-ohos-sdk/linux/23/native
-$SDK/llvm/bin/clang --target=aarch64-linux-android -c binderflags_shim.S -o binderflags_shim.o
-$SDK/llvm/bin/ld.lld -shared -soname libbinderflags_shim.so --allow-shlib-undefined \
-    -o libbinderflags_shim.so binderflags_shim.o
-```
+Built by GN (`waydroid_binderflags_shim_build` → `build_android_shim.py`): it is
+an *Android* object loaded inside the container, so it can not be an
+`ohos_shared_library`. The action runs the tree's clang with
+`--target=aarch64-linux-android` and `ld.lld -shared --build-id=none`; the
+source is position-independent assembly with one weak import, so neither step
+needs a sysroot. The output is byte-identical to the one the old hand recipe
+produced (sha256 `40593709…`).
 
 ## Known follow-ups (not blocking the launcher)
 

@@ -9,6 +9,17 @@
 // container, and moves the touch grab to match.  No inner samgr/surface
 // libs in the HAP, so none of the app-sandbox native-load / namespace
 // barriers apply (see README).
+//
+// SHOW is a heartbeat, not an edge: it is republished every SHOW_BEAT_MS for
+// as long as the ability is in the foreground.  That one decision buys three
+// things without any native code or extra permission:
+//   * on-demand start — nothing of the stack runs until this app is opened;
+//     samgr starts it from the first SHOW (sa_profile/9601.json), and a later
+//     beat reveals the compositor that did not exist yet when the first fired;
+//   * recovery — a container generation that died and was rebuilt comes up
+//     hidden, and the next beat reveals it;
+//   * safety — the compositor treats visibility as a lease, so if this app
+//     dies without saying HIDE the panel and touch go back to OHOS.
 
 import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
@@ -27,13 +38,15 @@ const EVENT_HIDE = 'org.oniroproject.waydroid.HIDE';
 // MinimizeAllAppWindows is a silent no-op unless the launcher registered its
 // callback), so the compositor asks us to background ourselves.
 const EVENT_EXIT = 'org.oniroproject.waydroid.EXIT';
+// Must stay well under the compositor's lease (kVisibilityLeaseMs, 10 s).
+const SHOW_BEAT_MS = 2000;
 
-function publishEvent(event: string): void {
+function publishEvent(event: string, quiet: boolean = false): void {
   commonEventManager.publish(event, (err) => {
     if (err) {
       hilog.error(DOMAIN, TAG, 'publish %{public}s failed: %{public}s',
         event, JSON.stringify(err));
-    } else {
+    } else if (!quiet) {
       hilog.info(DOMAIN, TAG, 'published %{public}s', event);
     }
   });
@@ -41,6 +54,7 @@ function publishEvent(event: string): void {
 
 export default class EntryAbility extends UIAbility {
   private exitSubscriber?: commonEventManager.CommonEventSubscriber;
+  private showBeat?: number;
 
   onCreate(): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
@@ -77,18 +91,30 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
+  private stopShowBeat(): void {
+    if (this.showBeat !== undefined) {
+      clearInterval(this.showBeat);
+      this.showBeat = undefined;
+    }
+  }
+
   onForeground(): void {
-    // App in the foreground → show + thaw the container.
+    // App in the foreground → start the stack if it is down, show + thaw the
+    // container, and keep saying so (see the header).
     publishEvent(EVENT_SHOW);
+    this.stopShowBeat();
+    this.showBeat = setInterval(() => publishEvent(EVENT_SHOW, true), SHOW_BEAT_MS);
   }
 
   onBackground(): void {
     // App left the foreground → hide + freeze the container so it costs no
     // CPU and OHOS gets the panel and touch back.
+    this.stopShowBeat();
     publishEvent(EVENT_HIDE);
   }
 
   onDestroy(): void {
+    this.stopShowBeat();
     publishEvent(EVENT_HIDE);
     if (this.exitSubscriber) {
       commonEventManager.unsubscribe(this.exitSubscriber);
