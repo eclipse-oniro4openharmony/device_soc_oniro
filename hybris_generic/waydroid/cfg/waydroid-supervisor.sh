@@ -117,6 +117,56 @@ enabled() {
     esac
 }
 
+# --- the host's page-reclaim watermark -------------------------------------
+# The container's init.rc turns system_server's `sys.sysctl.extra_free_kbytes`
+# request (~3 framebuffers, so it can keep that much in reserve) into a write
+# of /proc/sys/vm/watermark_scale_factor, because our kernel has no
+# extra_free_kbytes knob.  /proc/sys is NOT namespaced: that lands on the HOST
+# kernel.  extra_free_kbytes.sh records the value it started from in a
+# container property and nothing ever puts the sysctl back, so the next
+# generation — with a fresh, empty property area — reads the PREVIOUS one's
+# inflated value, calls that its baseline, and adds its delta again.  Measured
+# here: +40 per start (2250 -> 2290 across one restart), and one unit is
+# ~1.5 MB of high watermark, so every start permanently costs ~61 MB of RAM
+# the kernel then refuses to hand out.  A few dozen generations in, kswapd is
+# told to keep gigabytes free on a device with no swap, cannot get there,
+# evicts the entire page cache (which is executable text) and the whole
+# system — the OHOS UI with it — stalls on major faults.
+#
+# So: remember the host's own value once per boot (a runtime param, which is
+# per-boot state by construction) and put it back before every generation and
+# on teardown.  The container is then free to add its delta to a clean
+# baseline; the result is constant instead of cumulative.
+WMARK=/proc/sys/vm/watermark_scale_factor
+
+# `param get` on an unset key prints its complaint to stdout, so a numeric
+# glob is the test for "recorded".
+save_vm_watermark() {
+    case "$(param get waydroid.vm.wmark 2>/dev/null)" in
+        [0-9]*) return 0 ;;
+    esac
+    v=$(cat "$WMARK" 2>/dev/null)
+    case "$v" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    # Nothing sane leaves a host here: this is a ratchet that outlived the
+    # param (us being upgraded mid-boot, say).  The kernel's own default is
+    # 10 and no OHOS component writes this file at all, so take that.
+    [ "$v" -gt 100 ] && v=10
+    param set waydroid.vm.wmark "$v" 2>/dev/null
+}
+
+restore_vm_watermark() {
+    v=$(param get waydroid.vm.wmark 2>/dev/null)
+    v=${v%% *}
+    case "$v" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    cur=$(cat "$WMARK" 2>/dev/null)
+    [ "$cur" = "$v" ] && return 0
+    echo "$v" >"$WMARK" 2>/dev/null && log "vm watermark_scale_factor $cur -> $v"
+}
+
 teardown() {
     busy=0
     CPID=$(cat "$WD/container.pid" 2>/dev/null)
@@ -130,6 +180,8 @@ teardown() {
     # A dead compositor can not release the touch grab it took; never leave
     # it stranded over OHOS.
     param set waydroid.input.grab 0 2>/dev/null
+    # Android is gone; the host should not keep reserving memory for it.
+    restore_vm_watermark
     rm -f "$SOCK" 2>/dev/null
     # Clear the pid file: waydroidd rewrites it a beat AFTER launch, so if we
     # leave the previous generation's (now-dead) pid here, the monitor below
@@ -365,6 +417,10 @@ stand_down() {
 # Returns 0 if the container was launched, 1 if the compositor never came up.
 start_generation() {
     pick_binaries
+    # Take the host's reclaim watermark back off the previous generation
+    # before this one gets to add its delta to it again.
+    save_vm_watermark
+    restore_vm_watermark
     log "starting compositor: $COMPOSITOR"
     LD_LIBRARY_PATH="$WD/bin" nohup "$COMPOSITOR" >"$WD/compositor.log" 2>&1 &
     cpid=$!
