@@ -96,10 +96,12 @@ SYSURL=; SYSSHA=; VENURL=; VENSHA=
 pick_binaries() {
     COMPOSITOR=/system/bin/waydroid_compositor
     WAYDROIDD=/system/bin/waydroidd
+    AUDIO=/system/bin/waydroid_audio
     case "$(param get const.debuggable 2>/dev/null)" in
         1*)
             [ -x "$WD/bin/waydroid_compositor" ] && COMPOSITOR="$WD/bin/waydroid_compositor"
             [ -x "$WD/bin/waydroidd" ] && WAYDROIDD="$WD/bin/waydroidd"
+            [ -x "$WD/bin/waydroid_audio" ] && AUDIO="$WD/bin/waydroid_audio"
             ;;
     esac
 }
@@ -121,6 +123,7 @@ teardown() {
     [ -n "$CPID" ] && kill -9 "$CPID" 2>/dev/null && busy=1
     killall -9 waydroidd 2>/dev/null && busy=1
     killall -9 waydroid_compositor 2>/dev/null && busy=1
+    killall -9 waydroid_audio 2>/dev/null && busy=1
     param set waydroid.compositor.ready 0 2>/dev/null
     param set waydroid.compositor.frames 0 2>/dev/null
     param set waydroid.session.visible 0 2>/dev/null
@@ -376,6 +379,23 @@ start_generation() {
         log "compositor socket never appeared after ${i} ticks; aborting generation"
         return 1
     fi
+    # The PulseAudio server the container's audio HAL connects to.  It
+    # must exist before the container's audio HAL starts, and its socket
+    # lives in the same /run/xdg directory waydroidd binds into the
+    # container, so it has to be up before waydroidd builds the rootfs.
+    # Not fatal if it fails: the container boots fine, just mute.
+    log "starting audio server: $AUDIO"
+    nohup "$AUDIO" >"$WD/audio.log" 2>&1 &
+    apid=$!
+    j=0
+    while [ $j -lt 50 ]; do
+        [ -e "$WD/run/xdg/pulse/native" ] && break
+        kill -0 "$apid" 2>/dev/null || { log "audio server died during startup"; break; }
+        sleep 0.1
+        j=$((j + 1))
+    done
+    [ -e "$WD/run/xdg/pulse/native" ] || log "audio socket never appeared; container will be mute"
+
     log "compositor up (socket after ${i} ticks); starting container: $WAYDROIDD"
     cd "$WD" && WAYDROID_IMAGES="$IMAGES" nohup "$WAYDROIDD" >>"$WD/waydroidd.log" 2>&1 &
     return 0

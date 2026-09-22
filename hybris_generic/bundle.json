@@ -28,6 +28,7 @@
           "wayland",
           "graphic_2d",
           "ace_engine",
+          "audio_framework",
           "napi",
           "input",
           "samgr",

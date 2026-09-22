@@ -365,9 +365,46 @@ ohos_executable("waydroid_session_test") {
   subsystem_name = "oniro_soc_products"
 }
 
+# ── waydroid_audio: the container's PulseAudio server ──────────────────────
+# The container's audio HAL is an ALSA client whose "default" PCM is the
+# pulse plugin, so it needs a PulseAudio server to talk to.  OHOS 6.1 has
+# none (the HPAE engine replaced the pulseaudio-hosted audio_server;
+# //third_party/pulseaudio is only the client library now), so we speak the
+# protocol ourselves and render through an ordinary OHOS AudioRenderer.
+# See audio/waydroid_audio_main.cpp for why this is not optional: without a
+# server the HAL's PCM never opens, and the container's AudioFlinger mixes
+# at about one percent of real time — which stalls video playback too.
+ohos_executable("waydroid_audio") {
+  sources = [
+    "audio/ohos_sink.cpp",
+    "audio/waydroid_audio_main.cpp",
+  ]
+
+  include_dirs = [ "audio" ]
+
+  cflags_cc = [
+    "-std=c++17",
+    "-Wno-unused-parameter",
+  ]
+
+  external_deps = [
+    # audio_renderer exports only audio_renderer.h; the audio_info.h /
+    # audio_stream_info.h it includes come with audio_client.
+    "audio_framework:audio_client",
+    "audio_framework:audio_renderer",
+    "c_utils:utils",
+    "hilog:libhilog",
+  ]
+
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
 group("waydroid_group") {
   deps = [
     ":androidcontainer",
+    ":waydroid_audio",
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
     ":waydroid_sa_profile",
