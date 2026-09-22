@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+  SPDX-License-Identifier: Apache-2.0
+
+  Resource overlay on Android's package installer: one style, no code.
+  Android's install confirmation ("Install this app?") is a DIALOG activity in
+  a task of its own, and the container's hwcomposer only gives a wayland
+  window to a task that is opaque — a translucent one never reaches the
+  screen, so the store that asked for the install waits for an answer the user
+  can never give.  Making the activity opaque is what puts it on the screen;
+  the shell then gives that task a window of its own, like any other task
+  Android opens for itself (AppWindowAbility, "taken over by").
+
+  Listed in ../config.xml: an overlay of a package other than "android" is
+  ignored when it only says isStatic (that path is framework-only), and is
+  enabled by the partition's overlay config instead.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.oniroproject.waydroid.overlay.installer"
+    android:versionCode="1" android:versionName="1.0">
+    <application android:hasCode="false" />
+    <overlay android:targetPackage="com.android.packageinstaller" android:priority="100" />
+</manifest>

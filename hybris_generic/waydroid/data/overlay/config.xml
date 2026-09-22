@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+  SPDX-License-Identifier: Apache-2.0
+
+  /odm/overlay/config/config.xml — which overlays of this partition Android
+  enables, and immutably.  Needed for OniroInstallerOpaque, whose target is
+  not the framework: android:isStatic only reaches overlays of "android".
+
+  OniroNoBars is listed too although it is static.  A partition that HAS a
+  config file is governed by it alone: the first version of this file named
+  only the installer overlay, and Android's own status and navigation bars
+  came back the next boot.
+-->
+<config>
+    <overlay package="org.oniroproject.waydroid.overlay.nobars" enabled="true" mutable="false" />
+    <overlay package="org.oniroproject.waydroid.overlay.installer" enabled="true" mutable="false" />
+</config>

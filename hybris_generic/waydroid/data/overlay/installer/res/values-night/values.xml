@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+  SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <!-- The installer's application theme, which every one of its activities
+         inherits.  Same parent as the original (Theme.DeviceDefault.Dialog.Alert), so the
+         dialog looks the way Android drew it; the four window flags below are
+         the point: an activity that is translucent or floating leaves its
+         task transparent (WindowManager: isActivityStackTransparent=true) and
+         the hwc then creates no window for it at all.
+
+         The textAppearance* items are the target's own, kept verbatim: they
+         are theme attributes its layouts resolve, and a style that dropped
+         them would take the installer's text styling with it.  They are
+         private resources of that package, hence the "*" references. -->
+    <style name="Theme.AlertDialogActivity" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="*com.android.packageinstaller:textAppearanceInstallerAppLabel">@*com.android.packageinstaller:style/TextAppearance.PackageInstaller.AppLabel</item>
+        <item name="*com.android.packageinstaller:textAppearanceInstallerCustomMessage">@*com.android.packageinstaller:style/TextAppearance.PackageInstaller.CustomMessage</item>
+        <item name="*com.android.packageinstaller:textAppearanceInstallerKeepDataHeading">@*com.android.packageinstaller:style/TextAppearance.PackageInstaller.KeepData.Heading</item>
+        <item name="*com.android.packageinstaller:textAppearanceInstallerKeepDataSubHeading">@*com.android.packageinstaller:style/TextAppearance.PackageInstaller.KeepData.SubHeading</item>
+        <item name="*com.android.packageinstaller:textAppearanceInstallerTitle">@*com.android.packageinstaller:style/TextAppearance.PackageInstaller.Title</item>
+    </style>
+</resources>

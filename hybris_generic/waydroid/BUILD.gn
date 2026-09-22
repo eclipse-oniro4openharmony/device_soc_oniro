@@ -280,6 +280,24 @@ waydroid_graft_files = [
     "OniroNoBars.apk",
     "/overlay",
   ],
+
+  # Resource overlay on Android's package installer: its confirmation dialogs
+  # become opaque activities, which is what earns their task a window — a
+  # translucent one never reaches the screen, so every store waited on an
+  # answer the user could not give.  See data/overlay/installer/.
+  [
+    "data/overlay/OniroInstallerOpaque.apk",
+    "OniroInstallerOpaque.apk",
+    "/overlay",
+  ],
+
+  # Which of this partition's overlays Android enables.  Both of them are
+  # listed: a partition that has this file is governed by it alone.
+  [
+    "data/overlay/config.xml",
+    "config.xml",
+    "/overlay/config",
+  ],
 ]
 waydroid_graft_targets = []
 foreach(g, waydroid_graft_files) {
