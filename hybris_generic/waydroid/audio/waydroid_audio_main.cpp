@@ -103,8 +103,13 @@ struct Stream {
 
     /* PulseAudio's write index: everything the client has handed us. */
     uint64_t writeIndex = 0;
-    /* Bytes we have asked for with REQUEST and not yet been given. */
-    uint64_t outstanding = 0;
+    /*
+     * Bytes we have asked for with REQUEST and not yet been given — the
+     * mirror of libpulse's pa_stream::requested_bytes, and signed for the
+     * same reason it is: a client may write more than it was asked for, and
+     * the overdraft has to be carried, not forgotten.  See HandleStreamData.
+     */
+    int64_t outstanding = 0;
     uint64_t underrunFor = 0;
     uint64_t playingFor = 0;
     uint64_t startedAtUsec = 0;
@@ -239,11 +244,11 @@ void Server::MaybeRequest(Connection &c, Stream &s)
         return;
     }
     int64_t buffered = static_cast<int64_t>(s.sink->Buffered());
-    int64_t owed = static_cast<int64_t>(s.attr.tlength) - buffered - static_cast<int64_t>(s.outstanding);
+    int64_t owed = static_cast<int64_t>(s.attr.tlength) - buffered - s.outstanding;
     if (owed < static_cast<int64_t>(s.attr.minreq)) {
         return;
     }
-    s.outstanding += static_cast<uint64_t>(owed);
+    s.outstanding += owed;
     TagWriter t;
     t.PutU32(COMMAND_REQUEST);
     t.PutU32(INVALID_INDEX);
@@ -382,12 +387,19 @@ void Server::HandleStreamData(Connection &c, uint32_t channel, uint32_t flags, c
         HILOG_WARN(LOG_CORE, "stream %{public}u: ignoring seek mode %{public}u", channel, seek);
     }
 
+    /*
+     * Straight subtraction, and it may go negative.  libpulse debits its own
+     * requested_bytes by every byte it writes whether or not we asked for it
+     * (stream.c: "the server side applies the same error"), so clamping here
+     * forgets an overdraft the client still remembers.  Each clamp used to
+     * leave us believing the client had more credit than it did; once the
+     * drift passed tlength - minreq, `owed` could never reach minreq again,
+     * we stopped sending REQUEST, and the client blocked in snd_pcm_wait
+     * forever — with the container's one mixer thread stuck in out_write
+     * behind it, which is every app on the device going silent at once.
+     */
     s->writeIndex += len;
-    if (s->outstanding >= len) {
-        s->outstanding -= len;
-    } else {
-        s->outstanding = 0;
-    }
+    s->outstanding -= static_cast<int64_t>(len);
 
     size_t accepted = s->sink->Push(data, len);
     if (accepted < len) {
@@ -502,8 +514,14 @@ bool Server::HandleCommand(Connection &c, uint32_t command, uint32_t tag, TagRea
                 SendError(c, tag, ERR_NOENTITY);
                 return true;
             }
+            /*
+             * The ring goes, the credit stays.  pa_stream_flush() leaves
+             * requested_bytes untouched on purpose ("this 'error' will be
+             * applied by both client and server"), so resetting it here would
+             * desynchronise exactly the counter we depend on.  Emptying the
+             * ring is enough: MaybeRequest sees the space and asks for it.
+             */
             s->sink->Flush();
-            s->outstanding = 0;
             SendSimpleAck(c, tag);
             MaybeRequest(c, *s);
             return true;
