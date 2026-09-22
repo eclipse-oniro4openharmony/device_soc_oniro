@@ -1,6 +1,11 @@
 # Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
+# What this container has to be told once it has booted.
+#
+# 1. Retire LineageOS' setup wizard.
+# 2. Take the container's own volume control out of the signal path.
+#
 # Android here is an app runtime, not a phone: nobody will ever click through
 # a setup wizard.  LineageOS' wizard holds the HOME role with priority until
 # it has been completed, and an unfinished one puts itself in front of
@@ -14,5 +19,20 @@
 # container: the host can reach binder services, but `pm`/`cmd` started from
 # outside hang (no caller identity).  Persistent in data.img and idempotent,
 # so after the first boot this is a no-op.
+
+# Volume is applied twice on this device and only one of the two controls is
+# reachable.  Android attenuates a track by its own STREAM_MUSIC index, and
+# then waydroid_audio hands the result to an OHOS AudioRenderer, which
+# attenuates it again by the OHOS media volume.  The phone's volume keys move
+# the OHOS one; nothing in our integration surfaces Android's, so it sits at
+# whatever the image shipped — 5 of 15, about -33 dB — and multiplies with
+# the OHOS setting.  Stacked, the two cost roughly -49 dB and the container
+# is barely audible.
+#
+# So pin the container to unity gain and let OHOS own volume outright: one
+# attenuator, at the end of the chain, on the volume keys.  Only STREAM_MUSIC
+# is set here, which is what app and video audio uses; the other streams keep
+# the image's defaults so notification and alarm sounds stay in proportion.
 on property:sys.boot_completed=1
     exec_background - root root -- /system/bin/pm disable-user --user 0 org.lineageos.setupwizard
+    exec_background - root root -- /system/bin/cmd media_session volume --stream 3 --set 15
