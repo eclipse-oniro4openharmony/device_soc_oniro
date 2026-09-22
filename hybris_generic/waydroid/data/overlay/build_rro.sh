@@ -14,7 +14,8 @@
 # link an overlay for a resource the target framework does not define, so a
 # renamed resource fails here instead of silently bringing the bars back.
 #
-# Needs: java (jarsigner + keytool), curl, unzip — and hdc for the first form.
+# Needs: java (jarsigner + keytool), python3, curl, unzip — and hdc for the
+# first form.
 #
 # Why these tools: aapt2 comes from Google's Maven (a static binary inside a
 # jar), so no Android SDK is needed.  framework-res.apk comes from the device
@@ -57,7 +58,11 @@ done
     -I "$FW" "$W/res.zip"
 keytool -genkeypair -keystore "$W/k.jks" -storepass throwaway -keypass throwaway -alias k \
     -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Oniro Waydroid overlay" >/dev/null 2>&1
-cp "$W/unsigned.apk" "$HERE/OniroNoBars.apk"
+cp "$W/unsigned.apk" "$W/signed.apk"
 jarsigner -keystore "$W/k.jks" -storepass throwaway -keypass throwaway \
-    -sigalg SHA256withRSA -digestalg SHA-256 "$HERE/OniroNoBars.apk" k >/dev/null
+    -sigalg SHA256withRSA -digestalg SHA-256 "$W/signed.apk" k >/dev/null
+# Aligning last is what makes the overlay installable-alongside: see zipalign.py
+# for why an unaligned resources.arsc here breaks every APK install in the
+# container, not just this APK.
+python3 "$HERE/zipalign.py" "$W/signed.apk" "$HERE/OniroNoBars.apk"
 ls -la "$HERE/OniroNoBars.apk"
