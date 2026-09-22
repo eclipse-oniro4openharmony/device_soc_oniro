@@ -101,6 +101,7 @@ teardown() {
     killall -9 waydroid_compositor 2>/dev/null && busy=1
     param set waydroid.compositor.ready 0 2>/dev/null
     param set waydroid.compositor.frames 0 2>/dev/null
+    param set waydroid.session.visible 0 2>/dev/null
     # A dead compositor can not release the touch grab it took; never leave
     # it stranded over OHOS.
     param set waydroid.input.grab 0 2>/dev/null
@@ -213,8 +214,11 @@ idle_limit() {
     esac
 }
 
+# "Somebody is looking at Android": the compositor's visibility lease.  (This
+# used to read waydroid.input.grab, which only the debug overlay sets now —
+# the idle stop would have taken the container away from under a window.)
 visible() {
-    case "$(param get waydroid.input.grab 2>/dev/null)" in
+    case "$(param get waydroid.session.visible 2>/dev/null)" in
         1*) return 0 ;;
         *) return 1 ;;
     esac

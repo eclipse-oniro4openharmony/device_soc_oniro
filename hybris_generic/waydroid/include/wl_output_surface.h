@@ -150,6 +150,8 @@ private:
     bool attachHealed_ = false;  /* EnsureAttachedToDisplay spent on node_ */
     int32_t width_  = 0;
     int32_t height_ = 0;
+    /* Request config of the buffers we flush; see ReclaimReleased. */
+    BufferRequestConfig lastConfig_ {};
 };
 
 } // namespace Waydroid

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+  SPDX-License-Identifier: Apache-2.0
+
+  Static resource overlay on the Android framework: no code, five values.
+  Android apps run inside an OHOS window, under the OHOS status bar and above
+  the OHOS gesture bar, so Android must not draw bars of its own.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.oniroproject.waydroid.overlay.nobars"
+    android:versionCode="1" android:versionName="1.0">
+    <application android:hasCode="false" />
+    <overlay android:targetPackage="android" android:isStatic="true" android:priority="100" />
+</manifest>

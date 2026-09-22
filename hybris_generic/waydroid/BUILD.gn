@@ -38,6 +38,7 @@ libhybris_root = "//third_party/libhybris"
 
 config("waydroid_compositor_config") {
   include_dirs = [
+    "binder",
     "include",
     "../hardware/display/include",
 
@@ -57,6 +58,8 @@ config("waydroid_compositor_config") {
 
 ohos_executable("waydroid_compositor") {
   sources = [
+    # libwdbinder: the libc-only binder client for the control plane.
+    "binder/wdbinder.c",
     "src/waydroid_compositor_main.cpp",
     "src/waydroid_session.cpp",
     "src/waydroid_session_proxy.cpp",
@@ -181,6 +184,23 @@ ohos_executable("waydroidd") {
   subsystem_name = "oniro_soc_products"
 }
 
+# Root-shell front for libwdbinder: list/launch apps, properties, settings.
+# Pure C, libc only.  Replaces the nsenter recipes.
+ohos_executable("wdctl") {
+  sources = [
+    "binder/wdbinder.c",
+    "binder/wdctl.c",
+  ]
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-O2",
+  ]
+  install_enable = true
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
 # loopback -> container-veth TCP relay for the adb/scrcpy rig (W4).
 ohos_executable("waydroid_tcprelay") {
   sources = [ "launcher/tcprelay.c" ]
@@ -244,6 +264,22 @@ waydroid_graft_files = [
     "waydroid-allocator-aidl.xml",
     "/etc/vintf/manifest",
   ],
+
+  # Once Android has booted: retire LineageOS' setup wizard (provision/).
+  [
+    "provision/waydroid-provision.rc",
+    "waydroid-provision.rc",
+    "/etc/init",
+  ],
+
+  # Static resource overlay: Android draws no status bar and no navigation
+  # bar of its own — the OHOS ones stay.  Android scans /odm/overlay at boot.
+  # Prebuilt, 3.6 KB, no code; sources and recipe in data/overlay/.
+  [
+    "data/overlay/OniroNoBars.apk",
+    "OniroNoBars.apk",
+    "/overlay",
+  ],
 ]
 waydroid_graft_targets = []
 foreach(g, waydroid_graft_files) {
@@ -257,6 +293,33 @@ foreach(g, waydroid_graft_files) {
     subsystem_name = "oniro_soc_products"
   }
   waydroid_graft_targets += [ ":$_t" ]
+}
+
+# The shell's native half: requireNapi('oniro.androidcontainer').  A SYSTEM
+# NAPI module, because it needs the inner samgr/surface APIs that an app's
+# linker namespace refuses to a library bundled in the HAP (see the source).
+ohos_shared_library("androidcontainer") {
+  sources = [
+    "napi/android_container_napi.cpp",
+    "src/waydroid_session_proxy.cpp",
+  ]
+
+  include_dirs = [ "include" ]
+
+  cflags_cc = [ "-std=c++17" ]
+
+  external_deps = [
+    "c_utils:utils",
+    "graphic_surface:surface",
+    "hilog:libhilog",
+    "ipc:ipc_core",
+    "napi:ace_napi",
+    "samgr:samgr_proxy",
+  ]
+
+  relative_install_dir = "module/oniro"
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
 }
 
 # W5 bring-up tool: stand-in for the "Android Apps" front-end — proves the
@@ -286,6 +349,7 @@ ohos_executable("waydroid_session_test") {
 
 group("waydroid_group") {
   deps = [
+    ":androidcontainer",
     ":waydroid_compositor",
     ":waydroid_compositor_cfg",
     ":waydroid_sa_profile",
@@ -294,12 +358,10 @@ group("waydroid_group") {
     ":waydroid_tcprelay",
     ":waydroid_wlegl_harness",
     ":waydroidd",
+    ":wdctl",
 
-    # The "Android Apps" front-end HAP (W5). Pure-ArkUI launcher: on
-    # fore/background it publishes SHOW/HIDE common events; the compositor
-    # subscribes and shows/hides + freezes/thaws the container. No bundled
-    # native module and no param DAC, so the app-sandbox native-load and
-    # image-partition barriers no longer apply. See app/README.md.
+    # The "Android Apps" shell: the grid, and one OHOS window per Android app
+    # (app/README.md).  Its native half is :androidcontainer above.
     "app:android_apps_hap",
   ]
   deps += waydroid_etc_targets

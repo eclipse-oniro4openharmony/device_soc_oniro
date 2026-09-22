@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+  SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <!-- The OHOS status bar and gesture navigation own the screen edges.
+
+         1px, not 0: on Android 16 a status bar of height 0 silently kills ALL
+         touch.  Tasks run with desktop-windowing decorations there, and the
+         decoration's caption derives its touch region from the status bar
+         height; with 0 the region degenerates to the whole task and every
+         gesture is pilfered from the app (InputDispatcher: "Embedded{Caption
+         of Task=N} is stealing input gesture").  One pixel row is invisible
+         and keeps the region sane. -->
+    <dimen name="status_bar_height_default">1px</dimen>
+    <dimen name="status_bar_height_portrait">1px</dimen>
+    <dimen name="status_bar_height_landscape">1px</dimen>
+    <dimen name="quick_qs_offset_height">0dp</dimen>
+    <bool name="config_showNavigationBar">false</bool>
+</resources>

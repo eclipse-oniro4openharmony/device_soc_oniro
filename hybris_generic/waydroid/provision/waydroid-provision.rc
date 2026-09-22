@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Android here is an app runtime, not a phone: nobody will ever click through
+# a setup wizard.  LineageOS' wizard holds the HOME role with priority until
+# it has been completed, and an unfinished one puts itself in front of
+# whatever is launched — the app the user tapped in the OHOS grid never gets a
+# window.  Marking Android provisioned (the compositor's control plane does
+# that through IPlatform) does not retire it: it keeps its own completion flag
+# in LineageOS' settings provider.  Disabling the package does, and launcher3
+# takes HOME over (the compositor never shows HOME, see IsHomePackage).
+#
+# Done from init because it has to come from a real process of this
+# container: the host can reach binder services, but `pm`/`cmd` started from
+# outside hang (no caller identity).  Persistent in data.img and idempotent,
+# so after the first boot this is a no-op.
+on property:sys.boot_completed=1
+    exec_background - root root -- /system/bin/pm disable-user --user 0 org.lineageos.setupwizard

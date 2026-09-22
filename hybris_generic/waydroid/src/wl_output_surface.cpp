@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2026 Oniro / Hybris Generic.
- * Licensed under the Apache License, Version 2.0 (the "License").
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "wl_output_surface.h"
@@ -107,10 +107,20 @@ bool OutputSurface::AttachProducer(const sptr<IBufferProducer>& producer)
         screenId_ = 0;
         attachHealed_ = false;
     }
+    /* Be the queue's connected producer.  Nothing connects on our behalf —
+     * that normally happens inside RequestBuffer, which we never call (we
+     * attach the container's buffers instead) — and an unconnected producer
+     * is refused CleanCache, i.e. the recovery in ResetQueue(). */
+    GSError connected = surface->Connect();
+    if (connected != GSERROR_OK && connected != SURFACE_ERROR_CONSUMER_IS_CONNECTED) {
+        HILOG_WARN(LOG_CORE, "AttachProducer: Connect failed: %{public}d",
+                   static_cast<int>(connected));
+    }
     surface->SetQueueSize(OUTPUT_QUEUE_SIZE);
     surface_ = surface;
     InstallReleaseListenerLocked();
-    HILOG_INFO(LOG_CORE, "output: switched to app producer surface");
+    HILOG_INFO(LOG_CORE, "output: switched to app producer surface (queue %{public}llu)",
+               static_cast<unsigned long long>(surface->GetUniqueId()));
     return true;
 }
 
@@ -123,6 +133,11 @@ void OutputSurface::Detach()
         node_ = nullptr;
         screenId_ = 0;
         attachHealed_ = false;
+    } else if (surface_ != nullptr) {
+        /* An app's queue: leave it as we found it — no buffers of the
+         * container's in its cache, nobody connected. */
+        (void)surface_->CleanCache(true);
+        (void)surface_->Disconnect();
     }
     surface_ = nullptr;
 }
@@ -246,15 +261,24 @@ void OutputSurface::ReclaimReleased(const sptr<SurfaceBuffer>& released)
 {
     sptr<Surface> surf;
     ReleaseCallback cb;
+    BufferRequestConfig reqConfig;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         surf = surface_;
         cb = releaseCb_;
+        reqConfig = lastConfig_;
     }
-    if (surf == nullptr) {
+    if (surf == nullptr || reqConfig.width <= 0) {
         return;
     }
-    BufferRequestConfig reqConfig = released->GetBufferRequestConfig();
+    /* The queue picks the free buffer to hand back by comparing request
+     * configs, so ask with the config our buffers were attached with (they
+     * all share one: same size, format and usage).  NOT with
+     * released->GetBufferRequestConfig(): the copy of the buffer that reaches
+     * a release listener is deserialized without it — all zeros — which never
+     * matches; the queue then tries to allocate a 0x0 buffer instead, fails,
+     * the buffer stays cached, and the container's next commit of it bounces
+     * off BUFFER_IS_INCACHE. */
     sptr<SurfaceBuffer> reclaimed;
     sptr<SyncFence> reclaimedFence;
     GSError err = surf->RequestAndDetachBuffer(reclaimed, reclaimedFence, reqConfig);
@@ -284,6 +308,20 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
     };
 
     sptr<SurfaceBuffer> sb = buffer;
+    /* The queue ORs its default usage into every REQUEST before comparing it
+     * with the config a cached buffer was attached with.  An XComponent's
+     * queue has one (a self-drawing node's is 0), so a buffer attached with
+     * its bare config can never be requested back: the reclaim in
+     * ReclaimReleased misses, the queue tries to allocate instead, and the
+     * container's next commit of that buffer bounces off BUFFER_IS_INCACHE.
+     * Attach with the default usage already in. */
+    BufferRequestConfig cfg = sb->GetBufferRequestConfig();
+    const uint64_t usage = cfg.usage | surface_->GetDefaultUsage();
+    if (cfg.usage != usage) {
+        cfg.usage = usage;
+        sb->SetBufferRequestConfig(cfg);
+    }
+    lastConfig_ = cfg;
 
     /* First sighting goes through AttachAndFlushBuffer(needMap=false) — one
      * IPC and no gralloc CPU lock.  Buffers RS has since released are pulled
@@ -291,6 +329,15 @@ bool OutputSurface::Flush(const sptr<SurfaceBuffer>& buffer, int32_t acquireFenc
      * (ReclaimReleased), so by the time the container re-commits one its slot
      * is free again. */
     GSError err = surface_->AttachAndFlushBuffer(sb, fence, flushConfig, false);
+    if (err != GSERROR_OK) {
+        /* Rate-limited: a stuck queue fails every frame. */
+        static int64_t logged = 0;
+        if (logged++ % 120 == 0) {
+            HILOG_WARN(LOG_CORE, "AttachAndFlushBuffer(seq %{public}u) failed: %{public}d "
+                       "(%{public}lld so far)", sb->GetSeqNum(), static_cast<int>(err),
+                       static_cast<long long>(logged));
+        }
+    }
 
     /* Wake RenderService to composite THIS frame.  Our output is a
      * standalone self-drawing node with no ArkUI app requesting frames

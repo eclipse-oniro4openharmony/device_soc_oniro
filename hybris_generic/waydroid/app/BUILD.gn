@@ -1,18 +1,17 @@
 # Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# "Android Apps" — the OHOS front-end for the Waydroid container (W5).
-# Pure-ArkUI launcher: no native module.  It is a launcher entry that, on
-# fore/background, publishes SHOW/HIDE common events; the compositor
-# subscribes and WaydroidSessionStub::ApplyVisibility shows+thaws or
-# hides+freezes the container and moves the touch grab to match.  The
-# container's pixels reach the panel via the compositor's self-drawing node
-# (W3).  Because the HAP bundles no inner samgr/surface libs, none of the
-# app-sandbox native-load / linker-namespace barriers apply (see README).
+# "Android Apps" — the OHOS shell for Android apps: a grid of the container's
+# apps, each opened in an ordinary OHOS window (see README.md).
 #
-# OPT-IN like the rest of the container stack: only builds when
-# persist.waydroid.enabled products want it (wired via the product
-# bundle, same gate as waydroid_compositor).  X23 images are unaffected.
+# The HAP itself bundles no native code: what needs the inner samgr/surface
+# APIs lives in the system NAPI module ../napi (requireNapi
+# 'oniro.androidcontainer'), which an app's linker namespace does not apply
+# to.  In-tree (not hvigor) so that it is signed and preinstalled with the
+# image; the app and the compositor share a protocol and must match.
+#
+# OPT-IN like the rest of the container stack: only built with
+# hybris_generic_soc_feature_waydroid.  X23 images are unaffected.
 
 import("//build/ohos.gni")
 

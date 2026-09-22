@@ -11,6 +11,10 @@
     {
       "name": "app_name",
       "value": "Android Apps"
+    },
+    {
+      "name": "AppWindowAbility_desc",
+      "value": "An Android app"
     }
   ]
 }

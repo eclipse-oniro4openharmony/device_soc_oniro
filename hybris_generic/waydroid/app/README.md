@@ -1,80 +1,123 @@
-# Android Apps — OHOS front-end for the Waydroid container (W5)
+# Android Apps — the OHOS shell for Android apps
 
-A minimal ArkUI system app (`org.oniroproject.androidapps`) that gives the
-Waydroid Android container a launcher entry and a real OHOS app lifecycle.
-It is a **pure-ArkUI launcher with no native module**: it draws nothing of
-the container itself. The container's pixels reach the panel through the
-compositor's self-drawing node (W3), and this app only **publishes SHOW /
-HIDE common events** on fore/background. The compositor subscribes and
-`WaydroidSessionStub::ApplyVisibility` shows+thaws or hides+freezes the
-container, moving the W4 touch grab to match, so a hidden Android session
-costs ~0 CPU and OHOS keeps the panel + touch when the app is away.
-Verified end-to-end on device (2026-08-10): app foreground → container
-shown+thawed+grabbed; app background → container hidden (node kept, last
-frame retained) + frozen + touch released.
-
-## Why pure-ArkUI (the earlier XComponent design and why it was dropped)
-
-The original design hosted a fullscreen XComponent and handed its surface
-producer to the session SA (SAID 9601) over binder, so the container
-composited into the app's own window. That needs the app's bundled native
-module to link the **inner** `samgr_proxy`/`graphic_surface` APIs — and
-that fights the app sandbox two ways, both confirmed on device (see the
-trace below): BMS leaves the entry module's `nativeLibraryPath` empty so
-the XComponent `libraryname` load fails ENOENT, and even fixed, the app's
-linker namespace forbids those inner libs. The pure-ArkUI design sidesteps
-both: **zero inner libs in the HAP**, so it loads cleanly, and the
-app→compositor channel is a **custom CommonEvent** (no permission, no param
-DAC, no image-partition change — a DAC route was tried and abandoned: a new
-`.para.dac` entry + the flash it needs briefly bricked the device, see
-memory [[waydroid-w4-w5-input-frontend]]). The trade vs the XComponent design: the container draws on the
-fullscreen overlay node rather than inside the app's own window surface —
-fine for first usability; the windowed-surface version can come back later
-if the sandbox barriers are solved. The session SA
-(`../src/waydroid_session*.cpp`) is still published and its
-SetOutputSurface/InjectTouch/SetForeground contract remains (proven via
-`waydroid_session_test`) for that future path.
-
-## Data flow
+`org.oniroproject.androidapps`: an ArkUI system app that lists the Android apps
+installed in the Waydroid container and opens each of them **in an ordinary
+OHOS window** — OHOS status bar, OHOS gesture navigation, OHOS open/close
+animations, one recents card per Android app. Android draws no bars of its own
+(`../data/overlay/`), and nothing of Android is on the panel unless such a
+window is. Plan and measurements:
+`docs/hybris_generic/android_app_launcher_plan.md`.
 
 ```
-EntryAbility.onForeground → publish('org.oniroproject.waydroid.SHOW'), then again every 2 s
-EntryAbility.onBackground → stop the beat, publish('org.oniroproject.waydroid.HIDE')
-                                       │  (custom CommonEvent — no permission needed)
-              ┌────────────────────────┴───────────────────────────┐
-              ▼ stack not running                                  ▼ stack running
-samgr: on-demand policy of SA 9601             compositor: VisibilityReceiver
-  (sa_profile/9601.json) → init starts           → WaydroidSessionStub::ApplyVisibility
-  waydroid_supervisor "9601#…" → compositor        visible : SetNodeVisible(true) + thaw + grab=1
-  + container; the NEXT beat reveals them          hidden  : freeze + SetNodeVisible(false) + grab=0
+ EntryAbility ─ pages/Index        the grid: icons + names from this app's own
+                                   cache, refreshed when Android answers
+ AppWindowAbility ─ pages/AppWindow   one instance per Android package
+   (launchType "specified",           (stage/AppAbilityStage: key = package)
+    key = package)                    XComponent(SURFACE) + splash
+        │
+        │ model/Container.ts:  globalThis.requireNapi('oniro.androidcontainer')
+        ▼
+ ../napi/  system NAPI module ──► SA 9601 (waydroid_compositor)
+   attachWindow(surfaceId, package, w, h)   frames of THAT Android task → this surface
+   sendTouch / sendKey(BACK) / setWindowActive
+   listApps / getAppIcon / launchApp / closeApp   (libwdbinder → IPlatform)
 ```
 
-SHOW is a **heartbeat** and visibility is a **lease** (10 s,
-`kVisibilityLeaseMs`). A SHOW when already visible only renews the lease, so
-the beat is free. That single decision gives:
+## Why a system NAPI module
 
-* **start on demand** — nothing of the stack runs until this app is opened
-  (unless `persist.waydroid.autostart=1`); the app needs no native code and no
-  permission to make that happen;
-* **recovery** — a generation rebuilt by the supervisor comes up hidden and is
-  revealed by the next beat, with no guessing on the supervisor's side;
-* **safety** — if this app dies without saying HIDE, the compositor hides,
-  freezes and releases touch when the lease runs out, instead of leaving a
-  fullscreen touch-grabbing layer over OHOS until reboot.
+The window's XComponent surface has to reach the compositor, a separate root
+process (its per-frame gralloc import needs `/android/vendor`, which app
+sandboxes lack). That takes the inner `samgr` + `graphic_surface` APIs. A
+native library **bundled in the HAP** cannot have them — tried in W5, failed
+twice over: BMS leaves the entry module's `nativeLibraryPath` empty, and the
+app's linker namespace refuses the inner libraries anyway. A module under
+`/system/lib64/module/` is opened with a plain `dlopen()` outside that
+namespace, the same way AVPlayer's NAPI gets a surface across. The SDK does
+not know the module, so it is fetched with `requireNapi()` from a `.ts` file
+(ArkTS forbids the untyped global).
 
-The exit chord (Vol-Down + Vol-Up) hides immediately and ignores SHOW for 3 s
-(`HideAndHold`), the time this app needs to receive EXIT and background itself.
+Any app can load the module. It grants nothing: every call ends in SA 9601,
+which answers this bundle's HAP token (and root) only.
 
-ApplyVisibility is mutex-serialized (concurrent visibility flips otherwise
-stranded grab=1 over a frozen container → total touch loss). Hide/show toggles
-node *visibility* rather than destroying it, so the container's last frame is
-retained (a fresh node is black until the container redraws). The compositor
-only listens to SHOW/HIDE **published by this bundle**
-(`SetPublisherBundleName`) — SHOW puts a fullscreen, touch-grabbing layer over
-OHOS and any app can publish a custom event — so `cem publish` from a shell no
-longer drives it; use the app, or `waydroid_session_test`.
-`entry/src/main/cpp/napi_init.cpp` is retained for the future XComponent path
-but is no longer built.
+## The window
+
+`pages/AppWindow` runs a small state machine off one timer rather than off
+events, because every precondition can come and go: the stack may not exist
+yet (this app's SHOW beat is what starts it on demand), Android may be
+booting, the supervisor may have rebuilt the generation (a new compositor
+forgets its windows). Each tick makes true what should be: a live window for
+the surface, the app launched into it, and — if no frame of it arrived within
+3 s — launched again (the hwc lets Android's display sleep while nothing is
+shown, and a launch that finds it asleep only wakes it).
+
+* The window's content area is what Android's display becomes — the compositor
+  configures the hwc with it — so Android lays out for exactly the space
+  between the OHOS bars (1080×2199 on the Plinius: 117 px status bar, 84 px
+  gesture bar).
+* Touch: XComponent `onTouch` → `sendTouch` (multi-touch, px). The OHOS back
+  gesture → `onBackPress` → `sendKey(158)` = Android BACK.
+* A splash (icon + name, "Starting Android…" on a cold start) covers the
+  surface until the compositor reports that app's own first frame
+  (`ontop <package>`), so the previous app's last frame is never shown.
+* Which window is in front is reported (`setWindowActive`): the compositor
+  activates exactly that task's window, which is what makes the hwc present
+  it and focus it in Android.
+
+## When a window closes
+
+`AppWindowAbility` listens to the compositor's
+`org.oniroproject.waydroid.TASK` events (sent to this bundle only):
+
+| Event | Reaction |
+|---|---|
+| `ontop <mine>` | drop the splash |
+| `inactive <mine>` while in front | the user backed out of the app's last screen → `terminateSelf()` |
+| `ontop <other>` while in front, and `<other>` has **no** window | Android opened a task of its own (a picker, a share target) → it gets a window, this one goes to the background |
+| `gone <mine>` | the task ended → `terminateSelf()` |
+
+Swiping the card away in recents (or any other end of the ability) calls
+`closeApp(package)`; the hwc removes the Android task, so nothing keeps
+running behind the user's back. Tasks that already have a window are never
+switched by us — reacting to those made two open windows fight for the top
+for ever.
+
+The recents card carries the app's **name** but not its icon: SceneBoard
+keeps one updated mission icon per *bundle*, so every card would show the icon
+of the app opened last. Per-app icons need per-app bundles (integration plan,
+phase A4).
+
+## The lease (start on demand, freeze, crash safety)
+
+`model/Lifecycle.ets`. While anything of ours is in the foreground the app
+publishes `org.oniroproject.waydroid.SHOW` every 2 s; when nothing has been
+for 400 ms, `HIDE`. The compositor treats it as a lease (10 s): thawed while
+it holds, frozen (cgroup freezer, ~0 CPU) when it does not.
+
+* **start on demand** — nothing of the stack runs until this app is opened;
+  the first SHOW makes samgr start it (`../sa_profile/9601.json`). Opening the
+  grid is usually enough head start for Android to be up by the first tap.
+* **recovery** — a generation rebuilt by the supervisor is picked up by the
+  next tick; an open window re-attaches and relaunches by itself (seen: the
+  90 s first-frame watchdog firing under an open window).
+* **safety** — if this app dies, the container freezes when the lease runs
+  out, and the dead window is detached through its producer's death recipient.
+
+It is counted across abilities and lives in `AppStorage`: the in-tree ets
+build bundles every ability and page separately, so a module variable exists
+once per bundle.
+
+Measured on the Plinius (2026-09-21): tap → first frame of the app **0.5 s**
+when it is already running, **0.9 s** when it is not, **~21 s** from a fully
+dormant stack (one tap; the splash says "Starting Android…").
+
+## The debug overlay
+
+How Android was shown before it moved into windows — a fullscreen
+self-drawing node above everything with a global touch grab — still exists
+for bring-up without any app: `param set waydroid.debug.overlay 1`, then
+restart the generation. It paints over the lock screen, which is why it is
+not the default; this app's EXIT subscriber only serves its Vol-Down+Vol-Up
+chord.
 
 ## Talking back: STATUS, and first-run provisioning
 
@@ -166,12 +209,9 @@ hdc shell "aa start -a EntryAbility -b org.oniroproject.androidapps"
 
 ## Status
 
-Verified on the Plinius, 2026-09-21 — provisioning: with no images on the
-device the app offered the download, fetched and unpacked both, the supervisor
-went `verifying` → `starting` and Android came up from files in this app's
-storage; a byte flipped in one of them → `bad-images`, copy deleted, *Download
-again* worked; uninstalling gave the 2 GB back. Lifecycle: opening the app on a device with nothing
-of the stack running → samgr starts the supervisor within 1 s → revealed by the
-next beat → first frame ~10–12 s → Android booted ~15–20 s. Backgrounding
-freezes and releases touch; killing the app in the foreground → the lease hides
-the container 10 s later; 0 processes after the idle stop or a disable.
+Verified on the Plinius, 2026-09-21 (Android 16 image): grid from cache and
+from Android; Calculator, Clock and Settings each in their own window with
+touch and BACK; round-robin switching between three windows, state kept;
+backing out closes the window and ends the task; swiping a recents card away
+ends the task; cold start from a dormant stack with one tap; recovery of an
+open window across a supervisor rebuild; provisioning as before.

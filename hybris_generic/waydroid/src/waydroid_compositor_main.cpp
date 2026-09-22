@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2026 Oniro / Hybris Generic.
- * Licensed under the Apache License, Version 2.0 (the "License").
+ * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+ * SPDX-License-Identifier: Apache-2.0
  *
  * waydroid_compositor — the OHOS side of the Waydroid display bridge.
  *
@@ -8,9 +8,16 @@
  * app process, because the gralloc import it does per frame needs the
  * nested /android/vendor mount that appspawn'd sandboxes cannot see.
  *
- * Stage 1 (this file today): output is a self-drawing RSSurfaceNode, so
- * container pixels reach the panel with no ArkUI app in the picture.
- * Stage 2 swaps in an XComponent producer over binder — same frame path.
+ * Where the pixels go.  The product path: into the XComponent surfaces of
+ * ordinary OHOS windows of the "Android Apps" shell, one per Android task,
+ * handed over through the session SA (waydroid_session.h) — the OHOS status
+ * bar, gestures and recents stay in charge, and nothing of Android is on the
+ * panel unless such a window is.  The debug overlay
+ * (param set waydroid.debug.overlay 1, then restart the generation) is the
+ * original bring-up path: a fullscreen self-drawing RSSurfaceNode above
+ * everything, a global touch grab and a Vol-Down+Vol-Up exit chord.  It needs
+ * no app at all, which is its use — and it paints over the lock screen, which
+ * is why it is not the default.
  */
 
 #include <atomic>
@@ -402,6 +409,51 @@ private:
 
 std::shared_ptr<VisibilityReceiver> g_visReceiver;
 
+/*
+ * Bring-up console, debug images only (const.debuggable=1):
+ *
+ *   param set waydroid.debug.cmd "list"
+ *   param set waydroid.debug.cmd "close <toplevel>"
+ *   param set waydroid.debug.cmd "configure <toplevel|0> <w> <h> <activated>"
+ *
+ * Answers go to hilog (tag waydroid_server).  It exists to poke the
+ * container's hwcomposer — a closed fork on the Android 16 image — and see
+ * what it does; a param never changes twice to the same value, so append
+ * anything to repeat a command ("list 2").
+ */
+constexpr const char* kDebugCmdParam = "waydroid.debug.cmd";
+
+void OnDebugCmd(const char*, const char* value, void*)
+{
+    Server* server = g_server;
+    if (server == nullptr || value == nullptr) {
+        return;
+    }
+    char verb[16] = { 0 };
+    unsigned id = 0;
+    int w = 0;
+    int h = 0;
+    int activated = 1;
+    int n = sscanf(value, "%15s %u %d %d %d", verb, &id, &w, &h, &activated);
+    if (n < 1) {
+        return;
+    }
+    if (strcmp(verb, "list") == 0) {
+        for (const ToplevelInfo& t : server->Toplevels()) {
+            HILOG_INFO(LOG_CORE, "debug list: toplevel %{public}u client %{public}u '%{public}s' "
+                       "'%{public}s' mapped %{public}d frames %{public}llu", t.id, t.client,
+                       t.appId.c_str(), t.title.c_str(), t.mapped,
+                       static_cast<unsigned long long>(t.frames));
+        }
+    } else if (strcmp(verb, "close") == 0 && n >= 2) {
+        server->Post([server, id]() { server->CloseToplevel(id); });
+    } else if (strcmp(verb, "configure") == 0 && n >= 4) {
+        server->Post([server, id, w, h, activated]() {
+            server->ConfigureToplevel(id, w, h, activated != 0);
+        });
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -429,7 +481,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (!server.Output().AttachSelfDrawingNode(cfg.screenId, cfg.width, cfg.height)) {
+    char overlayValue[8] = { 0 };
+    GetParameter("waydroid.debug.overlay", "0", overlayValue, sizeof overlayValue);
+    const bool overlay = strcmp(overlayValue, "1") == 0;
+    HILOG_INFO(LOG_CORE, "debug overlay %{public}s", overlay ? "ON" : "off");
+
+    if (overlay && !server.Output().AttachSelfDrawingNode(cfg.screenId, cfg.width, cfg.height)) {
         HILOG_ERROR(LOG_CORE, "output attach failed");
         return 1;
     }
@@ -455,12 +512,28 @@ int main(int argc, char** argv)
         }
     }, nullptr);
 
-    /* On-device escape from the touch grab (Vol-Down + Vol-Up → home). */
-    RegisterExitChord(&server);
+    {
+        char debuggable[8] = { 0 };
+        GetParameter("const.debuggable", "0", debuggable, sizeof debuggable);
+        if (strcmp(debuggable, "1") == 0) {
+            WatchParameter(kDebugCmdParam, OnDebugCmd, nullptr);
+        }
+    }
+
+    /* On-device escape from the overlay's touch grab (Vol-Down + Vol-Up →
+     * home).  In a window the OHOS gestures work, so there is nothing to
+     * escape from. */
+    if (overlay) {
+        RegisterExitChord(&server);
+    }
 
     /* W5: publish the session SA so the "Android Apps" front-end can hand
      * over its XComponent surface, forward touch, and drive lifecycle. */
+    server.SetToplevelListener([&server](ToplevelEvent ev, const ToplevelInfo& info) {
+        WaydroidSessionStub::OnToplevelEvent(&server, ev, info);
+    });
     WaydroidSessionStub::Publish(&server);
+    WaydroidSessionStub::StartControlPlane(&server);
 
     /* W5 lifecycle: subscribe to the launcher's SHOW/HIDE common events so
      * the container follows the app fore/background.  Startup is the fully
@@ -494,6 +567,7 @@ int main(int argc, char** argv)
      * handshake keeps the logs clean — same shape as androidd's
      * android.composer.ready). */
     SetParameter("waydroid.compositor.frames", "0");
+    SetParameter("waydroid.session.visible", "0");
     SetParameter("waydroid.compositor.ready", "1");
 
     HILOG_INFO(LOG_CORE, "entering event loop");
@@ -510,6 +584,7 @@ int main(int argc, char** argv)
         g_exitChordId = -1;
     }
     WaydroidSessionStub::Withdraw();
+    WaydroidSessionStub::StopControlPlane();
     grab.Apply(false);
     g_grab = nullptr;
     SetParameter("waydroid.compositor.ready", "0");

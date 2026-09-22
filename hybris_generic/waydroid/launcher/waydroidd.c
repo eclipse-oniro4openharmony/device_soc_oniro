@@ -15,8 +15,9 @@
  *    all new.  Nothing in this container talks hwbinder to OHOS VDIs;
  *    the only shared binder is /dev/host_hwbinder (the Halium host-HAL
  *    passthrough door, gated by a trimmed hosthals.xml).
- *  - Binder devices are the static `anbox-*` trio the kernel already
- *    provides (halium.config's literal "# Waydroid" section).
+ *  - Binder devices come from a binderfs instance of the container's own,
+ *    mounted inside its mount namespace — not the kernel's static `anbox-*`
+ *    trio, which every OHOS app can open (see child_main).
  *  - /data is a real ext4 loop image (app installs must persist);
  *    system.img / vendor.img are the sha256-pinned Waydroid OTA images.
  *  - The Halium /vendor (Android 14 MTK blobs) is rbind-mounted at
@@ -112,9 +113,9 @@
 #define HALIUM_VENDOR  "/android/vendor"
 #define HALIUM_ODM     "/android/odm"
 
-#define ANBOX_BINDER    "/dev/binderfs/anbox-binder"
-#define ANBOX_HWBINDER  "/dev/binderfs/anbox-hwbinder"
-#define ANBOX_VNDBINDER "/dev/binderfs/anbox-vndbinder"
+/* The container's own binder worlds: a binderfs instance of its own,
+ * mounted inside its mount namespace (see child_main). */
+#define PRIVATE_BINDERFS WAYDROID_DIR "/run/binderfs"
 #define HOST_HWBINDER   "/dev/binderfs/hwbinder"
 
 #define CHILD_STACK_SIZE (1 * 1024 * 1024)
@@ -837,21 +838,40 @@ static int child_main(void *arg)
     bind_dir("/dev/dri",      ROOTFS "/dev/dri");
     bind_dir("/dev/char",     ROOTFS "/dev/char");
 
-    /* Binder: the static anbox-* trio as the container's own worlds,
-     * host hwbinder as the host-HAL passthrough door.  binderfs nodes
-     * are 0600 root:root; servicemanager & co. run as system. */
+    /* Binder: a binderfs instance of the container's own, host hwbinder as
+     * the host-HAL passthrough door.
+     *
+     * Every binderfs mount is a separate instance with separate contexts, so
+     * this servicemanager is reachable through these three nodes and through
+     * nothing else.  The static /dev/binderfs/anbox-* nodes we used to bind
+     * here are world-accessible AND visible inside every OHOS app sandbox:
+     * any app could look up the container's services and drive it
+     * (installApp, launchIntent, ...).
+     *
+     * Mounted here rather than by the parent on purpose: this is the child's
+     * private mount namespace, so the instance never exists on the host, it
+     * needs no unmount — it goes with the namespace, also after a kill -9 —
+     * and the mountpoint below is just an empty directory to everyone else.
+     * Host-side root tools reach the container's binder through its root:
+     * /proc/<container init pid>/root/dev/binder.
+     *
+     * The nodes are 0600 root:root; servicemanager & co. run as system. */
+    mkdir_p(PRIVATE_BINDERFS, 0700);
+    if (mount("binder", PRIVATE_BINDERFS, "binder", 0, NULL) < 0)
+        die("mount private binderfs: %s", strerror(errno));
     touch_file(ROOTFS "/dev/binder");
     touch_file(ROOTFS "/dev/vndbinder");
     touch_file(ROOTFS "/dev/hwbinder");
     touch_file(ROOTFS "/dev/host_hwbinder");
-    if (mount(ANBOX_BINDER, ROOTFS "/dev/binder", NULL, MS_BIND, NULL) < 0)
-        die("bind anbox-binder: %s", strerror(errno));
-    if (mount(ANBOX_VNDBINDER, ROOTFS "/dev/vndbinder",
+    if (mount(PRIVATE_BINDERFS "/binder", ROOTFS "/dev/binder",
               NULL, MS_BIND, NULL) < 0)
-        die("bind anbox-vndbinder: %s", strerror(errno));
-    if (mount(ANBOX_HWBINDER, ROOTFS "/dev/hwbinder",
+        die("bind private binder: %s", strerror(errno));
+    if (mount(PRIVATE_BINDERFS "/vndbinder", ROOTFS "/dev/vndbinder",
               NULL, MS_BIND, NULL) < 0)
-        die("bind anbox-hwbinder: %s", strerror(errno));
+        die("bind private vndbinder: %s", strerror(errno));
+    if (mount(PRIVATE_BINDERFS "/hwbinder", ROOTFS "/dev/hwbinder",
+              NULL, MS_BIND, NULL) < 0)
+        die("bind private hwbinder: %s", strerror(errno));
     if (mount(HOST_HWBINDER, ROOTFS "/dev/host_hwbinder",
               NULL, MS_BIND, NULL) < 0)
         logmsg("bind host_hwbinder: %s (host-HAL passthrough off)",

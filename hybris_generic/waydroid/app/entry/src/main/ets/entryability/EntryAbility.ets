@@ -1,25 +1,17 @@
-// Copyright (C) 2026 Oniro / Hybris Generic. Apache-2.0.
+// Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+// SPDX-License-Identifier: Apache-2.0
 //
-// "Android Apps" launcher ability (W5, pure-ArkUI design).  This app owns
-// no native code: it is only a launcher entry + lifecycle signal.  The
-// container's pixels reach the panel through the compositor's self-drawing
-// node (W3), and this ability publishes SHOW/HIDE common events on
-// fore/background.  The compositor subscribes and
-// WaydroidSessionStub::ApplyVisibility shows+thaws or hides+freezes the
-// container, and moves the touch grab to match.  No inner samgr/surface
-// libs in the HAP, so none of the app-sandbox native-load / namespace
-// barriers apply (see README).
+// "Android Apps": the launcher entry.  Its page is the grid of Android apps
+// (pages/Index); each app then opens in a window of its own
+// (appwindow/AppWindowAbility).
 //
-// SHOW is a heartbeat, not an edge: it is republished every SHOW_BEAT_MS for
-// as long as the ability is in the foreground.  That one decision buys three
-// things without any native code or extra permission:
-//   * on-demand start — nothing of the stack runs until this app is opened;
-//     samgr starts it from the first SHOW (sa_profile/9601.json), and a later
-//     beat reveals the compositor that did not exist yet when the first fired;
-//   * recovery — a container generation that died and was rebuilt comes up
-//     hidden, and the next beat reveals it;
-//   * safety — the compositor treats visibility as a lease, so if this app
-//     dies without saying HIDE the panel and touch go back to OHOS.
+// Two conversations with the root side run from here, both as common events
+// because an app can read nothing of the stack:
+//   * out — the foreground lease (model/Lifecycle): SHOW beats while anything
+//     of ours is in front.  The first beat is also what STARTS the stack on
+//     demand (samgr, sa_profile/9601.json);
+//   * in  — the supervisor's STATUS (disabled / needs-images / starting / …),
+//     which the page turns into the first-run screens.
 
 import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
@@ -27,14 +19,13 @@ import hilog from '@ohos.hilog';
 import commonEventManager from '@ohos.commonEventManager';
 import type { BusinessError } from '@ohos.base';
 import { KEY_STATUS, KEY_SYS_URL, KEY_VEN_URL } from '../model/Provisioner';
+import { enterForeground, leaveForeground, styleWindow } from '../model/Lifecycle';
 
 // An app's hilog domain is 16 bits; anything above is silently dropped.
 const DOMAIN = 0x2500;
 const TAG = 'androidapps.ability';
-// Custom events the compositor subscribes to (see waydroid_compositor_main.cpp).
-const EVENT_SHOW = 'org.oniroproject.waydroid.SHOW';
-const EVENT_HIDE = 'org.oniroproject.waydroid.HIDE';
-// The compositor publishes this on the exit chord (Vol-Down + Vol-Up).  Only
+// The compositor publishes this on the debug overlay's exit chord (Vol-Down +
+// Vol-Up; see waydroid_compositor_main.cpp — not part of the product path).  Only
 // the app itself can reliably return OHOS to the home screen (StartAbility
 // (home) does not background a foreground app under sceneboard, and
 // MinimizeAllAppWindows is a silent no-op unless the launcher registered its
@@ -45,24 +36,10 @@ const EVENT_EXIT = 'org.oniroproject.waydroid.EXIT';
 //   disabled | verifying | starting | running |
 //   needs-images|bad-images <sys-url> <sys-sha256> <ven-url> <ven-sha256>
 const EVENT_STATUS = 'org.oniroproject.waydroid.STATUS';
-// Must stay well under the compositor's lease (kVisibilityLeaseMs, 10 s).
-const SHOW_BEAT_MS = 2000;
-
-function publishEvent(event: string, quiet: boolean = false): void {
-  commonEventManager.publish(event, (err) => {
-    if (err) {
-      hilog.error(DOMAIN, TAG, 'publish %{public}s failed: %{public}s',
-        event, JSON.stringify(err));
-    } else if (!quiet) {
-      hilog.info(DOMAIN, TAG, 'published %{public}s', event);
-    }
-  });
-}
 
 export default class EntryAbility extends UIAbility {
   private exitSubscriber?: commonEventManager.CommonEventSubscriber;
   private statusSubscriber?: commonEventManager.CommonEventSubscriber;
-  private showBeat?: number;
 
   onCreate(): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
@@ -131,31 +108,15 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
-  private stopShowBeat(): void {
-    if (this.showBeat !== undefined) {
-      clearInterval(this.showBeat);
-      this.showBeat = undefined;
-    }
-  }
-
   onForeground(): void {
-    // App in the foreground → start the stack if it is down, show + thaw the
-    // container, and keep saying so (see the header).
-    publishEvent(EVENT_SHOW);
-    this.stopShowBeat();
-    this.showBeat = setInterval(() => publishEvent(EVENT_SHOW, true), SHOW_BEAT_MS);
+    enterForeground();
   }
 
   onBackground(): void {
-    // App left the foreground → hide + freeze the container so it costs no
-    // CPU and OHOS gets the panel and touch back.
-    this.stopShowBeat();
-    publishEvent(EVENT_HIDE);
+    leaveForeground();
   }
 
   onDestroy(): void {
-    this.stopShowBeat();
-    publishEvent(EVENT_HIDE);
     if (this.exitSubscriber) {
       commonEventManager.unsubscribe(this.exitSubscriber);
       this.exitSubscriber = undefined;
@@ -172,8 +133,7 @@ export default class EntryAbility extends UIAbility {
         hilog.error(DOMAIN, TAG, 'loadContent failed: %{public}s', JSON.stringify(err));
         return;
       }
-      // Fullscreen so the container overlay owns the whole panel.
-      windowStage.getMainWindowSync().setWindowLayoutFullScreen(true);
+      styleWindow(windowStage);
     });
   }
 }

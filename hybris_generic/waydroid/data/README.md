@@ -17,6 +17,23 @@ neither — see `../gralloc_bridge/README.md`.
 | `waydroid.prop` | the container's property file, bind-mounted over the shim vendor's placeholder. Mirrors upstream `make_base_props()` for a Halium MTK host, plus the ansuz identity, `ro.sf.lcd_density=480` and the ARM EGL block. `/data/waydroid/waydroid.prop`, if present, overrides it. |
 | `hosthals.xml` | trimmed host-HAL passthrough list (plan D11): only allocator, mapper, memtrack, media.c2 and MediaTek mms. Every HAL that OHOS already owns a client of (camera, drm, power, thermal, vibrator, gnss, nfc…) is dropped to avoid double-client contention. `/data/waydroid/hosthals.xml`, if present, overrides it. |
 
+Also here, because it is data too:
+
+* `overlay/` — `OniroNoBars.apk`, a static resource overlay on the Android
+  framework (no code, five values) that removes Android's status bar and
+  navigation bar: Android apps run inside OHOS windows, under the OHOS bars.
+  Installed into the graft (`/odm/overlay`), which Android scans at boot.
+  Committed prebuilt; `overlay/build_rro.sh` rebuilds it against the running
+  container's `framework-res.apk` — **do that after every image bump**: the
+  build fails if a resource name is gone, instead of the bars silently coming
+  back. The status bar is 1 px, not 0: on Android 16 a zero-height status bar
+  makes the desktop-windowing caption steal every touch from the app (see the
+  comment in `overlay/nobars/res/values/values.xml`).
+* `../provision/waydroid-provision.rc` — disables LineageOS' setup wizard once
+  Android has booted. An unfinished wizard holds the HOME role and puts itself
+  in front of whatever is launched. From init inside the container because
+  `pm` started from outside hangs (no caller identity).
+
 Two `waydroid.prop` settings are load-bearing and were each paid for with a
 boot failure:
 

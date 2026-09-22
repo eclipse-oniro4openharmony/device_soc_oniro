@@ -11,8 +11,8 @@
  *   wl_compositor   surfaces + regions
  *   wl_subcompositor stub (hwc binds it but the fullscreen path never
  *                    creates subsurfaces)
- *   wl_seat         touch + keyboard; the hwc converts our events into
- *                    evdev packets on container-internal FIFOs
+ *   wl_seat         touch + keyboard (BACK); the hwc converts our events
+ *                    into evdev packets on container-internal FIFOs
  *   wl_output       one mode, from the OHOS display info
  *   wl_shm          libwayland's built-in (cursor/fallback only)
  *   xdg_wm_base     surface → toplevel, configure/ack, close
@@ -60,6 +60,36 @@ struct TouchOp {
     int32_t y = 0;
 };
 
+/*
+ * One xdg_toplevel.  In the hwc's full-UI mode there is a single one
+ * (app_id "Waydroid") carrying the whole Android display; in its per-task
+ * modes there is one per Android task — a "card" — with app_id
+ * "waydroid.<package>" and the task's label as the title.  The table is the
+ * compositor's only knowledge of what Android is showing, and it is what the
+ * session SA turns into taskOnTop / taskGone / allGone for the shell.
+ */
+struct ToplevelInfo {
+    uint32_t id = 0;            /* ours; unique for the server's lifetime */
+    uint32_t client = 0;        /* which wayland connection (1, 2, ...) */
+    std::string appId;
+    std::string title;
+    bool mapped = false;        /* has committed a real (wlegl) buffer */
+    uint64_t frames = 0;
+};
+
+/* Android's HOME activity (setup wizard / launcher3): has a window in the
+ * hwc's per-task mode, is never shown, and its coming to the top means "the
+ * app was backed out of". */
+bool IsHomePackage(const std::string& package);
+
+enum class ToplevelEvent : int32_t {
+    Created = 0,
+    Updated,        /* app_id or title changed */
+    OnTop,          /* started presenting: its frames are what is on screen */
+    Inactive,       /* stopped: the hwc parked a snapshot on its surface */
+    Destroyed,
+};
+
 class Server {
 public:
     Server() = default;
@@ -90,7 +120,7 @@ public:
      * thread-safe, so the actual wl_buffer.release is sent from
      * DrainReleases() on the wayland thread.
      */
-    void TrackInFlight(SurfaceBuffer* buffer, struct wl_resource* wlBuffer);
+    void TrackInFlight(SurfaceBuffer* buffer, struct wl_resource* wlBuffer, int32_t window = 0);
     void UntrackInFlight(SurfaceBuffer* buffer);
 
     /* Hand every in-flight buffer back to its client at once (wayland
@@ -123,7 +153,84 @@ public:
      * the front-end app surface goes away / dies). */
     void RevertToSelfDrawing();
 
-    OutputSurface& Output() { return output_; }
+    /* Run fn on the wayland thread, soon.  Any thread.  libwayland is not
+     * thread-safe, so everything that touches a wl_resource from an IPC,
+     * param-watch or input thread goes through here. */
+    void Post(std::function<void()> fn);
+
+    /*
+     * The toplevel table.  The bookkeeping calls run on the wayland thread
+     * (they are the xdg_toplevel request handlers); Toplevels() is a
+     * thread-safe snapshot.  The listener is called on the wayland thread
+     * and must not block.
+     */
+    using ToplevelListener = std::function<void(ToplevelEvent, const ToplevelInfo&)>;
+    void SetToplevelListener(ToplevelListener cb) { toplevelCb_ = std::move(cb); }
+    std::vector<ToplevelInfo> Toplevels();
+
+    uint32_t AddToplevel(struct wl_resource* toplevel, struct wl_resource* xdgSurface);
+    void RemoveToplevel(uint32_t id);
+    void SetToplevelAppId(uint32_t id, const char* appId);
+    void SetToplevelTitle(uint32_t id, const char* title);
+    void NoteToplevelFrame(uint32_t id);
+    void NoteToplevelInactive(uint32_t id);
+
+    /* Wayland thread (use Post).  Close asks the client to close that window
+     * — the hwc answers by removing the Android task.  Configure sends a new
+     * size (0 = keep) and activation state to one toplevel, or to all of
+     * them with id 0. */
+    void CloseToplevel(uint32_t id);
+    void ConfigureToplevel(uint32_t id, int32_t width, int32_t height, bool activated);
+
+    uint32_t NoteClientConnected();
+
+    /*
+     * Windows: one output per OHOS window (launcher plan L2–L4).
+     *
+     * The hwc gives every Android task its own xdg_toplevel and presents a
+     * task's frames on that toplevel's surface, so routing is by window: a
+     * frame goes to the window bound to its toplevel's package
+     * (app_id "waydroid.<package>"), else to a window bound to "" (takes
+     * whatever is on top — the single-window shell and the full desktop),
+     * else to the legacy fullscreen output if one is attached (debug
+     * overlay, bring-up tool), else it is dropped and the buffer handed
+     * straight back.
+     *
+     * Attach/Detach/… may be called from any thread; what touches wayland
+     * is posted to the wayland thread.
+     */
+    int32_t AttachWindow(const std::string& package, const sptr<IBufferProducer>& producer,
+                         int32_t width, int32_t height);
+    bool DetachWindow(int32_t window);
+    bool WindowAlive(int32_t window);
+    void WindowTouch(int32_t window, int32_t action, int32_t id, int32_t x, int32_t y);
+    /* evdev key code (KEY_BACK = 158): the hwc forwards wl_keyboard codes
+     * verbatim into Android's input FIFO. */
+    void WindowKey(int32_t window, int32_t code, bool down);
+    /* The OHOS window came to the front / went away: (de)activate the
+     * toplevel it shows, which makes the hwc switch Android's focused task. */
+    void SetWindowActive(int32_t window, bool active);
+    /* Ask the hwc to close every window of `package`; it removes the task. */
+    void CloseApp(const std::string& package);
+
+    /* wl_output bookkeeping (wayland thread). */
+    void AddOutputResource(struct wl_resource* output);
+    void RemoveOutputResource(struct wl_resource* output);
+
+    /* wl_keyboard bookkeeping (wayland thread). */
+    void AddKeyboardResource(struct wl_resource* keyboard);
+    void RemoveKeyboardResource(struct wl_resource* keyboard);
+
+    /* Frame path (wayland thread): where does a frame of this toplevel go?
+     * nullptr = nowhere.  The shared_ptr keeps a detaching output alive for
+     * the flush in progress. */
+    std::shared_ptr<OutputSurface> OutputFor(uint32_t toplevelId, int32_t* windowOut);
+    void NoteToplevelSurface(uint32_t toplevelId, struct wl_resource* surface);
+    void ReleaseInFlightOf(int32_t window);
+    /* What a toplevel is configured to (see outputWidth_). */
+    void OutputSize(int32_t* width, int32_t* height);
+
+    OutputSurface& Output() { return *output_; }
     BufferImporter& Importer() { return importer_; }
     const ServerConfig& Config() const { return config_; }
 
@@ -137,11 +244,42 @@ private:
 
     ServerConfig config_;
     struct wl_display* display_ = nullptr;
-    OutputSurface  output_;
+    /* The legacy fullscreen output: the debug overlay's self-drawing node or
+     * the bring-up tool's producer.  Unattached in the product path. */
+    std::shared_ptr<OutputSurface> output_ = std::make_shared<OutputSurface>();
     BufferImporter importer_;
 
+    struct Window {
+        int32_t id = 0;
+        std::string package;            /* "" = whatever is on top */
+        std::shared_ptr<OutputSurface> output;
+        sptr<IRemoteObject> producerObject;
+        sptr<IRemoteObject::DeathRecipient> death;
+        uint32_t toplevelId = 0;        /* whose frames it showed last */
+        bool active = true;
+    };
+    void SendKeyboardFocus(struct wl_resource* surface);
+
+    void ApplyActivation(bool edge);
+    void SendSurfaceOnOutput(uint32_t toplevelId, bool shown);
+
+    std::mutex windowsMutex_;
+    std::unordered_map<int32_t, std::shared_ptr<Window>> windows_;
+    int32_t nextWindowId_ = 1;
+    int32_t activeWindow_ = 0;          /* the OHOS window in front, if ours */
+    std::string activePackage_;         /* its package; "*" = whatever is on top */
+    /* What every toplevel is configured to: the attached window's size once
+     * there is one, the panel until then.  The hwc resizes Android's display
+     * to the LAST configure it saw from any toplevel, so they must agree. */
+    int32_t outputWidth_ = 0;
+    int32_t outputHeight_ = 0;
+
+    struct InFlight {
+        struct wl_resource* wlBuffer = nullptr;
+        int32_t window = 0;
+    };
     std::mutex inFlightMutex_;
-    std::unordered_map<SurfaceBuffer*, struct wl_resource*> inFlight_;
+    std::unordered_map<SurfaceBuffer*, InFlight> inFlight_;
     std::vector<struct wl_resource*> releasedPending_;
     std::unordered_set<struct wl_resource*> watchedBuffers_;
     int releaseEventFd_ = -1;
@@ -155,6 +293,32 @@ private:
     int touchEventFd_ = -1;
     std::vector<struct wl_resource*> touchResources_;
     struct wl_resource* inputSurface_ = nullptr;
+    std::vector<struct wl_resource*> outputResources_;
+    std::vector<struct wl_resource*> keyboardResources_;
+    struct wl_resource* keyboardFocus_ = nullptr;
+
+    struct ToplevelRec {
+        ToplevelInfo info;
+        struct wl_resource* toplevel = nullptr;
+        struct wl_resource* xdgSurface = nullptr;
+        struct wl_resource* surface = nullptr;   /* the wl_surface it presents on */
+        bool activated = false;                  /* what we last configured */
+        bool entered = false;                    /* wl_surface.enter sent */
+        bool home = false;                       /* Android's HOME: never shown */
+    };
+    void EmitToplevel(ToplevelEvent ev, const ToplevelInfo& info);
+    void DrainPosted();
+
+    std::mutex toplevelMutex_;      /* guards toplevels_ for Toplevels() */
+    std::unordered_map<uint32_t, ToplevelRec> toplevels_;
+    uint32_t nextToplevelId_ = 1;
+    uint32_t onTopId_ = 0;          /* the toplevel whose frames we show */
+    uint32_t clients_ = 0;
+    ToplevelListener toplevelCb_;
+
+    std::mutex postedMutex_;
+    std::vector<std::function<void()>> posted_;
+    int postedEventFd_ = -1;
 
     bool running_ = false;
     std::function<void()> tick_;

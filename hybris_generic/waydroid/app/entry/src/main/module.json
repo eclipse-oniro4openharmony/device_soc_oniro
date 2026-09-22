@@ -32,12 +32,26 @@
             ]
           }
         ]
+      },
+      {
+        "name": "AppWindowAbility",
+        "srcEntry": "./ets/appwindow/AppWindowAbility.ets",
+        "description": "$string:AppWindowAbility_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:app_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": false,
+        "launchType": "specified",
+        "orientation": "portrait",
+        "removeMissionAfterTerminate": true
       }
     ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
       }
-    ]
+    ],
+    "srcEntry": "./ets/stage/AppAbilityStage.ets"
   }
 }
