@@ -15,7 +15,7 @@
 
 declare_args() {
   # Android app support (the Waydroid container stack): compositor, container
-  # launcher, supervisor, gralloc bridge and the "Android Apps" front-end.
+  # launcher, supervisor, gralloc bridge and the Waydroid front-end.
   #
   # Off by default so that a product has to ask for it.  A product turns it on
   # from its config.json, together with the three things it depends on:

@@ -322,7 +322,7 @@ ohos_shared_library("androidcontainer") {
   subsystem_name = "oniro_soc_products"
 }
 
-# W5 bring-up tool: stand-in for the "Android Apps" front-end — proves the
+# W5 bring-up tool: stand-in for the Waydroid front-end — proves the
 # cross-process surface handoff + touch/freeze IPC with no HAP in the loop.
 ohos_executable("waydroid_session_test") {
   sources = [
@@ -360,7 +360,7 @@ group("waydroid_group") {
     ":waydroidd",
     ":wdctl",
 
-    # The "Android Apps" shell: the grid, and one OHOS window per Android app
+    # The Waydroid shell: the grid, and one OHOS window per Android app
     # (app/README.md).  Its native half is :androidcontainer above.
     "app:android_apps_hap",
   ]

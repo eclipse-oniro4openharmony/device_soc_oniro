@@ -1,7 +1,7 @@
 # Waydroid image pins: <name> <sha256>
 #
 # The two *.zip lines are what gets downloaded (by utils/host/waydroid-images.sh
-# from a host, or by the "Android Apps" front-end on the device); the two *.img
+# from a host, or by the Waydroid front-end on the device); the two *.img
 # lines are what is inside them, and what waydroidd checks before it mounts
 # anything — it refuses an image that is not listed here.  Bump all four
 # together.

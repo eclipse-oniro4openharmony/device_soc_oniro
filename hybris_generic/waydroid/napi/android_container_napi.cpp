@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * oniro.androidcontainer — the "Android Apps" shell's native half.
+ * oniro.androidcontainer — the Waydroid shell's native half.
  *
  *   const container = globalThis.requireNapi('oniro.androidcontainer')
  *

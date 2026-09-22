@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "Android Apps container front-end"
+      "value": "Waydroid — Android apps in OpenHarmony windows"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "Android Apps"
+      "value": "Waydroid"
     },
     {
       "name": "app_name",
-      "value": "Android Apps"
+      "value": "Waydroid"
     },
     {
       "name": "AppWindowAbility_desc",

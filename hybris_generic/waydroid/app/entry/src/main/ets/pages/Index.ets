@@ -1,14 +1,17 @@
 // Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// The grid of Android apps — and, before there is an Android to have apps,
-// the first-run screens (download offer, progress, "turned off").
+// Waydroid's page: the grid of Android apps, the first-run screens (download
+// offer, progress, "turned off") and — behind the gear — the settings panel
+// that manages the container itself (pages/ManagePanel).
 //
 // The grid is drawn from this app's own cache the moment the page appears
 // (model/AppCache), whatever state the container is in, and refreshed once
 // Android answers.  Opening this page is also what starts the stack on a
 // device where nothing of it runs yet: the ability's SHOW beat does that, and
 // by the time the user has found the app they want, Android is usually up.
+// Unless it was stopped on purpose — then nothing is asked for until the user
+// taps an app or presses Start.
 //
 // Tap: the app opens in a window of its own (AppWindowAbility, one per
 // package).  Long press: end that app's Android task.
@@ -19,13 +22,20 @@ import promptAction from '@ohos.promptAction';
 import type { BusinessError } from '@ohos.base';
 import container, { STATE_READY } from '../model/Container';
 import { AppCache, AppEntry } from '../model/AppCache';
+import { Change, Control, KEY_ENABLED, KEY_WANT_RUN, RUN_OFF, RUN_ON } from '../model/Control';
+import { poke, setQuiet, syncBeat } from '../model/Lifecycle';
+import { ManagePanel } from './ManagePanel';
 import {
   ImageSource, KEY_DETAIL, KEY_PHASE, KEY_PROGRESS, KEY_STATUS, KEY_SYS_URL, KEY_VEN_URL, Provisioner
 } from '../model/Provisioner';
 
 const DOMAIN = 0x2500;   // 16 bits for an app, or the line is dropped
-const TAG = 'androidapps.grid';
+const TAG = 'waydroid.grid';
 const TICK_MS = 1000;
+// Android's package list is not complete the moment it starts answering, and
+// an APK can be installed inside the container while the grid is open: ask
+// again every few ticks rather than once per visit.
+const REFRESH_TICKS = 5;
 
 @Entry
 @Component
@@ -36,24 +46,31 @@ struct Index {
   @StorageProp(KEY_PHASE) phase: string = '';
   @StorageProp(KEY_DETAIL) detail: string = '';
   @StorageProp(KEY_PROGRESS) progress: number = 0;
+  @StorageProp(KEY_ENABLED) support: number = -1;   // not `enabled`: that is an ArkUI attribute
+  @StorageProp(KEY_WANT_RUN) wantRun: string = RUN_ON;
   @State apps: AppEntry[] = [];
   @State ready: boolean = false;
+  @State manage: boolean = false;
 
   private provisioner?: Provisioner;
+  private control?: Control;
   private cache?: AppCache;
   private timer: number = -1;
   private refreshing: boolean = false;
   private fresh: boolean = false;       // refreshed since the page was last shown
+  private ticks: number = 0;
 
   aboutToAppear(): void {
     const context = getContext(this) as common.UIAbilityContext;
     this.provisioner = new Provisioner(context);
+    this.control = new Control(context.filesDir);
     this.cache = new AppCache(context.filesDir);
     this.apps = this.cache.load();
   }
 
   onPageShow(): void {
     this.fresh = false;                 // an APK installed meanwhile shows up now
+    this.ticks = 0;
     if (this.timer < 0) {
       this.timer = setInterval(() => this.tick(), TICK_MS);
     }
@@ -69,7 +86,11 @@ struct Index {
 
   private tick(): void {
     this.ready = container.getState() === STATE_READY;
-    if (!this.ready || this.fresh || this.refreshing || this.cache === undefined) {
+    if (!this.ready || this.refreshing || this.cache === undefined) {
+      return;
+    }
+    this.ticks = this.ticks + 1;
+    if (this.fresh && (this.ticks % REFRESH_TICKS) !== 0) {
       return;
     }
     this.refreshing = true;
@@ -94,6 +115,10 @@ struct Index {
     return this.phase === 'download' || this.phase === 'unpack';
   }
 
+  private stopped(): boolean {
+    return this.wantRun === RUN_OFF;
+  }
+
   // After a finished download the supervisor goes on saying needs-images
   // until its next look (a few seconds); that is not a reason to offer the
   // button again.  bad-images always is.
@@ -112,7 +137,29 @@ struct Index {
     this.provisioner.run(src);
   }
 
+  // Ask for the stack again: after Stop, or after the master switch was off.
+  // The control file is what the supervisor obeys; the SHOW is what starts it
+  // now rather than at the next beat.
+  private resume(turnOn: boolean): void {
+    const c = new Change();
+    c.run = RUN_ON;
+    if (turnOn) {
+      c.enabled = 1;
+      AppStorage.setOrCreate<number>(KEY_ENABLED, 1);
+    }
+    this.control?.apply(c);
+    // The supervisor confirms within a beat or two; until then do not keep
+    // showing the screen the user just left.
+    AppStorage.setOrCreate<string>(KEY_STATUS, '');
+    setQuiet(false);
+    syncBeat();
+    poke();
+  }
+
   private open(app: AppEntry): void {
+    if (this.stopped() || this.support === 0) {
+      this.resume(this.support === 0);  // tapping an app is asking for Android
+    }
     const context = getContext(this) as common.UIAbilityContext;
     context.startAbility({
       bundleName: context.abilityInfo.bundleName,
@@ -144,15 +191,19 @@ struct Index {
         Progress({ value: this.progress < 0 ? 0 : this.progress, total: 100, type: ProgressType.Linear })
           .width('80%').margin({ top: 28 }).color(0x3DDC84)
         Text(this.detail).fontSize(14).fontColor(0xCCCCCC).margin({ top: 12 })
-        Text('Keep Android Apps open until this finishes.')
+        Text('Keep Waydroid open until this finishes.')
           .fontSize(12).fontColor(0x888888).margin({ top: 24 })
-      } else if (this.status === 'disabled') {
-        this.Notice('Android apps are turned off on this device', '')
+      } else if (this.status === 'disabled' || this.support === 0) {
+        this.Notice('Android apps are turned off',
+          'Nothing of the Android container runs on this device until you turn it back on.')
+        Button('Turn on')
+          .margin({ top: 28 }).backgroundColor(0x3DDC84).fontColor(0x000000)
+          .onClick(() => this.resume(true))
       } else {
-        this.Notice(this.status === 'bad-images' ? 'The Android images failed verification'
+        this.Notice(this.status === 'bad-images' ? 'The Android image failed verification'
           : 'Android apps need a one-time download',
           'About 950 MB to download, 2 GB on the device. It is stored with this app: ' +
-          'uninstalling "Android Apps" frees the space again.')
+          'deleting it, or uninstalling Waydroid, frees the space again.')
         if (this.phase === 'error') {
           Text(this.detail).fontSize(13).fontColor(0xFF8A80).textAlign(TextAlign.Center)
             .width('80%').margin({ top: 12 })
@@ -171,20 +222,33 @@ struct Index {
   AppGrid() {
     Column() {
       Row() {
-        Text('Android apps').fontSize(26).fontWeight(FontWeight.Medium).fontColor(0xFFFFFF)
+        Text('Waydroid').fontSize(26).fontWeight(FontWeight.Medium).fontColor(0xFFFFFF)
         Blank()
-        if (!this.ready) {
+        if (this.stopped()) {
+          Button('Start')
+            .height(30).fontSize(13).backgroundColor(0x3DDC84).fontColor(0x000000)
+            .onClick(() => this.resume(false))
+        } else if (!this.ready) {
           LoadingProgress().width(22).height(22).color(0x3DDC84)
           Text(this.status === 'verifying' ? 'Checking…' : 'Starting Android…')
             .fontSize(13).fontColor(0xAAAAAA).margin({ left: 6 })
         }
+        Image($r('app.media.ic_manage')).width(22).height(22)
+          .opacity(0.7).margin({ left: 14 })
+          .onClick(() => { this.manage = true; })
       }
       .width('100%').padding({ left: 24, right: 24, top: 20, bottom: 12 })
 
       if (this.apps.length === 0) {
         Column() {
-          LoadingProgress().width(56).height(56).color(0xFFFFFF)
-          Text('Android is starting…').fontSize(16).fontColor(0xCCCCCC).margin({ top: 12 })
+          if (this.stopped()) {
+            Text('Waydroid is stopped').fontSize(16).fontColor(0xCCCCCC)
+            Text('Start it to see the apps installed in Android.')
+              .fontSize(13).fontColor(0x8A9199).margin({ top: 8 })
+          } else {
+            LoadingProgress().width(56).height(56).color(0xFFFFFF)
+            Text('Android is starting…').fontSize(16).fontColor(0xCCCCCC).margin({ top: 12 })
+          }
         }
         .justifyContent(FlexAlign.Center).width('100%').layoutWeight(1)
       } else {
@@ -221,7 +285,14 @@ struct Index {
 
   build() {
     Column() {
-      if (this.working() || this.status === 'disabled' || this.wantsImages()) {
+      if (this.manage) {
+        ManagePanel({
+          provisioner: this.provisioner,
+          control: this.control,
+          onClose: () => { this.manage = false; }
+        })
+      } else if (this.working() || this.status === 'disabled' || this.support === 0 ||
+        this.wantsImages()) {
         this.FirstRun()
       } else {
         this.AppGrid()

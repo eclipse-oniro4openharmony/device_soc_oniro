@@ -1,8 +1,9 @@
 // Copyright (C) 2026 Oniro / Hybris Generic. Apache-2.0.
 //
-// First-run provisioning: fetch the two upstream Waydroid images into THIS
-// app's storage.  Living here rather than in a root-owned directory is the
-// point — uninstalling "Android Apps" gives the 2 GB back.
+// Provisioning: fetch the two upstream Waydroid images into THIS app's
+// storage.  Living here rather than in a root-owned directory is the point —
+// deleting them from the settings panel, or uninstalling Waydroid, gives the
+// 2 GB back.
 //
 // This app is not trusted with them.  What and where to download comes from
 // the supervisor's STATUS event (it reads images.manifest, which ships in the
@@ -23,7 +24,7 @@ import type common from '@ohos.app.ability.common';
 import type { BusinessError } from '@ohos.base';
 
 const DOMAIN = 0x2500;   // 16 bits for an app, or the line is dropped
-const TAG = 'androidapps.provision';
+const TAG = 'waydroid.provision';
 
 // 0.95 GB of zips + 2.07 GB unpacked; the system zip is deleted before the
 // vendor one is fetched, but leave headroom for Android's own data.img.
@@ -73,6 +74,22 @@ export class Provisioner {
     return this.busy;
   }
 
+  // What our own copy of the images costs, for the settings panel.  0 when
+  // there is none (a host-pushed copy in /data/waydroid is not ours to weigh
+  // or to delete — the supervisor reports that one instead).
+  imagesBytes(): number {
+    let total: number = 0;
+    const names: string[] = ['system.img', 'vendor.img'];
+    for (const name of names) {
+      try {
+        total += fs.statSync(this.imagesDir() + '/' + name).size;
+      } catch (e) {
+        // not there: nothing to add
+      }
+    }
+    return total;
+  }
+
   // The supervisor said `bad-images`: whatever we have is useless.
   discard(): void {
     if (this.busy) {
@@ -101,7 +118,7 @@ export class Provisioner {
         enableMetered: true,
         enableRoaming: false,
         background: true,
-        title: 'Android Apps — ' + label
+        title: 'Waydroid — ' + label
       };
       // The download service queues a task silently while the device is
       // offline (and WiFi has a way of coming up off on this phone): say so
@@ -148,7 +165,8 @@ export class Provisioner {
   }
 
   async run(src: ImageSource): Promise<void> {
-    if (this.busy) {
+    const phase: string = AppStorage.get<string>(KEY_PHASE) ?? '';
+    if (this.busy || phase === 'download' || phase === 'unpack') {
       return;
     }
     this.busy = true;

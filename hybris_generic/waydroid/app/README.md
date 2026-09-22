@@ -1,16 +1,21 @@
-# Android Apps — the OHOS shell for Android apps
+# Waydroid — the OHOS front-end for Android apps
 
-`org.oniroproject.androidapps`: an ArkUI system app that lists the Android apps
-installed in the Waydroid container and opens each of them **in an ordinary
-OHOS window** — OHOS status bar, OHOS gesture navigation, OHOS open/close
-animations, one recents card per Android app. Android draws no bars of its own
-(`../data/overlay/`), and nothing of Android is on the panel unless such a
-window is. Plan and measurements:
-`docs/hybris_generic/android_app_launcher_plan.md`.
+**Waydroid** (bundle `org.oniroproject.androidapps`, hap `AndroidApps.hap` —
+the first version's spelling, kept because the signing profile, the
+compositor's caller check and the supervisor's path to the images all name it):
+an ArkUI system app that lists the Android apps installed in the Waydroid
+container and opens each of them **in an ordinary OHOS window** — OHOS status
+bar, OHOS gesture navigation, OHOS open/close animations, one recents card per
+Android app. Android draws no bars of its own (`../data/overlay/`), and nothing
+of Android is on the panel unless such a window is. It is also where the
+container itself is managed: start, stop, the master switch, the image.
+Plan and measurements: `docs/hybris_generic/android_app_launcher_plan.md`.
 
 ```
  EntryAbility ─ pages/Index        the grid: icons + names from this app's own
-                                   cache, refreshed when Android answers
+                  │                cache, refreshed while Android answers
+                  └ pages/ManagePanel   the gear: container + options + image
+                        │               (model/Control → the control file)
  AppWindowAbility ─ pages/AppWindow   one instance per Android package
    (launchType "specified",           (stage/AppAbilityStage: key = package)
     key = package)                    XComponent(SURFACE) + splash
@@ -119,24 +124,84 @@ restart the generation. It paints over the lock screen, which is why it is
 not the default; this app's EXIT subscriber only serves its Vol-Down+Vol-Up
 chord.
 
-## Talking back: STATUS, and first-run provisioning
+## Talking back: STATUS
 
 This app can read nothing of the stack (no params, no `/data/waydroid`), so the
-supervisor tells it: `org.oniroproject.waydroid.STATUS`, data =
+supervisor tells it: `org.oniroproject.waydroid.STATUS`, data = one state word
+followed by `key=value` tokens.
 
-| data | the page shows |
+| state | the page shows |
 |---|---|
-| `disabled` | "Android apps are turned off on this device" (`persist.waydroid.enabled` ≠ 1 — device policy, not ours to change) |
-| `needs-images <sys-url> <sha> <ven-url> <sha>` | the one-time download offer |
-| `verifying` | "Checking the Android images…" |
-| `bad-images <same four>` | "failed verification" + *Download again*; the page also deletes its copy |
+| `disabled` | "Android apps are turned off" + *Turn on* (`persist.waydroid.enabled` ≠ 1) |
+| `stopped` | the grid with a *Start* chip; the panel says the container is torn down |
+| `needs-images` | the one-time download offer |
+| `verifying` | "Checking…" |
+| `bad-images` | "failed verification" + *Download again*; the page also deletes its copy |
 | `starting` / `running` | the spinner / nothing (the container covers the page) |
+
+The tokens are everything the app would otherwise have to read for itself, and
+they come with **every** state:
+
+| token | |
+|---|---|
+| `sys=` `syssha=` `ven=` `vensha=` | what to download, from `images.manifest` — sent always, so *Download again* works without waiting to be offered |
+| `en=` `as=` `idle=` | `persist.waydroid.{enabled,autostart,idle_stop_s}` as they really are |
+| `seq=` `run=` | which control seq the root side has applied, and what it read |
+| `img=` `imgsz=` | `none` / `app` (ours) / `data` (host-pushed), and its size in bytes |
+
+States that last are repeated every 10 s, so a panel opened long after the
+container came up still fills in.
+
+## Being obeyed: the control file
+
+The panel behind the gear (`pages/ManagePanel`) starts and stops the container,
+flips the master switch and `autostart`, sets the idle timeout, and downloads or
+deletes the image. None of that can be done from an app: `persist.waydroid.*`
+is root-only and must stay that way (the `.para.dac` route bricked a device
+once). So `model/Control.ets` writes what the user wants into `filesDir/control`
+— the same directory the supervisor already reads the images from — and the
+supervisor applies it within two seconds:
+
+```
+seq 7                bumped on every change; a change is applied once
+run on|off|restart   Start / Stop / Restart
+enabled 0|1          -> persist.waydroid.enabled
+autostart 0|1        -> persist.waydroid.autostart
+idle_stop <seconds>  -> persist.waydroid.idle_stop_s
+```
+
+Four things make this work, and each one is load-bearing:
+
+* **`seq`, not the values, is the request.** The applied seq is remembered in
+  `waydroid.control.seq` (a runtime param), so a value set by hand from a shell
+  is left alone until the app asks for something *new*. For the same reason the
+  app writes the values the STATUS reported, not its own stale copy, for
+  everything the user did not just change.
+* **The file is written through a rename**, because the supervisor reads it as
+  root every two seconds with no locking of any kind.
+* **A STATUS older than the last request is dropped** (it carries the `seq` the
+  root side has applied). Without that, the `stopped` the supervisor publishes
+  on its way out — delivered a moment after the user pressed *Start* — would
+  silence the very beat that is starting the stack again.
+* **A stopped stack can still be started.** Nothing of ours runs when the
+  master switch is off — so the request would have nobody to reach. It reaches
+  the supervisor anyway: the app's `SHOW` makes samgr start it
+  (`../sa_profile/9601.json`), and its *first* action, before its own
+  `enabled` gate, is to apply the control file.
+* **Stop means stop.** The SHOW beat is what starts the stack on demand, so
+  `model/Lifecycle` stops beating while `run off` (or `disabled`) — otherwise
+  being in the foreground would start a supervisor every two seconds, each of
+  which tears itself down again. Tapping an app in the grid, *Start*, or
+  *Turn on* writes `run on` and beats again. `run off` survives a reboot; one
+  tap on any app undoes it.
+
+## First-run provisioning
 
 `model/Provisioner.ets` downloads the two zips (`@ohos.request`), unpacks them
 (`@ohos.zlib`) into `filesDir/images.tmp` and renames that to `filesDir/images`
 at the very end, so the supervisor never sees half a file. 946 MB down, 2.07 GB
 on the device, ~3 min on a good link. Storing them with the app is the point:
-**uninstalling "Android Apps" gives the space back** (measured: 2.03 GB within
+**deleting them, or uninstalling Waydroid, gives the space back** (measured: 2.03 GB within
 5 s, with Android running at the time — the supervisor notices the images are
 gone and tears down, and the loop devices are auto-clear).
 
@@ -215,3 +280,15 @@ touch and BACK; round-robin switching between three windows, state kept;
 backing out closes the window and ends the task; swiping a recents card away
 ends the task; cold start from a dormant stack with one tap; recovery of an
 open window across a supervisor rebuild; provisioning as before.
+
+2026-09-22, the settings panel, all on device: *Stop* tears the generation down
+(no `waydroid_compositor`/`waydroidd` left) and *Start* brings a new one back;
+*Restart* rebuilds it (new container pid); *Start at boot* and *Stop when
+unused* land in `persist.waydroid.{autostart,idle_stop_s}`; the master switch
+turns everything off (`persist.waydroid.enabled=0`, nothing resident) **and
+back on from an app with no supervisor running at all**; with the container
+stopped, tapping an app in the grid starts the stack and opens the app
+(Calculator, cold, ~60 s). The grid now re-asks Android every 5 s while it is
+open, because the package list is not complete the moment Android starts
+answering — a first answer of one app used to stick until the page was left
+and re-entered.

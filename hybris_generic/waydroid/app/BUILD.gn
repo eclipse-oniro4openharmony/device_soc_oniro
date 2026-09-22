@@ -1,8 +1,12 @@
 # Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
 # SPDX-License-Identifier: Apache-2.0
 #
-# "Android Apps" — the OHOS shell for Android apps: a grid of the container's
-# apps, each opened in an ordinary OHOS window (see README.md).
+# "Waydroid" — the OHOS front-end for Android apps: a grid of the container's
+# apps, each opened in an ordinary OHOS window, plus the settings panel that
+# manages the container itself (see README.md).  The bundle name and the hap
+# file keep the org.oniroproject.androidapps / AndroidApps.hap spelling of the
+# first version: the signing profile, the compositor's caller check and the
+# supervisor's path to the images all name it.
 #
 # The HAP itself bundles no native code: what needs the inner samgr/surface
 # APIs lives in the system NAPI module ../napi (requireNapi

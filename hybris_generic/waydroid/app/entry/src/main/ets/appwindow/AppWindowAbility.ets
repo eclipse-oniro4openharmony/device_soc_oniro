@@ -41,7 +41,7 @@ import { AppCache } from '../model/AppCache';
 import { enterForeground, leaveForeground, styleWindow } from '../model/Lifecycle';
 
 const DOMAIN = 0x2500;   // 16 bits for an app, or the line is dropped
-const TAG = 'androidapps.window';
+const TAG = 'waydroid.window';
 const EVENT_TASK = 'org.oniroproject.waydroid.TASK';
 // "inactive" and the "ontop" of whatever replaced us arrive a few ms apart.
 const TAKEOVER_GRACE_MS = 500;

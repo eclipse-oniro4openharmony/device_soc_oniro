@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * W5 bring-up tool: stand in for the "Android Apps" ArkUI front-end.
+ * W5 bring-up tool: stand in for the Waydroid ArkUI front-end.
  *
  * The real app hands the compositor its fullscreen XComponent surface
  * over the session SA; here we do the same from a plain native process —

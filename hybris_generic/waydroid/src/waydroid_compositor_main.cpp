@@ -9,7 +9,7 @@
  * nested /android/vendor mount that appspawn'd sandboxes cannot see.
  *
  * Where the pixels go.  The product path: into the XComponent surfaces of
- * ordinary OHOS windows of the "Android Apps" shell, one per Android task,
+ * ordinary OHOS windows of the Waydroid shell, one per Android task,
  * handed over through the session SA (waydroid_session.h) — the OHOS status
  * bar, gestures and recents stay in charge, and nothing of Android is on the
  * panel unless such a window is.  The debug overlay
@@ -286,7 +286,7 @@ void GrantInputPermission()
  * OHOS launcher rather than the "Android is starting…" placeholder. */
 int32_t g_exitChordId = -1;
 
-/* Broadcast to the "Android Apps" launcher telling it to send itself to the
+/* Broadcast to the Waydroid launcher telling it to send itself to the
  * background.  We cannot go-home from here: StartAbility(home) does not
  * background the foreground app under sceneboard, and MinimizeAllAppWindows
  * is a silent no-op unless the launcher registered its minimize callback.
@@ -365,7 +365,7 @@ public:
     {
         char value[8] = { 0 };
         /* Default OFF.  On auto-start (persist.waydroid.enabled=1 at boot) the
-         * "Android Apps" launcher has not been foregrounded, so the param is
+         * Waydroid launcher has not been foregrounded, so the param is
          * unset — touch must stay with OHOS, never be grabbed for a container
          * running in the background.  Only an explicit "1" grabs. */
         int n = GetParameter(kGrabParam, "0", value, sizeof value);
@@ -380,7 +380,7 @@ private:
 
 GrabController* g_grab = nullptr;
 
-/* W5 lifecycle: the "Android Apps" launcher publishes these on
+/* W5 lifecycle: the Waydroid launcher publishes these on
  * onForeground / onBackground; the compositor shows+thaws or hides+freezes
  * the container (and moves the touch grab to match) in response. Custom
  * (non-system) events, so neither side needs a permission or a param DAC. */
@@ -493,7 +493,7 @@ int main(int argc, char** argv)
 
     /* Start with the container's output HIDDEN.  It still boots in the
      * background (not frozen), but its self-drawing overlay stays off-screen
-     * until the "Android Apps" launcher is opened (SHOW event →
+     * until the Waydroid launcher is opened (SHOW event →
      * ApplyVisibility(true) reveals + grabs).  Without this an auto-started
      * container would overlay OHOS on boot with no way to interact with it
      * (touch is not grabbed until the app is foregrounded), and OHOS would be
@@ -527,7 +527,7 @@ int main(int argc, char** argv)
         RegisterExitChord(&server);
     }
 
-    /* W5: publish the session SA so the "Android Apps" front-end can hand
+    /* W5: publish the session SA so the Waydroid front-end can hand
      * over its XComponent surface, forward touch, and drive lifecycle. */
     server.SetToplevelListener([&server](ToplevelEvent ev, const ToplevelInfo& info) {
         WaydroidSessionStub::OnToplevelEvent(&server, ev, info);

@@ -6,7 +6,7 @@
 // on a cold start — while the grid has to be there the moment the app opens.
 // So the last answer is kept in this app's own storage (filesDir/apps.json,
 // filesDir/icons/<package>.png) and refreshed whenever Android answers.
-// Uninstalling "Android Apps" removes it with everything else.
+// Uninstalling Waydroid removes it with everything else.
 
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
@@ -14,7 +14,7 @@ import container from './Container';
 import type { AndroidApp } from './Container';
 
 const DOMAIN = 0x2500;
-const TAG = 'androidapps.cache';
+const TAG = 'waydroid.cache';
 
 export class AppEntry {
   name: string = '';

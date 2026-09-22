@@ -19,7 +19,7 @@
 #                                  open is instant, and keep it (frozen while
 #                                  hidden) — costs its RAM all the time;
 #   anything else (the default)    ON DEMAND: nothing runs until the user opens
-#                                  "Android Apps".  Its SHOW common event makes
+#                                  Waydroid.  Its SHOW common event makes
 #                                  samgr start this service (sa_profile/
 #                                  9601.json), with "9601#..." as $1 — that
 #                                  argument is how we tell a demand start from
@@ -48,10 +48,19 @@
 # and takes them away from the app — before anything is mounted.
 #
 # Talking back.  The front-end can read nothing of ours, so we publish
-# org.oniroproject.waydroid.STATUS with one of
-#   disabled | verifying | starting | running |
-#   needs-images|bad-images <sys-url> <sys-sha256> <ven-url> <ven-sha256>
-# as its data.  Events are not sticky, so states that last are repeated.
+# org.oniroproject.waydroid.STATUS.  Its data is one state word —
+#   disabled | stopped | verifying | starting | running |
+#   needs-images | bad-images
+# — followed by `key=value` tokens describing everything the app would
+# otherwise have to read for itself (see status() below).  Events are not
+# sticky, so states that last are repeated.
+#
+# Being told what to do.  The Waydroid app's settings page writes a control
+# file into its OWN storage and we, as root, apply it (see read_control):
+# start/stop, the master switch, autostart, the idle timeout.  An app can not
+# set a persist param itself and must not be allowed to (the .para.dac route
+# bricked a device once), but it may write its own sandbox — the same trust we
+# already place in that directory for the 2 GB of images it downloads there.
 #
 # Only shell builtins + toybox applets known to be on the init PATH are used
 # (cat/kill/killall/param/sleep/rm/ls/nohup/cd/mkdir/cp/chmod) — there is no
@@ -62,10 +71,23 @@ WD=/data/waydroid
 ETC=/system/etc/waydroid
 LOG="$WD/supervisor.log"
 SOCK="$WD/run/xdg/wayland-0"
-APP_IMAGES=/data/app/el2/100/base/org.oniroproject.androidapps/haps/entry/files/images
+APP_FILES=/data/app/el2/100/base/org.oniroproject.androidapps/haps/entry/files
+APP_IMAGES=$APP_FILES/images
+CONTROL=$APP_FILES/control
 STATUS_EVENT=org.oniroproject.waydroid.STATUS
 IMAGES=
 BAD_SIGS="|"       # |sig|sig|… of image pairs waydroidd rejected
+IMG_LOC=none       # none | data ($WD/images) | app (the front-end's copy)
+IMG_BYTES=0
+CTL_SEQ=0          # the control file, as last read
+CTL_RUN=on
+CTL_ENABLED=
+CTL_AUTOSTART=
+CTL_IDLE=
+CUR_EN=0           # the params, as last looked at
+CUR_AS=0
+IDLE_LIMIT=1800
+SYSURL=; SYSSHA=; VENURL=; VENSHA=
 
 # Which binaries the next generation runs.  Iteration aid, debug images only:
 # one dropped in $WD/bin wins.  Never on a production image — that would be
@@ -148,8 +170,84 @@ prepare_graft() {
     return 0
 }
 
+# --- the front-end's control file ------------------------------------------
+# The Waydroid app's settings page can not set a param, so it writes what it
+# wants into a file in its own storage and we apply it:
+#
+#   seq 7                bumped on every change; a change is applied once
+#   run on|off|restart   the Start/Stop/Restart buttons; `off` means stay down
+#   enabled 0|1          -> persist.waydroid.enabled    (the master switch)
+#   autostart 0|1        -> persist.waydroid.autostart
+#   idle_stop <seconds>  -> persist.waydroid.idle_stop_s
+#
+# seq is what makes a change a change: a value set by hand (hdc, a test) is
+# left alone until the app asks for something NEW.  The applied seq lives in a
+# runtime param, so a reboot re-applies the file once — which is only ever the
+# app's own settings being restored.
+read_control() {
+    CTL_SEQ=0; CTL_RUN=on; CTL_ENABLED=; CTL_AUTOSTART=; CTL_IDLE=
+    [ -f "$CONTROL" ] || return 0
+    while read -r k v; do
+        case "$k" in
+            seq) case "$v" in ''|*[!0-9]*) ;; *) CTL_SEQ=$v ;; esac ;;
+            run) case "$v" in on|off|restart) CTL_RUN=$v ;; esac ;;
+            enabled) CTL_ENABLED=$v ;;
+            autostart) CTL_AUTOSTART=$v ;;
+            idle_stop) CTL_IDLE=$v ;;
+        esac
+    done <"$CONTROL"
+    return 0
+}
+
+applied_seq() {
+    v=$(param get waydroid.control.seq 2>/dev/null)
+    case "$v" in
+        ''|*[!0-9\ ]*) echo 0 ;;
+        *) echo $((v + 0)) ;;
+    esac
+}
+
+# Read the control file; if it carries a seq we have not applied, apply it.
+# Returns 0 when something new was applied (the caller may have to act on
+# CTL_RUN), 1 when there was nothing new.
+apply_control() {
+    read_control
+    [ "$CTL_SEQ" = "$(applied_seq)" ] && return 1
+    log "control seq $CTL_SEQ: run=$CTL_RUN enabled=$CTL_ENABLED autostart=$CTL_AUTOSTART idle_stop=$CTL_IDLE"
+    case "$CTL_ENABLED" in
+        0|1) param set persist.waydroid.enabled "$CTL_ENABLED" 2>/dev/null ;;
+    esac
+    case "$CTL_AUTOSTART" in
+        0|1) param set persist.waydroid.autostart "$CTL_AUTOSTART" 2>/dev/null ;;
+    esac
+    case "$CTL_IDLE" in
+        ''|*[!0-9]*) ;;
+        *) param set persist.waydroid.idle_stop_s "$CTL_IDLE" 2>/dev/null ;;
+    esac
+    param set waydroid.control.seq "$CTL_SEQ" 2>/dev/null
+    refresh_settings
+    return 0
+}
+
+# The params as they really are, for the settings page (and for us).
+refresh_settings() {
+    if enabled; then CUR_EN=1; else CUR_EN=0; fi
+    if autostart; then CUR_AS=1; else CUR_AS=0; fi
+    IDLE_LIMIT=$(idle_limit)
+}
+
+# One state word plus everything the app can not read for itself:
+#   seq=    the control seq we have applied
+#   run=    on | off | restart, as we read it
+#   en= as= idle=       persist.waydroid.{enabled,autostart,idle_stop_s}
+#   img=    none | data | app   where the images we would use live
+#   imgsz=  their size in bytes (0 when there are none)
+#   sys= syssha= ven= vensha=   what to download — sent in every state, so the
+#           settings page can offer a re-download without waiting to be asked
 status() {
-    /system/bin/cem publish -e "$STATUS_EVENT" -d "$*" >/dev/null 2>&1
+    /system/bin/cem publish -e "$STATUS_EVENT" -d "$1 seq=$CTL_SEQ run=$CTL_RUN\
+ en=$CUR_EN as=$CUR_AS idle=$IDLE_LIMIT img=$IMG_LOC imgsz=$IMG_BYTES\
+ sys=$SYSURL syssha=$SYSSHA ven=$VENURL vensha=$VENSHA" >/dev/null 2>&1
 }
 
 # Identity of an image pair: changes when either file is replaced.
@@ -167,15 +265,22 @@ pick_images() {
             *"|$(image_sig "$d")|"*) continue ;;
         esac
         IMAGES="$d"
+        [ "$d" = "$APP_IMAGES" ] && IMG_LOC=app || IMG_LOC=data
+        sz1=$(stat -c %s "$d/system.img" 2>/dev/null)
+        sz2=$(stat -c %s "$d/vendor.img" 2>/dev/null)
+        IMG_BYTES=$(( ${sz1:-0} + ${sz2:-0} ))
         return 0
     done
     IMAGES=
+    IMG_LOC=none
+    IMG_BYTES=0
     return 1
 }
 
-# What to download, from images.manifest.  $WD/mirror (debug images only)
-# replaces the upstream location with a flat directory of the same zips.
-images_status() {     # $1 = needs-images | bad-images
+# What to download, from images.manifest — read once and then carried in every
+# STATUS.  $WD/mirror (debug images only) replaces the upstream location with a
+# flat directory of the same zips.
+read_manifest() {
     BASE=; SYSZIP=; SYSSHA=; VENZIP=; VENSHA=
     while read -r a b; do
         case "$a" in
@@ -195,7 +300,6 @@ images_status() {     # $1 = needs-images | bad-images
             fi
             ;;
     esac
-    status "$1" "$SYSURL" "$SYSSHA" "$VENURL" "$VENSHA"
 }
 
 autostart() {
@@ -284,34 +388,53 @@ start_generation() {
 # front-end beating every 2 s a disabled device would otherwise always have
 # one of us sitting in this loop.)  Until we know it is on, leave no trace: no
 # directory, no log, no param.
+read_manifest
+# The app may have asked for something (the master switch, most of all) while
+# we were not running: a demand start is how that request reaches us, so the
+# control file is applied before the gate looks at the param.
+apply_control
+refresh_settings
 n=0
 while [ -z "$DEMAND" ] && ! enabled && [ $n -lt 5 ]; do
     sleep 2
+    apply_control
     n=$((n + 1))
 done
 if ! enabled; then
     [ -n "$DEMAND" ] && status disabled
     stand_down "persist.waydroid.enabled is not 1; standing down"
 fi
+if [ "$CTL_RUN" = off ]; then
+    [ -n "$DEMAND" ] && status stopped
+    stand_down "stopped from the app; standing down"
+fi
 if [ -z "$DEMAND" ] && ! autostart; then
-    stand_down "on-demand mode: waiting for Android Apps to be opened"
+    stand_down "on-demand mode: waiting for the Waydroid app to be opened"
 fi
 
 mkdir -p "$WD" 2>/dev/null
 : >"$LOG" 2>/dev/null
 if [ -n "$DEMAND" ]; then log "started on demand ($DEMAND)"; else log "started at boot (autostart)"; fi
-IDLE_LIMIT=$(idle_limit)
+# Again: the control file is applied before the log exists (it is what decides
+# whether there is to BE a log), and the line above has just truncated it.
+log "control seq $CTL_SEQ: run=$CTL_RUN enabled=$CUR_EN autostart=$CUR_AS idle_stop=$IDLE_LIMIT"
 
 waiting=0
 waited=0
 while true; do
+    apply_control
+    refresh_settings
     enabled || stand_down "disabled; tearing down and standing down" teardown
+    if [ "$CTL_RUN" = off ]; then
+        status stopped
+        stand_down "stopped from the app; tearing down and standing down" teardown
+    fi
     if ! pick_images; then
         # Enabled but not provisioned (a fresh flash): tell the front-end what
         # to fetch and wait, instead of crash-looping under init.
         [ $waiting = 0 ] && log "no images in $WD/images or the front-end's storage; waiting"
         waiting=1
-        if [ "$BAD_SIGS" != "|" ]; then images_status bad-images; else images_status needs-images; fi
+        if [ "$BAD_SIGS" != "|" ]; then status bad-images; else status needs-images; fi
         sleep 3
         # On demand, nobody may be listening any more.  The front-end's beat
         # starts us again for as long as it really is open.
@@ -335,7 +458,7 @@ while true; do
         fi
         BAD_SIGS="$BAD_SIGS$(image_sig "$IMAGES")|"
         log "images in $IMAGES rejected (see waydroidd.log); waiting for other ones"
-        images_status bad-images
+        status bad-images
         sleep 3
         continue
     fi
@@ -382,10 +505,28 @@ while true; do
     #                   stuck in its Wayland handshake, SurfaceFlinger waiting
     #                   on IComposer, no tombstone, init alive).
     #   idle         -> on-demand only: hidden for IDLE_LIMIT seconds.
-    booting=0; idle=0; framed=0
+    booting=0; idle=0; framed=0; beat=0
     while kill -0 "$CPID" 2>/dev/null; do
         sleep 2
+        # The app's settings page talks to us through the control file: stop,
+        # restart, or a changed switch.  A restart is simply this generation
+        # given up — the outer loop builds the next one.
+        if apply_control && [ "$CTL_RUN" = restart ]; then
+            log "restart asked for from the app; rebuilding the generation"
+            break
+        fi
+        if [ "$CTL_RUN" = off ]; then
+            status stopped
+            stand_down "stopped from the app; tearing down and standing down" teardown
+        fi
         enabled || break
+        # Repeat the lasting states every 10 s: a settings page opened long
+        # after the container came up has nothing else to go on.
+        beat=$((beat + 1))
+        if [ $((beat % 5)) = 0 ]; then
+            refresh_settings
+            [ $framed = 1 ] && status running
+        fi
         # The images went away under a running container: the front-end was
         # uninstalled (or the user cleared its data).  The container keeps
         # running from the deleted files, and keeps their 2 GB allocated, for

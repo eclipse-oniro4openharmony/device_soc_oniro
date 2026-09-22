@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
  * SPDX-License-Identifier: Apache-2.0
  *
- * The compositor's IPC face to the "Android Apps" shell (SA 9601).
+ * The compositor's IPC face to the Waydroid shell (SA 9601).
  *
  * The compositor is an init-started native root service (sandbox:0) — it
  * must not be an app process, because its per-frame gralloc import needs
