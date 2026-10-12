@@ -9,8 +9,8 @@
  * /proc/<container init pid>/root/dev/binder — and from there to
  * lineageos.waydroid.IPlatform ("waydroidplatform"): the app list, launching,
  * properties, settings.  No Android library, no nsenter; the wire format is
- * written out by hand and documented in
- * docs/hybris_generic/android_app_launcher_plan.md §1.1.
+ * written out by hand and documented next to the code that depends on it
+ * in wdbinder.c.
  *
  * Two rules shape the API:
  *

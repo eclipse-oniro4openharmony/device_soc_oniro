@@ -4,7 +4,7 @@
  *
  * tcprelay — forward 127.0.0.1:<lport> (host netns) to <dst>:<dport>.
  *
- * The Waydroid container (W4, android_app_compat_plan.md) lives in its
+ * The Waydroid container (see ../README.md) lives in its
  * own netns; its adbd listens on the veth address (192.168.240.2:5555).
  * `hdc fport` can only reach device-loopback, so this relay bridges
  * loopback → veth for the workstation adb/scrcpy rig:

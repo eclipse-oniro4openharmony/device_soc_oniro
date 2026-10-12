@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # waydroid_compositor — Wayland server + zero-copy gralloc bridge for the
-# Android app container.  Plan: docs/hybris_generic/android_app_compat_plan.md
+# Android app container.  Overview, build and provisioning: README.md
 #
 # The whole feature lives in this directory and is built only when the
 # product sets hybris_generic_soc_feature_waydroid (waydroid.gni); the parent

@@ -1,4 +1,4 @@
-# W6 real networking (android_app_compat_plan.md §W6).
+# Waydroid container networking (see waydroid-net.sh).
 #
 # waydroidd creates the wdb0<->eth0 veth pair, enables ip_forward,
 # MASQUERADEs 192.168.240.0/24 out the active uplink, and runs a

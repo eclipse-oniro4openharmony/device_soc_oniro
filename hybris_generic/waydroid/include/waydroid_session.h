@@ -21,8 +21,8 @@
  *
  * v1 (codes 1–4) drove one fullscreen output and is kept for the bring-up
  * tool; v2 (codes 10+) is the launcher slice: one output PER OHOS WINDOW,
- * each bound to an Android package, plus the control plane.  Plan:
- * docs/hybris_generic/android_app_launcher_plan.md.
+ * each bound to an Android package, plus the control plane.  See
+ * ../README.md and ../app/README.md.
  *
  * Who may call.  selinux is disabled on this image and a system NAPI module
  * can be loaded by any app, so the stub is its own gate: every request must

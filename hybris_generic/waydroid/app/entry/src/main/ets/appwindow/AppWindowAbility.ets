@@ -93,7 +93,7 @@ export default class AppWindowAbility extends UIAbility {
     // setMissionIcon works, but SceneBoard keeps one updated icon per BUNDLE
     // (UpdatedIcon/<bundle>.png), so every card of ours would show the icon
     // of whichever app was opened last.  A generic icon beats a wrong one;
-    // per-app icons need per-app bundles (integration plan, phase A4).
+    // per-app icons need per-app bundles.
     this.context.setMissionLabel(this.label).catch((e: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'setMissionLabel: %{public}s', JSON.stringify(e));
     });

@@ -30,8 +30,7 @@
  *   /data/waydroid/images/  the two pristine, sha256-pinned upstream images
  *   /data/waydroid/         data.img + runtime state (rootfs mountpoint, run/)
  *
- * The bring-up plan lives in
- *   device/board/oniro/docs/hybris_generic/android_app_compat_plan.md
+ * Overview, build and provisioning: ../README.md
  */
 
 #ifndef _GNU_SOURCE

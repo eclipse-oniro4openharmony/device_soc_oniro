@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# W6 real networking (android_app_compat_plan.md §W6), run by
+# Waydroid container networking, run by
 # waydroid-net.rc at sys.boot_completed.
 #
 # The primary path needs NO help from this script: waydroidd runs a DHCP

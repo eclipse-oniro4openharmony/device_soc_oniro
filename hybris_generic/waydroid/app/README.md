@@ -9,7 +9,7 @@ bar, OHOS gesture navigation, OHOS open/close animations, one recents card per
 Android app. Android draws no bars of its own (`../data/overlay/`), and nothing
 of Android is on the panel unless such a window is. It is also where the
 container itself is managed: start, stop, the master switch, the image.
-Plan and measurements: `docs/hybris_generic/android_app_launcher_plan.md`.
+Overview, build and provisioning of the whole stack: [`../README.md`](../README.md).
 
 ```
  EntryAbility ─ pages/Index        the grid: icons + names from this app's own
@@ -88,8 +88,7 @@ for ever.
 
 The recents card carries the app's **name** but not its icon: SceneBoard
 keeps one updated mission icon per *bundle*, so every card would show the icon
-of the app opened last. Per-app icons need per-app bundles (integration plan,
-phase A4).
+of the app opened last. Per-app icons need per-app bundles.
 
 ## The lease (start on demand, freeze, crash safety)
 
@@ -227,7 +226,7 @@ Wired into `../BUILD.gn`'s `waydroid_group`, so it builds with the SoC
 part. Standalone:
 
 ```sh
-sudo docker exec -u root -w /home/openharmony/workdir oniro-build-6.1-lts \
+sudo docker exec -u root -w /home/openharmony/workdir oniro-build \
   ./build.sh --product-name hybris_generic --ccache \
   --build-target device/soc/oniro/hybris_generic/waydroid/app:android_apps_hap
 # -> out/hybris_generic/oniro_soc_products/hybris_generic_soc/AndroidApps.hap
@@ -236,8 +235,7 @@ sudo docker exec -u root -w /home/openharmony/workdir oniro-build-6.1-lts \
 ## Signing (system app)
 
 `signature/androidapps.p7b` is a provision profile for this bundle at
-`apl=system_core`, `app-feature=hos_system_app` (see auto-memory
-`oniro-haps-system-app-signing`) — without those the app installs but
+`apl=system_core`, `app-feature=hos_system_app` — without those the app installs but
 `isSystemApp:false` and its SA calls are denied. Regenerate with the
 oniro-haps recipe:
 
