@@ -44,7 +44,14 @@ ohos_shared_library("wifi_hal_default") {
 
     # Our patched version (stubs vendor-specific ioctl for MediaTek)
     "wifi_ioctl.cpp",
+
+    # Exports the real InitWifiVendorHalFuncTable and swaps waitDriverStart
+    # for one that also waits for the connsys WiFi function to be armed.
+    "wifi_hal_hybris.cpp",
   ]
+
+  # Upstream's entry point is renamed so wifi_hal_hybris.cpp can wrap it.
+  defines = [ "InitWifiVendorHalFuncTable=UpstreamInitWifiVendorHalFuncTable" ]
 
   external_deps = [
     "c_utils:utils",
@@ -52,6 +59,7 @@ ohos_shared_library("wifi_hal_default") {
     "hdf_core:libhdf_ipc_adapter",
     "hdf_core:libhdf_utils",
     "hilog:libhilog",
+    "init:libbegetutil",
     "ipc:ipc_single",
     "libnl:libnl_share",
   ]
