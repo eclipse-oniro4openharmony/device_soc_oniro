@@ -36,11 +36,21 @@
  * module here logs through hilog with a domain of its own:
  *
  *     hdc shell "timeout 20 hilog -x | grep HybrisRil"
+ *
+ * The binder NDK shim and the libhybris loader are also compiled into the
+ * GNSS bridge (hardware/gnss), which overrides both macros from its build
+ * so their lines land under its own tag.
  */
+#ifndef HYBRIS_RIL_LOG_DOMAIN
+#define HYBRIS_RIL_LOG_DOMAIN 0xD002561
+#endif
+#ifndef HYBRIS_RIL_LOG_TAG
+#define HYBRIS_RIL_LOG_TAG "HybrisRil"
+#endif
 #undef LOG_DOMAIN
 #undef LOG_TAG
-#define LOG_DOMAIN 0xD002561
-#define LOG_TAG "HybrisRil"
+#define LOG_DOMAIN HYBRIS_RIL_LOG_DOMAIN
+#define LOG_TAG HYBRIS_RIL_LOG_TAG
 
 #define HR_LOGD(fmt, ...) HILOG_DEBUG(LOG_CORE, "%{public}s: " fmt, __func__, ##__VA_ARGS__)
 #define HR_LOGI(fmt, ...) HILOG_INFO(LOG_CORE, "%{public}s: " fmt, __func__, ##__VA_ARGS__)

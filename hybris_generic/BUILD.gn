@@ -22,6 +22,7 @@ group("hybris_generic_soc_group") {
     "hardware/camera:camera_vdi_model",
     "hardware/display:display_buffer_model",
     "hardware/display:display_composer_model",
+    "hardware/gnss:gnss_hybris_group",
     "hardware/gpu:hybris-gpu-libs",
     "hardware/light:light_vdi_model",
     "hardware/ril:ril_hybris_group",

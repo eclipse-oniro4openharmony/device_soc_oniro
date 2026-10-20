@@ -1,0 +1,148 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# GNSS bridge to the Halium location stack.  MediaTek's mnld and
+# android.hardware.gnss-service.mediatek run in the androidd container and
+# publish the standard AIDL android.hardware.gnss.IGnss v3; this is the OHOS
+# vendor library location_host loads in front of it.  See README.md.
+
+import("//build/ohos.gni")
+import("aidl_gen/sources.gni")
+
+group("gnss_hybris_group") {
+  deps = [
+    ":hybris_gnss_test",
+    ":vendorGnssAdapter",
+  ]
+}
+
+# ─── AOSP-generated AIDL code + the libbinder_ndk bridge ──────────────────
+#
+# The binder NDK shim (trampolines + hybris binding) and the vendored NDK
+# headers are the RIL bridge's, compiled again here: location_host and
+# riladapter_host are separate processes, each needs its own slot table.
+# The shim logs through hybris_ril_log.h, whose domain/tag we override so
+# its lines appear under HybrisGnss.
+
+ril_dir = "../ril"
+
+config("gnss_aidl_public_config") {
+  include_dirs = [
+    "include",
+    "aidl_gen/include",
+    "$ril_dir/include",
+    "$ril_dir/android_binder_ndk/include_ndk",
+    "$ril_dir/android_binder_ndk/include_cpp",
+    "$ril_dir/android_binder_ndk/include_platform",
+    "//drivers/peripheral/location/gnss/hdi_service",
+  ]
+
+  # Bionic-isms and the @VintfStability switch — see binder_ndk_compat.h.
+  cflags_cc = [
+    "-include",
+    rebase_path("$ril_dir/android_binder_ndk/binder_ndk_compat.h",
+                root_build_dir),
+  ]
+}
+
+ohos_source_set("gnss_aidl_ndk") {
+  sources = gnss_aidl_sources
+  sources += [
+    "$ril_dir/binder_ndk_shim/binder_ndk_trampolines.S",
+    "$ril_dir/binder_ndk_shim/hybris_binder_ndk.cpp",
+    "$ril_dir/src/hybris_ril_dl.cpp",
+  ]
+
+  include_dirs = [ "$ril_dir/binder_ndk_shim" ]
+
+  defines = [
+    "HYBRIS_RIL_LOG_DOMAIN=0xD002562",
+    "HYBRIS_RIL_LOG_TAG=\"HybrisGnss\"",
+  ]
+
+  public_configs = [ ":gnss_aidl_public_config" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  # Generated code is not written to our warning settings.
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-deprecated-declarations",
+    "-Wno-unused-parameter",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-implicit-fallthrough",
+  ]
+
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ─── the vendor library ───────────────────────────────────────────────────
+#
+# location_host dlopens it by the literal name "vendorGnssAdapter.so"
+# (location_vendor_interface.cpp), hence no lib prefix and no .z suffix.
+# Only the vendor ABI header is taken from drivers/peripheral/location — one
+# exported object, so there is nothing to link against.
+
+ohos_shared_library("vendorGnssAdapter") {
+  sources = [
+    "src/hybris_gnss_adapter.cpp",
+    "src/hybris_gnss_agnss.cpp",
+    "src/hybris_gnss_bridge.cpp",
+    "src/hybris_gnss_callbacks.cpp",
+  ]
+
+  deps = [ ":gnss_aidl_ndk" ]
+
+  external_deps = [
+    "hilog:libhilog",
+    "init:libbegetutil",
+  ]
+
+  cflags_cc = [
+    "-Wno-error",
+    "-Wno-deprecated-declarations",
+    "-Wno-unused-parameter",
+  ]
+
+  # Never unmapped: the HDI's CleanUp() dlcloses us when the framework
+  # unloads its devices, but the container's binder threads keep running
+  # our callback code for the life of the process.
+  ldflags = [ "-Wl,-z,nodelete" ]
+
+  output_name = "vendorGnssAdapter"
+  output_prefix_override = true
+  output_extension = "so"
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
+
+# ─── probe ────────────────────────────────────────────────────────────────
+#
+# Drives vendorGnssAdapter.so through the vendor ABI without the location
+# framework.  Not installed: build it and `hdc file send` it to /data.
+
+ohos_executable("hybris_gnss_test") {
+  sources = [ "test/hybris_gnss_test.cpp" ]
+
+  include_dirs = [ "//drivers/peripheral/location/gnss/hdi_service" ]
+
+  install_enable = false
+  part_name = "hybris_generic_soc"
+  subsystem_name = "oniro_soc_products"
+}
