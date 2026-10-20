@@ -36,9 +36,22 @@
  * every STA start (CreateStaIface -> chip configuration -> Start()) and
  * precedes wpa_supplicant.  A device that never sets the param (the X23,
  * where wlan0 only appears once armed) keeps upstream behaviour unchanged.
+ *
+ * It also replaces getScanResults, to stop a recurring wifi_manager_service
+ * crash (SIGSEGV in WifiStaHalInterface::QueryScanInfos → GetScanResultText
+ * → HdiBssGetVendorBeacon).  Two upstream bugs stack: wifi_scan.cpp fills
+ * ScanResultsInfo.beaconIe from NL80211_BSS_INFORMATION_ELEMENTS (a second
+ * copy of .ie, not NL80211_BSS_BEACON_IES), and the framework then walks
+ * beaconIe.size() bytes starting at ie.data() + ie.size() — past the end of
+ * the .ie vector, as if the two were packed back to back like
+ * wpa_supplicant's bss buffer.  Whether that faults depends on what follows
+ * the heap block, hence the intermittent crashes.  beaconIe has no other
+ * reader and holds nothing .ie does not, so it is simply emptied, which
+ * turns the out-of-bounds walk into its beaconIeLen == 0 early return.
  */
 
 #include <cstring>
+#include <vector>
 #include <unistd.h>
 #include <hdf_log.h>
 #include "parameter.h"
@@ -75,6 +88,20 @@ WifiError HybrisWaitDriverStart(void)
     }
     return WaitDriverStart();
 }
+
+using GetScanResultsFn = WifiError (*)(wifiInterfaceHandle,
+    std::vector<OHOS::HDI::Wlan::Chip::V2_0::ScanResultsInfo>&);
+GetScanResultsFn g_upstreamGetScanResults = nullptr;
+
+WifiError HybrisGetScanResults(wifiInterfaceHandle handle,
+    std::vector<OHOS::HDI::Wlan::Chip::V2_0::ScanResultsInfo>& results)
+{
+    WifiError ret = g_upstreamGetScanResults(handle, results);
+    for (auto &result : results) {
+        result.beaconIe.clear();
+    }
+    return ret;
+}
 } // namespace
 
 extern "C" WifiError UpstreamInitWifiVendorHalFuncTable(WifiHalFn *fn);
@@ -84,6 +111,10 @@ extern "C" WifiError InitWifiVendorHalFuncTable(WifiHalFn *fn)
     WifiError ret = UpstreamInitWifiVendorHalFuncTable(fn);
     if (ret == HAL_SUCCESS) {
         fn->waitDriverStart = HybrisWaitDriverStart;
+        if (fn->getScanResults != nullptr) {
+            g_upstreamGetScanResults = fn->getScanResults;
+            fn->getScanResults = HybrisGetScanResults;
+        }
     }
     return ret;
 }

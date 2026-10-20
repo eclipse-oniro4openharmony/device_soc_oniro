@@ -46,7 +46,9 @@ ohos_shared_library("wifi_hal_default") {
     "wifi_ioctl.cpp",
 
     # Exports the real InitWifiVendorHalFuncTable and swaps waitDriverStart
-    # for one that also waits for the connsys WiFi function to be armed.
+    # for one that also waits for the connsys WiFi function to be armed, and
+    # getScanResults for one that drops the bogus beaconIe copy the
+    # framework reads out of bounds.
     "wifi_hal_hybris.cpp",
   ]
 
