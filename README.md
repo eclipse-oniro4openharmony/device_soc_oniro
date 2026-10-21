@@ -28,7 +28,7 @@ These repositories are assembled into a full Oniro source tree via the Oniro
 manifest; you do not clone them individually:
 
 ```bash
-repo init -u https://github.com/eclipse-oniro4openharmony/manifest.git -b OpenHarmony-6.1-Release -m oniro.xml --no-repo-verify
+repo init -u https://github.com/eclipse-oniro4openharmony/manifest.git -b OpenHarmony-7.0-Release -m oniro.xml --no-repo-verify
 repo sync -c
 repo forall -c 'git lfs pull'
 ```
