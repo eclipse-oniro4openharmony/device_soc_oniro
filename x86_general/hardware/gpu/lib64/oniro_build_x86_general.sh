@@ -34,6 +34,8 @@
 #    reports LLVM 15.0.4 / X86 from the prebuilt toolchain but redirects link
 #    info to the target static archives in ohos/llvm_libx86; the cross_file
 #    link_args force the actual static linking.
+#  Source: github.com/frankplus/third_party_mesa3d, branch OpenHarmony-7.0-Release
+#  (see PROVENANCE.md), checked out at third_party/mesa3d-new.
 #  * zlib.pc is repointed at the static out/.../obj/third_party/zlib/libz.a
 #    (the 6.1 out/ layout has no plain libz.so; LLVMSupport needs crc32 etc.).
 #  * expat.pc is repointed at the static obj/third_party/expat/libexpat_static.a
