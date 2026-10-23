@@ -36,6 +36,11 @@
 #    link_args force the actual static linking.
 #  * zlib.pc is repointed at the static out/.../obj/third_party/zlib/libz.a
 #    (the 6.1 out/ layout has no plain libz.so; LLVMSupport needs crc32 etc.).
+#  * expat.pc is repointed at the static obj/third_party/expat/libexpat_static.a
+#    (built here if missing): the template names 6.1's Skia-bundled expatm133,
+#    which the 7.0 tree does not have. libgbm keeps expat linked in statically.
+#  * -Dlibunwind=disabled: the template's libunwind.pc points at generated
+#    headers 7.0 does not produce; libunwind only serves debug stack traces.
 #  * -Dunversion-libgallium=true so the megadriver is named libgallium_dri.so
 #    (matching lib64/BUILD.gn and the checked-in artifact), not
 #    libgallium-25.0.7.so.
@@ -54,6 +59,18 @@ PREFIX=$BUILDROOT/thirdparty/mesa3d
 
 export PATH=$WORKDIR/prebuilts/build-tools/linux-x86/bin:/usr/local/bin:$PATH
 cd "$BUILDROOT"
+
+# Oniro fixes on top of the pinned source (lib64/patches/*.patch, in order).
+# Applied unless already present, so re-running the script is safe.
+for p in "$WORKDIR"/device/soc/oniro/x86_general/hardware/gpu/lib64/patches/*.patch; do
+  [ -e "$p" ] || continue
+  if git -C "$SRC" apply --reverse --check "$p" 2>/dev/null; then
+    echo "already applied: $(basename "$p")"
+  else
+    git -C "$SRC" apply "$p"
+    echo "applied: $(basename "$p")"
+  fi
+done
 
 # 0. Create the llvm-config wrapper that meson uses (referenced by the cross_file
 #    [binaries] section as $WORKDIR/clang-dev/bin/llvm-config). It reports LLVM
@@ -85,6 +102,8 @@ python3 "$SRC/ohos/meson_cross_process86.py" "$WORKDIR" "$PRODUCT" none none new
 
 # 2. Repoint zlib at the target static archive (6.1 out/ layout fix).
 sed -i 's#^Libs:.*#Libs: ${libdir}/libz.a#' thirdparty/mesa3d/pkgconfig/zlib.pc
+[ -f obj/third_party/expat/libexpat_static.a ] || ninja -w dupbuild=warn expat_static
+sed -i "s#^Libs:.*#Libs: $BUILDROOT/obj/third_party/expat/libexpat_static.a#" thirdparty/mesa3d/pkgconfig/expat.pc
 
 export PKG_CONFIG_PATH=$BUILDROOT/thirdparty/mesa3d/pkgconfig
 
@@ -101,6 +120,7 @@ meson setup "$SRC" "$BUILDDIR" \
   -Dunversion-libgallium=true \
   -Ddri-drivers-path=/vendor/lib64/chipsetsdk \
   -Dllvm=enabled -Dshared-llvm=disabled \
+  -Dlibunwind=disabled \
   --cross-file=thirdparty/mesa3d/cross_file \
   --prefix="$PREFIX"
 

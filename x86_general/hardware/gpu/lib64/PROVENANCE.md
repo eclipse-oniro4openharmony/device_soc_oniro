@@ -25,10 +25,23 @@ freedesktop.org Mesa 25.0.7                       (canonical upstream)
 
 The source is vendored as a **pinned git checkout** at **`third_party/mesa3d-new`**
 — HEAD = `135d43ab` ("adpt radv"), remotes `diemit` (gitcode) + `openharmony`
-(eclipse-oniro-mirrors). The build reads directly from that tree; there are no
-patches. `git -C third_party/mesa3d-new status` is clean — the source is
+(eclipse-oniro-mirrors). The build reads directly from that tree, after
+applying the Oniro fixes in **`lib64/patches/`** (the build script applies
+them and skips any already applied). Apart from those, the source is
 byte-identical to diemit @`135d43ab` (our build recipe lives here in `lib64/`,
 not inside the mesa tree).
+
+Patches:
+* `0001-kms_sw-winsys-lock-the-shared-buffer-list.patch`: the `kms_sw`
+  winsys shared its buffer list, reference counts and plane lists between
+  threads with no lock. render_service uses GL from two threads (the uni-render
+  thread and the composer's client-composition redraw), and importing a dma-buf
+  already imported on the same fd returns the same GEM handle, so both threads
+  ref and unref one display target. The race destroyed targets twice or freed
+  them while in use: render_service crashed or deadlocked within minutes of
+  continuous redraws, and the restarts could escalate to a kernel panic. The
+  patch adds a winsys-wide lock and also initialises `map_lock` for targets
+  imported from a dma-buf, which was never done.
 
 To see what diemit changed vs OpenHarmony upstream (the in-tree
 `third_party/mesa3d`, Mesa 25.0.1), diff the trees — diemit **only added** x86
@@ -100,6 +113,6 @@ Prerequisites: `meson`/`mako`/`pyyaml` in the build container
 wrapper is created automatically by the build script.
 
 Deployed `libgallium_dri.so` sha256:
-`0de47b1f89e8ce4327fadbbb66f8681c26b15a7bd9229f3bfb2ceb2ba909ffdb`
+`ada871c9ab8a3018eaf02a6b9e6d81cfbbbdc3241241a043b87a6ad5f0b569f4` (with patches/0001)
 (not build-reproducible bit-for-bit: paths/timestamps vary; the recipe is the
 provenance, not a fixed hash.)
