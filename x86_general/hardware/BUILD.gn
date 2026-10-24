@@ -18,5 +18,6 @@ group("hardware_group") {
     "display:display_buffer_model",
     "display:display_composer_model",
     "gpu:gpu-libs",
+    "input:emulator_touch_group",
   ]
 }

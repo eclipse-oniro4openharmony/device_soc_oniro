@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+import("//build/ohos.gni")
+
+# Clicks in the emulator window act as touches: see emulator_touch.c.
+ohos_executable("emulator_touch") {
+  sources = [ "emulator_touch.c" ]
+  external_deps = [ "hilog:libhilog" ]
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}
+
+ohos_prebuilt_etc("emulator_touch_cfg") {
+  source = "emulator_touch.cfg"
+  relative_install_dir = "init"
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}
+
+group("emulator_touch_group") {
+  deps = [
+    ":emulator_touch",
+    ":emulator_touch_cfg",
+  ]
+}
