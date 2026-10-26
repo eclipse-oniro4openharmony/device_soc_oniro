@@ -17,6 +17,7 @@
 #define DRM_DISPLAY_H
 #include <unordered_map>
 #include <memory>
+#include <mutex>
 #include "drm_connector.h"
 #include "drm_crtc.h"
 #include "drm_device.h"
@@ -41,6 +42,7 @@ public:
     int32_t SetDisplayMode(uint32_t modeId) override;
     int32_t GetDisplayPowerStatus(DispPowerStatus *status) override;
     int32_t SetDisplayPowerStatus(DispPowerStatus status) override;
+    int32_t Commit(int32_t *fence) override;
     int32_t GetDisplayBacklight(uint32_t *value) override;
     int32_t SetDisplayBacklight(uint32_t value) override;
     int32_t ChosePreferenceMode();
@@ -55,11 +57,16 @@ protected:
 
 private:
     int32_t PushFirstFrame();
-    int32_t ConvertToHdiPowerState(uint32_t drmPowerState, DispPowerStatus &hdiPowerState);
+    int32_t ShowBlackFrame();
     int32_t ConvertToDrmPowerState(DispPowerStatus hdiPowerState, uint32_t &drmPowerState);
     std::shared_ptr<DrmDevice> mDrmDevice;
     std::shared_ptr<DrmConnector> mConnector;
     std::shared_ptr<DrmCrtc> mCrtc;
+    // Guards mPowerStatus and the DRM composition, which Commit and SetDisplayPowerStatus both drive.
+    std::mutex mPowerMutex;
+    DispPowerStatus mPowerStatus = POWER_STATUS_ON;
+    BufferHandle *mBlackBuffer = nullptr;
+    std::unique_ptr<HdiLayer> mBlackLayer;
 };
 } // namespace OHOS
 } // namespace HDI

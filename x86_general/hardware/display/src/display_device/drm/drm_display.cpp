@@ -17,7 +17,10 @@
 #include <string>
 #include <cerrno>
 #include <memory>
+#include <vector>
 #include <sys/ioctl.h>
+#include <unistd.h>
+#include <securec.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "display_buffer_vdi_impl.h"
@@ -41,6 +44,10 @@ DrmDisplay::~DrmDisplay()
 {
     if (mCrtc != nullptr) {
         mCrtc->UnBindDisplay(GetId());
+    }
+    mBlackLayer.reset();
+    if (mBlackBuffer != nullptr) {
+        DisplayBufferVdiImpl().FreeMem(*mBlackBuffer);
     }
 }
 
@@ -100,9 +107,17 @@ int32_t DrmDisplay::SetDisplayMode(uint32_t modeId)
 int32_t DrmDisplay::GetDisplayPowerStatus(DispPowerStatus *status)
 {
     DISPLAY_CHK_RETURN((status == nullptr), DISPLAY_NULL_PTR, DISPLAY_LOGE("status is nullptr"));
-    return ConvertToHdiPowerState(mConnector->GetDpmsState(), *status);
+    std::lock_guard<std::mutex> lock(mPowerMutex);
+    *status = mPowerStatus;
+    return DISPLAY_SUCCESS;
 }
 
+/*
+ * The emulator's virtio-gpu output has no panel to switch off. With the scanout
+ * disabled, QEMU draws its own placeholder; with it enabled, the window keeps the
+ * last frame, which looks like a live screen. So a power-off shows an all-black
+ * frame, and RenderService's frames are dropped until the power is back on.
+ */
 int32_t DrmDisplay::SetDisplayPowerStatus(DispPowerStatus status)
 {
     DISPLAY_LOGD("the status %{public}d ", status);
@@ -110,32 +125,64 @@ int32_t DrmDisplay::SetDisplayPowerStatus(DispPowerStatus status)
     int ret = ConvertToDrmPowerState(status, drmPowerState);
     DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_PARAM_ERR,
         DISPLAY_LOGE("unknown power status %{public}d", status));
-    mConnector->SetDpmsState(drmPowerState);
+    std::lock_guard<std::mutex> lock(mPowerMutex);
+    if (status != POWER_STATUS_ON && mPowerStatus == POWER_STATUS_ON && ShowBlackFrame() != DISPLAY_SUCCESS) {
+        DISPLAY_LOGE("can not blank the screen");
+    }
+    mPowerStatus = status;
     return DISPLAY_SUCCESS;
 }
 
-int32_t DrmDisplay::ConvertToHdiPowerState(uint32_t drmPowerState, DispPowerStatus &hdiPowerState)
+int32_t DrmDisplay::Commit(int32_t *fence)
 {
-    int32_t ret = DISPLAY_SUCCESS;
-    switch (drmPowerState) {
-        case DRM_MODE_DPMS_OFF:
-            hdiPowerState = POWER_STATUS_OFF;
-            break;
-        case DRM_MODE_DPMS_ON:
-            hdiPowerState = POWER_STATUS_ON;
-            break;
-        case DRM_MODE_DPMS_STANDBY:
-            hdiPowerState = POWER_STATUS_STANDBY;
-            break;
-        case DRM_MODE_DPMS_SUSPEND:
-            hdiPowerState = POWER_STATUS_SUSPEND;
-            break;
-        default:
-            hdiPowerState = POWER_STATUS_BUTT;
-            ret = DISPLAY_FAILURE;
-            break;
+    DISPLAY_CHK_RETURN((fence == nullptr), DISPLAY_NULL_PTR, DISPLAY_LOGE("fence is nullptr"));
+    std::lock_guard<std::mutex> lock(mPowerMutex);
+    if (mPowerStatus != POWER_STATUS_ON) {
+        *fence = -1;
+        return DISPLAY_SUCCESS;
     }
-    DISPLAY_LOGD("hdi power state %{public}u", hdiPowerState);
+    return HdiDisplay::Commit(fence);
+}
+
+int32_t DrmDisplay::ShowBlackFrame()
+{
+    if (mBlackLayer == nullptr) {
+        DrmMode mode;
+        int ret = mConnector->GetModeFromId(mCrtc->GetActiveModeId(), mode);
+        DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE,
+            DISPLAY_LOGE("can not get the mode from id %{public}d", mCrtc->GetActiveModeId()));
+        // virtio-gpu planes only scan out XRGB8888.
+        const AllocInfo info = {
+            .width = mode.GetModeInfoPtr()->hdisplay,
+            .height = mode.GetModeInfoPtr()->vdisplay,
+            .usage = HBM_USE_MEM_DMA | HBM_USE_CPU_READ | HBM_USE_CPU_WRITE,
+            .format = PIXEL_FMT_BGRX_8888
+        };
+        DisplayBufferVdiImpl bufferImpl;
+        BufferHandle *buffer = nullptr;
+        ret = bufferImpl.AllocMem(info, buffer);
+        DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not alloc memory"));
+        void *addr = bufferImpl.Mmap(*buffer);
+        if (addr == nullptr) {
+            DISPLAY_LOGE("can not map the black buffer");
+            bufferImpl.FreeMem(*buffer);
+            return DISPLAY_FAILURE;
+        }
+        (void)memset_s(addr, buffer->size, 0, buffer->size);
+        bufferImpl.Unmap(*buffer);
+        mBlackBuffer = buffer;
+        mBlackLayer = CreateHdiLayer(LAYER_TYPE_GRAPHIC);
+        mBlackLayer->SetLayerBuffer(mBlackBuffer, -1);
+    }
+
+    std::vector<HdiLayer *> layers;
+    HdiDrmComposition *drmComp = static_cast<HdiDrmComposition *>(mComposer->GetPostCompostion(0));
+    drmComp->SetLayers(layers, *mBlackLayer);
+    int32_t ret = drmComp->Apply(false);
+    drmComp->SetLayers(layers, *mClientLayer);
+    for (int fd = mBlackLayer->GetReleaseFenceFd(); fd >= 0; fd = mBlackLayer->GetReleaseFenceFd()) {
+        close(fd);
+    }
     return ret;
 }
 
