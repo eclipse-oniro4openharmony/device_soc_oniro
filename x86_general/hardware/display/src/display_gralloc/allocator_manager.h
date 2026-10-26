@@ -15,6 +15,7 @@
 #ifndef ALLOCATOR_MANAGER_H
 #define ALLOCATOR_MANAGER_H
 #include <memory>
+#include <mutex>
 #include "allocator.h"
 namespace OHOS {
 namespace HDI {
@@ -31,7 +32,8 @@ public:
     Allocator* GetAllocator(uint64_t usage);
 
 private:
-    bool init_ = false;
+    std::mutex mutex_;
+    uint32_t users_ = 0;
     std::shared_ptr<Allocator> frameBufferAllocator_ = nullptr;
     std::shared_ptr<Allocator> allocator_ = nullptr;
 };

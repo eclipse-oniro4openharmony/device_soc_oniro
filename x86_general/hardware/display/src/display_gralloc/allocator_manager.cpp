@@ -22,7 +22,9 @@ namespace DISPLAY {
 int32_t AllocatorManager::Init()
 {
     DISPLAY_LOGD("AllocatorManager::Init");
-    if (init_) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (users_ > 0) {
+        users_++;
         DISPLAY_LOGW("allocator has initialized");
         return DISPLAY_SUCCESS;
     }
@@ -35,15 +37,20 @@ int32_t AllocatorManager::Init()
     frameBufferAllocator_ = drmAllocator;
     allocator_ = drmAllocator;
 
-    init_ = true;
+    users_ = 1;
     DISPLAY_LOGD("init success");
     return DISPLAY_SUCCESS;
 }
 
+// Every DisplayBufferVdiImpl, short-lived ones included, inits and deinits the
+// shared allocators: release them only when the last one goes.
 int32_t AllocatorManager::DeInit()
 {
     DISPLAY_LOGD();
-    init_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (users_ == 0 || --users_ > 0) {
+        return DISPLAY_SUCCESS;
+    }
     frameBufferAllocator_.reset();
     allocator_.reset();
     return DISPLAY_SUCCESS;
