@@ -14,9 +14,11 @@
         "components": [
           "c_utils",
           "hilog",
+          "init",
           "hdf_core",
           "drivers_interface_display",
           "drivers_interface_camera",
+          "drivers_interface_sensor",
           "hitrace",
           "ipc",
           "graphic_surface",

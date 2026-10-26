@@ -1,0 +1,56 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+import("//build/ohos.gni")
+
+group("sensor_vdi_model") {
+  deps = [
+    ":emulator_sensor_para",
+    ":libhdi_sensor_impl",
+  ]
+}
+
+# Virtual sensors driven by emulator.sensor.* parameters: see
+# src/emulator_sensor_vdi.cpp. Replaces the stock HDF-kernel-backed VDI
+# (drivers_peripheral_sensor hdi_impl, off via
+# drivers_peripheral_sensor_feature_community = false); loaded by
+# libsensor_interface_service via HdfLoadVdi from /vendor/lib64/.
+ohos_shared_library("libhdi_sensor_impl") {
+  sources = [ "src/emulator_sensor_vdi.cpp" ]
+
+  include_dirs = [
+    "//drivers/peripheral/sensor/interfaces/v1_0",
+    "//drivers/peripheral/sensor/interfaces/include",
+  ]
+
+  external_deps = [
+    "c_utils:utils",
+    "drivers_interface_sensor:libsensor_stub_3.0",
+    "hdf_core:libhdf_host",
+    "hdf_core:libhdf_utils",
+    "hilog:libhilog",
+    "init:libbegetutil",
+    "ipc:ipc_single",
+  ]
+
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fno-common",
+    "-fno-strict-aliasing",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  output_name = "libhdi_sensor_impl"
+  part_name = "x86_general"
+}
+
+# Default readings, loaded by init from /vendor/etc/param.
+ohos_prebuilt_etc("emulator_sensor_para") {
+  source = "emulator_sensor.para"
+  relative_install_dir = "param"
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}

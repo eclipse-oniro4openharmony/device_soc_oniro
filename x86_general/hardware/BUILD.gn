@@ -19,5 +19,6 @@ group("hardware_group") {
     "display:display_composer_model",
     "gpu:gpu-libs",
     "input:emulator_touch_group",
+    "sensor:sensor_vdi_model",
   ]
 }

@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+# Readings of the emulator's virtual sensors (libhdi_sensor_impl). Change them
+# at runtime to simulate a sensor, for example tilt the device upright:
+#   hdc shell param set emulator.sensor.accelerometer "0 9.81 0"
+# Values are floats separated by spaces or commas, in the order and units of
+# the JS sensor API; missing values read as 0.
+
+# m/s^2, x y z: lying flat, screen up (no rotation for auto-rotate)
+emulator.sensor.accelerometer=0 0 9.81
+# rad/s, x y z
+emulator.sensor.gyroscope=0 0 0
+# uT, x y z
+emulator.sensor.magnetic_field=0 5.9 -48.4
+# lux, colour temperature (K), infrared luminance
+emulator.sensor.ambient_light=300 0 0
+# hPa
+emulator.sensor.barometer=1013.25
+# cm: 0 is near, 5 is far
+emulator.sensor.proximity=5
+# % relative humidity
+emulator.sensor.humidity=50
+# degrees Celsius
+emulator.sensor.ambient_temperature=22
