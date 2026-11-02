@@ -31,6 +31,7 @@
 #include "parameter.h"
 
 #include "hybris_binder_ndk.h"
+#include "hybris_gnss_legacy.h"
 #include "hybris_gnss_log.h"
 
 namespace OHOS {
@@ -45,6 +46,17 @@ using ::OHOS::HybrisRil::BinderNdkStartThreadPool;
 constexpr const char *CONTAINER_READY_PARAM = "android.composer.ready";
 
 const std::string GNSS_INSTANCE = std::string(gnss::IGnss::descriptor) + "/default";
+
+/* Set by a device's init cfg to "legacy" when its vendor serves positions
+ * only through the legacy GPS HAL module (Halium 12 MTK: AIDL IGnss v1 has
+ * no session API).  See hybris_gnss_legacy.cpp. */
+constexpr const char *GNSS_HAL_PARAM = "ohos.hybris.gnss_hal";
+
+bool UseLegacyHal()
+{
+    char value[16] = { 0 };
+    return GetParameter(GNSS_HAL_PARAM, "", value, sizeof(value)) > 0 && strcmp(value, "legacy") == 0;
+}
 
 /* See hybris_ril_bridge.cpp: comm is world-readable, so this is the one
  * cheap way to see container processes at an unprivileged uid. */
@@ -237,11 +249,18 @@ void GnssBridge::ConnectLoop()
 {
     WaitForContainer();
 
+    /* Needed by the legacy backend too: its AIDL objects are in-process,
+     * but ScopedAStatus is still libbinder_ndk's. */
     if (!BinderNdkInit()) {
         HG_LOGE("libbinder_ndk unavailable — no GNSS");
         std::lock_guard<std::mutex> guard(lock_);
         unavailable_ = true;
         connectedCv_.notify_all();
+        return;
+    }
+
+    if (UseLegacyHal()) {
+        ConnectLegacy();
         return;
     }
 
@@ -318,6 +337,35 @@ bool GnssBridge::Connect()
         HG_LOGW("linkToDeath failed: %{public}d", linked);
     }
 
+    return Bind(hal);
+}
+
+/*
+ * The legacy backend: no servicemanager, no death notifications (the HAL
+ * lives in this process, and mnld restarting is the HAL's business), so one
+ * successful bind lasts for the life of the process.
+ */
+void GnssBridge::ConnectLegacy()
+{
+    /* The module's init() opens its sockets to mnld; give the daemon a head
+     * start rather than have the HAL's first requests go nowhere. */
+    constexpr int32_t MNLD_TIMEOUT_MS = 30000;
+    if (!WaitForContainerProcess("mnld", MNLD_TIMEOUT_MS)) {
+        HG_LOGW("no mnld after %{public}d ms — opening the legacy HAL anyway", MNLD_TIMEOUT_MS);
+    }
+    auto hal = OpenLegacyGnss();
+    if (hal == nullptr || !Bind(hal)) {
+        HG_LOGE("legacy GPS HAL unusable — GNSS unavailable");
+        std::lock_guard<std::mutex> guard(lock_);
+        unavailable_ = true;
+        connectedCv_.notify_all();
+        return;
+    }
+    ApplySession();
+}
+
+bool GnssBridge::Bind(const std::shared_ptr<gnss::IGnss> &hal)
+{
     int32_t version = 0;
     (void)hal->getInterfaceVersion(&version);
 
@@ -364,7 +412,8 @@ bool GnssBridge::Connect()
     }
     connectedCv_.notify_all();
     HG_LOGI("bound to %{public}s v%{public}d (agnss %{public}s, agnss-ril %{public}s)",
-            GNSS_INSTANCE.c_str(), version, agnss ? "yes" : "no", agnssRil ? "yes" : "no");
+            version == 0 ? "the legacy GPS HAL" : GNSS_INSTANCE.c_str(), version,
+            agnss ? "yes" : "no", agnssRil ? "yes" : "no");
     return true;
 }
 

@@ -103,6 +103,7 @@ ohos_shared_library("vendorGnssAdapter") {
     "src/hybris_gnss_agnss.cpp",
     "src/hybris_gnss_bridge.cpp",
     "src/hybris_gnss_callbacks.cpp",
+    "src/hybris_gnss_legacy.cpp",
   ]
 
   deps = [ ":gnss_aidl_ndk" ]

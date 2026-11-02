@@ -27,6 +27,7 @@ image.
 | `src/hybris_gnss_adapter.cpp` | `GnssVendorInterface` — the whole vendor ABI (`location_vendor_lib.h`). |
 | `src/hybris_gnss_bridge.cpp` | Connection to `IGnss/default`, the wanted-session state, the report dispatcher. |
 | `src/hybris_gnss_callbacks.cpp` | `IGnssCallback` / `IAGnssCallback` / `IAGnssRilCallback` → OHOS structs. |
+| `src/hybris_gnss_legacy.cpp` | The legacy backend: the vendor's `gps.default.so` behind in-process `IGnss` / `IAGnss` / `IAGnssRil` objects. The struct mirror is in `include/hybris_gps_legacy_abi.h`. |
 | `src/hybris_gnss_agnss.cpp` | `AGNSS_MODULE_INTERFACE` onto `IAGnss` + `IAGnssRil`. |
 | `aidl_gen/` | **Generated** AIDL NDK code for `android.hardware.gnss` v3 — checked in; `regen.sh` documents the two inputs. |
 | `test/hybris_gnss_test.cpp` | Probe that drives the installed library through the vendor ABI (`install_enable = false`). |
@@ -58,6 +59,33 @@ handles: geofencing (the MTK HAL does not advertise
 `CAPABILITY_GEOFENCING`), GNSS measurements, network-initiated
 notifications, batching (`GNSS_CACHE` — the framework only asks on
 wearables) and PSDS injection (MTK downloads EPO itself).
+
+## Legacy GPS HAL backend (Halium 12 MTK, e.g. the Volla X23)
+
+Halium 12 MTK vendors serve positions only over HIDL `gnss@2.1`. Their AIDL
+`IGnss` is version 1, which has extensions but no session API (`start`,
+`setPositionMode`, AGnss). Both services are thin wrappers around the
+legacy HAL module `gps.default.so`, which talks to mnld over abstract sockets
+in the shared network namespace.
+
+With `ohos.hybris.gnss_hal=legacy` (set by the device's init cfg) the
+connect thread skips servicemanager and does the following:
+
+* Loads the module through libhybris' `hw_get_module("gps")`.
+* Wraps it in in-process AIDL objects (`OpenLegacyGnss()`).
+* Binds those exactly like a remote HAL.
+
+The adapter and the AGNSS module are unchanged. The HAL's C callbacks are
+converted and fed into the same `IGnssCallback` objects, so reports still go
+through the dispatcher thread.
+
+* mnld serves one HAL client, so the device cfg must stop the container's
+  own GNSS service. `init.x23.cfg` bind-mounts `/dev/null` over its `.rc`.
+* Threads the HAL asks for (`create_thread_cb`) get bionic's 1 MiB stack:
+  `mnl2hal_hdlr` keeps about 75 KB on the stack and overflows musl's default.
+* Struct layouts follow MediaTek's `gps_mtk.h` of the Android 11/12 era. Only
+  the members used here are mirrored. `GpsInterface_ext.size` is 88 on the
+  X23.
 
 ## Design points
 

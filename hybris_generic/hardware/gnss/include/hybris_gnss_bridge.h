@@ -102,6 +102,8 @@ private:
 
     void ConnectLoop();
     bool Connect();
+    void ConnectLegacy();
+    bool Bind(const std::shared_ptr<gnss::IGnss> &hal);
     void ApplySession();
     void DispatchLoop();
 
