@@ -68,8 +68,21 @@ struct VibNodes {
  * Init() takes the first pair the driver actually exposes, so the _aw pair
  * wins where it exists and the plain LED-class names remain the fallback for
  * drivers that only expose those (e.g. the Volla X23).
+ *
+ * The choice goes by existence, not by write access: on the X23 the Halium
+ * container's init.rc chowns activate/duration back to system during its own
+ * boot, after this host has started, and init.x23.cfg hands them to us again
+ * only once the container is up.  A pair that is not writable yet just fails
+ * the individual writes until then, instead of failing Init() and leaving
+ * the framework with no vibrator at all.
  */
 constexpr VibNodes VIB_NODES_STD = { "activate", "duration" };
+/* The plain pair is the LED "transient" trigger (Android's init.rc selects it
+ * at boot).  Its `state` is the level held *during* the pulse, and it starts
+ * at 0: activating with state 0 switches the motor off for `duration` and
+ * then on for good.  Android's vibrator HAL writes state=1 before every
+ * activation; so do we. */
+constexpr const char *VIB_TRANSIENT_STATE = "state";
 constexpr VibNodes VIB_NODES_AW = { "activate_aw", "duration_aw" };
 constexpr VibNodes VIB_NODE_CANDIDATES[] = { VIB_NODES_AW, VIB_NODES_STD };
 
@@ -95,10 +108,10 @@ bool MakePath(char (&path)[PATH_LEN], const char *file)
     return snprintf(path, PATH_LEN, "%s/%s", VIB_DIR, file) >= 0;
 }
 
-bool NodeWritable(const char *file)
+bool NodeExists(const char *file)
 {
     char path[PATH_LEN];
-    return MakePath(path, file) && access(path, W_OK) == 0;
+    return MakePath(path, file) && access(path, F_OK) == 0;
 }
 
 int32_t WriteSysfs(const char *file, const std::string &value)
@@ -128,7 +141,7 @@ public:
     int32_t Init() override
     {
         for (const VibNodes &candidate : VIB_NODE_CANDIDATES) {
-            if (!NodeWritable(candidate.activate)) {
+            if (!NodeExists(candidate.activate)) {
                 continue;
             }
             nodes_ = candidate;
@@ -136,7 +149,7 @@ public:
                 __func__, VIB_DIR, nodes_.duration, nodes_.activate);
             return HDF_SUCCESS;
         }
-        HDF_LOGE("%{public}s: no writable vibrator node under %{public}s (%{public}d)",
+        HDF_LOGE("%{public}s: no vibrator node under %{public}s (%{public}d)",
             __func__, VIB_DIR, errno);
         return HDF_FAILURE;
     }
@@ -268,6 +281,10 @@ private:
          * anyway would replay whatever duration was set last. */
         if (durationMs == 0) {
             return HDF_SUCCESS;
+        }
+        if (strcmp(nodes_.activate, VIB_NODES_STD.activate) == 0 && NodeExists(VIB_TRANSIENT_STATE) &&
+            WriteSysfs(VIB_TRANSIENT_STATE, "1") != HDF_SUCCESS) {
+            return HDF_FAILURE;
         }
         if (WriteSysfs(nodes_.duration, std::to_string(durationMs)) != HDF_SUCCESS) {
             return HDF_FAILURE;
