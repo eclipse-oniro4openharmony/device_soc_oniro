@@ -1,0 +1,46 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+group("bt_vendor_model") {
+  deps = [ ":libbt_vendor" ]
+}
+
+# Vendor library the stock HCI HDI (libhci_interface_service_1.0, in
+# blue_host) dlopens as libbt_vendor.z.so for BLUETOOTH_VENDOR_LIB_INTERFACE.
+# MediaTek connsys: the kernel driver behind /dev/stpbt does the firmware
+# bring-up, so this only opens the H4 channel and sets the device address.
+ohos_shared_library("libbt_vendor") {
+  sources = [ "src/bt_vendor_mtk_stpbt.cpp" ]
+
+  include_dirs =
+      [ "//drivers/peripheral/bluetooth/hci/hdi_service/implement" ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fno-common",
+  ]
+
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  output_name = "libbt_vendor"
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
