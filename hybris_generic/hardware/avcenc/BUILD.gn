@@ -55,9 +55,28 @@ ohos_executable("avcenc_probe") {
   part_name = "hybris_generic_soc"
 }
 
+# Bring-up tool: decodes a recording with OpenHarmony's own demuxer and video
+# decoder and dumps chosen frames as NV12 (see test/avframe_dump.cpp).
+ohos_executable("avframe_dump") {
+  sources = [ "test/avframe_dump.cpp" ]
+  external_deps = [
+    "av_codec:native_media_avdemuxer",
+    "av_codec:native_media_avsource",
+    "av_codec:native_media_codecbase",
+    "av_codec:native_media_vdec",
+    "media_foundation:native_media_core",
+  ]
+  install_enable = true
+  install_images = [ "system" ]
+  module_install_dir = "bin"
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
 group("avcenc_model") {
   deps = [
     ":avcenc_ohos",
     ":avcenc_probe",
+    ":avframe_dump",
   ]
 }
