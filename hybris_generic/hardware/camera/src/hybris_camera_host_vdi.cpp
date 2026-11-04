@@ -26,6 +26,10 @@
  */
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -35,6 +39,7 @@
 #include "hdf_load_vdi.h"
 #include "metadata_utils.h"
 #include "parameter.h"
+#include <unistd.h>
 
 #include "v1_0/icamera_host_vdi.h"
 
@@ -70,6 +75,11 @@ private:
     bool WaitForAndroid();
     bool Enumerate();
     CameraInfo *FindCamera(const std::string &cameraId);
+    void AttachAuxLenses(CameraInfo &back, const std::map<std::string, std::shared_ptr<CameraInfo>> &aux);
+    // The torch: MediaTek's flashlight core, the LEDs the camera HAL fires as
+    // flash.  Both colour-temperature channels of the back flash are driven.
+    bool WriteTorch(bool on);
+    void ReportTorch(const std::string &cameraId, VdiFlashlightStatus status);
 
     std::mutex lock_;
     const NdkApi *ndk_ = nullptr;
@@ -87,17 +97,27 @@ private:
     std::thread bringUpThread_;
     bool enabled_ = false;
     bool ready_ = false;
+    bool torchOn_ = false;
 };
 
 namespace {
 
 constexpr int PARAM_VALUE_MAX = 64;
+constexpr const char *TORCH_NODE = "/sys/class/flashlight_core/flashlight/flashlight_torch";
+constexpr const char *TORCH_CHANNELS[] = { "0 0 0", "0 1 0" }; // type 0 (back), ct 0/1, part 0
 
 bool ParamEquals(const char *key, const char *expected)
 {
     char value[PARAM_VALUE_MAX] = { 0 };
     int len = GetParameter(key, "", value, sizeof(value));
     return len > 0 && strcmp(value, expected) == 0;
+}
+
+std::string ParamString(const char *key)
+{
+    char value[PARAM_VALUE_MAX] = { 0 };
+    int len = GetParameter(key, "", value, sizeof(value));
+    return len > 0 ? std::string(value) : std::string();
 }
 
 } // namespace
@@ -192,10 +212,12 @@ bool HybrisCameraHost::Enumerate()
         return false;
     }
 
-    // Only the primary back and front cameras are exposed; the two back
-    // auxiliaries the MTK HAL advertises have no place in the OHOS model yet
-    // (plan §D6).
+    // OHOS has one logical camera per position: the primary back and front
+    // cameras are exposed, and auxiliary back lenses named by the device
+    // params (const.oniro.camera.back_ultrawide / back_macro) join the back
+    // camera as lenses (AttachLens) instead of being cameras of their own.
     std::vector<std::shared_ptr<CameraInfo>> found;
+    std::map<std::string, std::shared_ptr<CameraInfo>> aux;
     bool haveBack = false;
     bool haveFront = false;
     for (int i = 0; i < ids->numCameras; ++i) {
@@ -219,12 +241,17 @@ bool HybrisCameraHost::Enumerate()
             info->vdiId = CAMERA_ID_FRONT;
             haveFront = true;
         } else {
-            // Auxiliary back cameras: the OHOS model has no place for them yet.
+            aux[info->androidId] = info;
             continue;
         }
         found.push_back(info);
     }
     ndk_->ACameraManager_deleteCameraIdList(ids);
+    for (auto &info : found) {
+        if (info->position == OHOS_CAMERA_POSITION_BACK) {
+            AttachAuxLenses(*info, aux);
+        }
+    }
 
     if (found.empty()) {
         return false;
@@ -251,6 +278,31 @@ bool HybrisCameraHost::Enumerate()
         }
     }
     return true;
+}
+
+void HybrisCameraHost::AttachAuxLenses(CameraInfo &back,
+                                       const std::map<std::string, std::shared_ptr<CameraInfo>> &aux)
+{
+    auto lookup = [&aux](const std::string &id) -> const CameraInfo * {
+        auto it = aux.find(id);
+        return it == aux.end() ? nullptr : it->second.get();
+    };
+    std::string uwId = ParamString("const.oniro.camera.back_ultrawide");
+    if (const CameraInfo *uw = lookup(uwId)) {
+        float scale = std::strtof(ParamString("const.oniro.camera.back_ultrawide_scale").c_str(), nullptr);
+        if (!AttachLens(back, *uw, "ultra-wide", scale)) {
+            HC_LOGE("android camera %{public}s: not usable as the ultra-wide lens (scale %{public}.2f)",
+                    uwId.c_str(), scale);
+        }
+    } else if (!uwId.empty()) {
+        HC_LOGE("ultra-wide lens: no auxiliary back camera \"%{public}s\"", uwId.c_str());
+    }
+    std::string macroId = ParamString("const.oniro.camera.back_macro");
+    if (const CameraInfo *macro = lookup(macroId)) {
+        (void)AttachLens(back, *macro, "macro", 1.0f);
+    } else if (!macroId.empty()) {
+        HC_LOGE("macro lens: no auxiliary back camera \"%{public}s\"", macroId.c_str());
+    }
 }
 
 CameraInfo *HybrisCameraHost::FindCamera(const std::string &cameraId)
@@ -312,6 +364,7 @@ int32_t HybrisCameraHost::OpenCamera(const std::string &cameraId,
 {
     sptr<HybrisCameraDevice> hybrisDevice;
     ACameraManager *manager = nullptr;
+    std::string torchOffForOpen;
     {
         std::lock_guard<std::mutex> guard(lock_);
         CameraInfo *info = FindCamera(cameraId);
@@ -332,6 +385,14 @@ int32_t HybrisCameraHost::OpenCamera(const std::string &cameraId,
             HC_LOGI("reclaiming camera %{public}s from a departed client", cameraId.c_str());
             openDevices_.erase(existing);
         }
+        if (info->flashAvailable && torchOn_) {
+            // The HAL drives the same LEDs as flash; like Android, opening
+            // the camera turns the torch off.
+            torchOn_ = !WriteTorch(false);
+            if (!torchOn_) {
+                torchOffForOpen = info->vdiId;
+            }
+        }
         hybrisDevice = new (std::nothrow) HybrisCameraDevice(ndk_, info, callbackObj);
         if (hybrisDevice == nullptr) {
             return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
@@ -339,6 +400,9 @@ int32_t HybrisCameraHost::OpenCamera(const std::string &cameraId,
         manager = manager_;
     }
 
+    if (!torchOffForOpen.empty()) {
+        ReportTorch(torchOffForOpen, VdiFlashlightStatus::FLASHLIGHT_OFF);
+    }
     if (!hybrisDevice->Open(manager)) {
         return VDI::Camera::V1_0::DEVICE_ERROR;
     }
@@ -351,14 +415,61 @@ int32_t HybrisCameraHost::OpenCamera(const std::string &cameraId,
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
+bool HybrisCameraHost::WriteTorch(bool on)
+{
+    bool ok = true;
+    for (const char *channel : TORCH_CHANNELS) {
+        // The node parses one "<type> <ct> <part> <on>" line per write.
+        FILE *fp = fopen(TORCH_NODE, "w");
+        if (fp == nullptr) {
+            HC_LOGE("torch: cannot open %{public}s: %{public}s", TORCH_NODE, strerror(errno));
+            return false;
+        }
+        ok = fprintf(fp, "%s %d", channel, on ? 1 : 0) > 0 && ok;
+        ok = fclose(fp) == 0 && ok;
+    }
+    HC_LOGI("torch %{public}s%{public}s", on ? "on" : "off", ok ? "" : " (write failed)");
+    return ok;
+}
+
+void HybrisCameraHost::ReportTorch(const std::string &cameraId, VdiFlashlightStatus status)
+{
+    sptr<ICameraHostVdiCallback> cb;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        cb = callback_;
+    }
+    if (cb != nullptr) {
+        cb->OnFlashlightStatus(cameraId, status);
+    }
+}
+
 int32_t HybrisCameraHost::SetFlashlight(const std::string &cameraId, bool isEnable)
 {
-    // camera2 has no torch entry point; the decision on how to drive it (a
-    // short-lived torch session vs. an ICameraService::setTorchMode shim) is
-    // deferred, so report it honestly instead of silently doing nothing.
-    HC_LOGW("SetFlashlight(%{public}s, %{public}d) is not implemented yet", cameraId.c_str(),
-            isEnable ? 1 : 0);
-    return VDI::Camera::V1_0::METHOD_NOT_SUPPORTED;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        CameraInfo *info = FindCamera(cameraId);
+        if (info == nullptr || !info->flashAvailable) {
+            HC_LOGE("SetFlashlight: %{public}s has no flash", cameraId.c_str());
+            return VDI::Camera::V1_0::INVALID_ARGUMENT;
+        }
+        auto open = openDevices_.find(cameraId);
+        if (open != openDevices_.end()) {
+            sptr<HybrisCameraDevice> live = open->second.promote();
+            if (live != nullptr && live->IsOpen()) {
+                return VDI::Camera::V1_0::CAMERA_BUSY; // the camera owns the LEDs now
+            }
+        }
+        if (access(TORCH_NODE, W_OK) != 0) {
+            return VDI::Camera::V1_0::METHOD_NOT_SUPPORTED;
+        }
+        if (!WriteTorch(isEnable)) {
+            return VDI::Camera::V1_0::DEVICE_ERROR;
+        }
+        torchOn_ = isEnable;
+    }
+    ReportTorch(cameraId, isEnable ? VdiFlashlightStatus::FLASHLIGHT_ON : VdiFlashlightStatus::FLASHLIGHT_OFF);
+    return VDI::Camera::V1_0::NO_ERROR;
 }
 
 int32_t HybrisCameraHost::CloseAllCameras()

@@ -47,6 +47,8 @@ bool HybrisCameraDevice::Open(ACameraManager *manager)
     if (manager == nullptr) {
         return false;
     }
+    manager_ = manager;
+    lens_ = 0;
     ACameraDevice_StateCallbacks stateCb {};
     stateCb.context = this;
     stateCb.onDisconnected = OnDeviceDisconnected;
@@ -60,6 +62,60 @@ bool HybrisCameraDevice::Open(ACameraManager *manager)
         return false;
     }
     return true;
+}
+
+bool HybrisCameraDevice::SwitchLens(int lens)
+{
+    if (lens < 0 || static_cast<size_t>(lens) >= info_->lenses.size()) {
+        return false;
+    }
+    ACameraDevice *old = nullptr;
+    int previous = 0;
+    ACameraManager *manager = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (lens == lens_ && device_ != nullptr) {
+            return true;
+        }
+        old = device_;
+        device_ = nullptr;
+        previous = lens_;
+        manager = manager_;
+    }
+    // Closing disconnects the readers' windows from the old camera, so the
+    // next session can take them over.
+    if (old != nullptr) {
+        ndk_->ACameraDevice_close(old);
+    }
+    if (manager == nullptr) {
+        return false;
+    }
+    ACameraDevice_StateCallbacks stateCb {};
+    stateCb.context = this;
+    stateCb.onDisconnected = OnDeviceDisconnected;
+    stateCb.onError = OnDeviceError;
+    ACameraDevice *dev = nullptr;
+    const std::string &id = info_->lenses[lens].androidId;
+    camera_status_t st = ndk_->ACameraManager_openCamera(manager, id.c_str(), &stateCb, &dev);
+    bool ok = st == ACAMERA_OK && dev != nullptr;
+    if (!ok) {
+        HC_LOGE("%{public}s: opening the %{public}s lens (android %{public}s) failed: %{public}s",
+                info_->vdiId.c_str(), info_->lenses[lens].role.c_str(), id.c_str(), NdkStatusName(st));
+        lens = previous;
+        dev = nullptr;
+        st = ndk_->ACameraManager_openCamera(manager, info_->lenses[lens].androidId.c_str(), &stateCb, &dev);
+        if (st != ACAMERA_OK) {
+            dev = nullptr;
+        }
+    }
+    std::lock_guard<std::mutex> guard(lock_);
+    device_ = dev;
+    lens_ = lens;
+    if (ok) {
+        HC_LOGI("%{public}s: now on the %{public}s lens (android %{public}s)", info_->vdiId.c_str(),
+                info_->lenses[lens].role.c_str(), id.c_str());
+    }
+    return ok;
 }
 
 int32_t HybrisCameraDevice::GetStreamOperator(const sptr<IStreamOperatorVdiCallback> &callbackObj,
@@ -81,15 +137,24 @@ int32_t HybrisCameraDevice::GetStreamOperator(const sptr<IStreamOperatorVdiCallb
 
 int32_t HybrisCameraDevice::UpdateSettings(const std::vector<uint8_t> &settings)
 {
-    std::lock_guard<std::mutex> guard(lock_);
-    settings_ = settings;
-    // The settings only reach the HAL on the next capture request; the OHOS
-    // framework re-issues its repeating capture after changing them.
+    sptr<HybrisStreamOperator> op;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        // camera_service sends only what changed since its previous call.
+        MergeSettings(settings_, settings);
+        op = streamOperator_;
+    }
+    // A running preview has to pick the change up now (zoom, flash, macro
+    // ...): camera_service does not restart its repeating capture for it.
+    if (op != nullptr) {
+        op->SettingsChanged();
+    }
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
-const std::vector<uint8_t> &HybrisCameraDevice::LatestSettings()
+std::vector<uint8_t> HybrisCameraDevice::LatestSettings()
 {
+    std::lock_guard<std::mutex> guard(lock_);
     return settings_;
 }
 
@@ -156,9 +221,11 @@ void HybrisCameraDevice::ReportResult(const ACameraMetadata *androidResult, int6
 {
     sptr<ICameraDeviceVdiCallback> cb;
     std::vector<int32_t> enabled;
+    float zoomScale = 1.0f;
     {
         std::lock_guard<std::mutex> guard(lock_);
         cb = callback_;
+        zoomScale = info_->lenses[lens_].scale;
         enabled = enabledResults_;
         resultSeq_++;
         // ON_CHANGED is a hint that the framework only wants updates; sending
@@ -172,7 +239,7 @@ void HybrisCameraDevice::ReportResult(const ACameraMetadata *androidResult, int6
     if (cb == nullptr) {
         return;
     }
-    auto result = BuildResultMetadata(ndk_, androidResult, enabled);
+    auto result = BuildResultMetadata(ndk_, androidResult, enabled, zoomScale);
     if (result == nullptr) {
         return;
     }

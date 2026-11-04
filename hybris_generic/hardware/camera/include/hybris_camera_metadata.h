@@ -35,7 +35,23 @@ struct StreamSize {
     int32_t height;
 };
 
-// Everything the bridge needs to know about one physical camera, derived once
+/*
+ * One Android camera serving an OHOS camera.  The OHOS model has a single
+ * logical camera per position whose lenses are chosen by the HAL: an
+ * ultra-wide lens when the zoom ratio drops below 1, a macro lens while the
+ * session enables macro.  Each lens is its own Android camera here.
+ */
+struct LensInfo {
+    std::string androidId;
+    std::string role;                     // "main", "ultra-wide", "macro"
+    int32_t activeArray[4] = { 0, 0, 0, 0 };
+    std::vector<StreamSize> yuvSizes;
+    std::vector<StreamSize> jpegSizes;
+    float zoomMax = 1.0f;                 // the lens's own zoom ratio range max
+    float scale = 1.0f;                   // its field of view as a logical zoom ratio
+};
+
+// Everything the bridge needs to know about one OHOS camera, derived once
 // from ACameraManager_getCameraCharacteristics at enumeration time.
 struct CameraInfo {
     std::string vdiId;                    // hybris_back / hybris_front
@@ -46,8 +62,25 @@ struct CameraInfo {
     int32_t activeArray[4] = { 0, 0, 0, 0 };
     std::vector<StreamSize> yuvSizes;     // preview + video (NV21)
     std::vector<StreamSize> jpegSizes;    // still capture
+    float zoomMax = 1.0f;
     std::shared_ptr<OHOS::Camera::CameraMetadata> ability;
+    // lenses[0] is this camera's own sensor; the rest are auxiliary lenses
+    // attached with AttachLens.  ultraWide / macro index into it (-1: none).
+    std::vector<LensInfo> lenses;
+    int ultraWide = -1;
+    int macro = -1;
 };
+
+// The lens a camera's own characteristics describe (role "main").
+LensInfo MainLens(const CameraInfo &info);
+
+/*
+ * Makes `aux` (another Android camera, already run through
+ * BuildCameraAbility) an auxiliary lens of `info`, and advertises it in
+ * info's ability: an ultra-wide lens lowers the zoom ratio range to `scale`,
+ * a macro lens sets OHOS_ABILITY_CAMERA_MACRO_SUPPORTED.
+ */
+bool AttachLens(CameraInfo &info, const CameraInfo &aux, const std::string &role, float scale);
 
 /*
  * Translates Android characteristics into an OHOS camera ability.
@@ -66,14 +99,23 @@ bool BuildCameraAbility(const NdkApi *ndk, const ACameraMetadata *chars, CameraI
  * Unknown/unsupported tags are ignored rather than failing the request.
  */
 void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosSettings,
-                            const CameraInfo &info, ACaptureRequest *request);
+                            const CameraInfo &info, const LensInfo &lens, ACaptureRequest *request);
+
+// What the settings ask of the lens choice: the logical zoom ratio (1 when
+// unset) and whether macro is enabled.  Only tags present are written.
+void ReadLensControls(const std::vector<uint8_t> &ohosSettings, float &zoom, bool &macro);
+
+// Merges `update` into `merged` (both encoded camera metadata): the framework
+// only sends the tags that changed since its last UpdateSettings.
+void MergeSettings(std::vector<uint8_t> &merged, const std::vector<uint8_t> &update);
 
 /*
  * Builds the per-frame OHOS result metadata from an Android capture result,
  * limited to the tags the framework has asked for via EnableResult.
  */
 std::shared_ptr<OHOS::Camera::CameraMetadata> BuildResultMetadata(
-    const NdkApi *ndk, const ACameraMetadata *androidResult, const std::vector<int32_t> &enabled);
+    const NdkApi *ndk, const ACameraMetadata *androidResult, const std::vector<int32_t> &enabled,
+    float zoomScale = 1.0f);
 
 // Tags we can populate in OnResult; the device VDI reports these from
 // GetEnabledResults and the framework picks from them.

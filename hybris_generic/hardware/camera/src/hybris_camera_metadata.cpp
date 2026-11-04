@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #include "camera_device_ability_items.h"
 #include "camera_metadata_operator.h"
@@ -106,6 +107,20 @@ void AddI32Vec(const std::shared_ptr<CameraMetadata> &meta, uint32_t tag,
     if (!values.empty()) {
         meta->addEntry(tag, values.data(), values.size());
     }
+}
+
+// OHOS_ABILITY_SCENE_ZOOM_CAP: (scene mode, min x100, max x100) per mode the
+// bridge serves -- NORMAL, CAPTURE and VIDEO.
+std::vector<int32_t> SceneZoomCap(float minZoom, float maxZoom)
+{
+    constexpr float PERCENT = 100.0f;
+    std::vector<int32_t> cap;
+    for (int32_t mode : { 0, 1, 2 }) {
+        cap.push_back(mode);
+        cap.push_back(static_cast<int32_t>(std::lround(minZoom * PERCENT)));
+        cap.push_back(static_cast<int32_t>(std::lround(maxZoom * PERCENT)));
+    }
+    return cap;
 }
 
 // Android AF modes -> OHOS focus modes.  OHOS models "continuous" and
@@ -273,6 +288,11 @@ bool BuildCameraAbility(const NdkApi *ndk, const ACameraMetadata *chars, CameraI
         zoomRange = { 1.0f, entry.data.f[0] };
     }
     ability->addEntry(OHOS_ABILITY_ZOOM_RATIO_RANGE, zoomRange.data(), zoomRange.size());
+    info.zoomMax = zoomRange[1];
+    // What CaptureSession::GetZoomRatioRange (and with it SetZoomRatio's
+    // clamp and the apps' zoom bars) actually reads; without it the range is
+    // [0, 0] and zoom does nothing.
+    AddI32Vec(ability, OHOS_ABILITY_SCENE_ZOOM_CAP, SceneZoomCap(zoomRange[0], zoomRange[1]));
 
     AddU8Vec(ability, OHOS_ABILITY_VIDEO_STABILIZATION_MODES, { OHOS_CAMERA_VIDEO_STABILIZATION_OFF });
     AddU8Vec(ability, OHOS_ABILITY_MUTE_MODES, { OHOS_CAMERA_MUTE_MODE_OFF });
@@ -282,6 +302,7 @@ bool BuildCameraAbility(const NdkApi *ndk, const ACameraMetadata *chars, CameraI
         return false;
     }
     info.ability = ability;
+    info.lenses = { MainLens(info) };
     HC_LOGI("camera %{public}s (android \"%{public}s\"): position=%{public}u orientation=%{public}d "
             "flash=%{public}d yuv=%{public}zu jpeg=%{public}zu largestYuv=%{public}dx%{public}d "
             "largestJpeg=%{public}dx%{public}d",
@@ -292,8 +313,148 @@ bool BuildCameraAbility(const NdkApi *ndk, const ACameraMetadata *chars, CameraI
     return true;
 }
 
+LensInfo MainLens(const CameraInfo &info)
+{
+    LensInfo lens;
+    lens.androidId = info.androidId;
+    lens.role = "main";
+    for (int i = 0; i < 4; ++i) {
+        lens.activeArray[i] = info.activeArray[i];
+    }
+    lens.yuvSizes = info.yuvSizes;
+    lens.jpegSizes = info.jpegSizes;
+    lens.zoomMax = info.zoomMax;
+    lens.scale = 1.0f;
+    return lens;
+}
+
+bool AttachLens(CameraInfo &info, const CameraInfo &aux, const std::string &role, float scale)
+{
+    if (info.ability == nullptr || info.lenses.empty()) {
+        return false;
+    }
+    LensInfo lens = MainLens(aux);
+    lens.role = role;
+    if (role == "ultra-wide") {
+        if (info.ultraWide >= 0 || !(scale > 0.0f && scale < 1.0f)) {
+            return false;
+        }
+        lens.scale = scale;
+        info.lenses.push_back(lens);
+        info.ultraWide = static_cast<int>(info.lenses.size()) - 1;
+        // Zooming below 1x is how the framework and apps reach this lens.
+        float range[2] = { scale, info.zoomMax };
+        info.ability->updateEntry(OHOS_ABILITY_ZOOM_RATIO_RANGE, range, 2);
+        std::vector<int32_t> cap = SceneZoomCap(scale, info.zoomMax);
+        info.ability->updateEntry(OHOS_ABILITY_SCENE_ZOOM_CAP, cap.data(), cap.size());
+    } else if (role == "macro") {
+        if (info.macro >= 0) {
+            return false;
+        }
+        info.lenses.push_back(lens);
+        info.macro = static_cast<int>(info.lenses.size()) - 1;
+        uint8_t supported = OHOS_CAMERA_MACRO_SUPPORTED;
+        info.ability->addEntry(OHOS_ABILITY_CAMERA_MACRO_SUPPORTED, &supported, 1);
+    } else {
+        return false;
+    }
+    HC_LOGI("camera %{public}s: android \"%{public}s\" is its %{public}s lens (scale %{public}.2f, "
+            "yuv=%{public}zu jpeg=%{public}zu largestJpeg=%{public}dx%{public}d)",
+            info.vdiId.c_str(), lens.androidId.c_str(), role.c_str(), lens.scale, lens.yuvSizes.size(),
+            lens.jpegSizes.size(), lens.jpegSizes.empty() ? 0 : lens.jpegSizes[0].width,
+            lens.jpegSizes.empty() ? 0 : lens.jpegSizes[0].height);
+    return true;
+}
+
+void ReadLensControls(const std::vector<uint8_t> &ohosSettings, float &zoom, bool &macro)
+{
+    if (ohosSettings.empty()) {
+        return;
+    }
+    std::shared_ptr<CameraMetadata> settings;
+    OHOS::Camera::MetadataUtils::ConvertVecToMetadata(ohosSettings, settings);
+    if (settings == nullptr || settings->get() == nullptr) {
+        return;
+    }
+    camera_metadata_item_t item {};
+    if (OHOS::Camera::FindCameraMetadataItem(settings->get(), OHOS_CONTROL_ZOOM_RATIO, &item) ==
+            CAM_META_SUCCESS && item.count > 0) {
+        zoom = item.data.f[0];
+    }
+    if (OHOS::Camera::FindCameraMetadataItem(settings->get(), OHOS_CONTROL_CAMERA_MACRO, &item) ==
+            CAM_META_SUCCESS && item.count > 0) {
+        macro = item.data.u8[0] == OHOS_CAMERA_MACRO_ENABLE;
+    }
+}
+
+void MergeSettings(std::vector<uint8_t> &merged, const std::vector<uint8_t> &update)
+{
+    std::shared_ptr<CameraMetadata> oldMeta;
+    std::shared_ptr<CameraMetadata> newMeta;
+    if (!merged.empty()) {
+        OHOS::Camera::MetadataUtils::ConvertVecToMetadata(merged, oldMeta);
+    }
+    OHOS::Camera::MetadataUtils::ConvertVecToMetadata(update, newMeta);
+    if (newMeta == nullptr || newMeta->get() == nullptr) {
+        return;
+    }
+    // Every item of the update, plus the old items it does not replace.
+    std::vector<camera_metadata_item_t> items;
+    std::set<uint32_t> tags;
+    float smoothTarget = -1.0f;
+    uint32_t count = OHOS::Camera::GetCameraMetadataItemCount(newMeta->get());
+    for (uint32_t i = 0; i < count; ++i) {
+        camera_metadata_item_t item {};
+        if (OHOS::Camera::GetCameraMetadataItem(newMeta->get(), i, &item) != CAM_META_SUCCESS) {
+            continue;
+        }
+        if (item.item == OHOS_CONTROL_SMOOTH_ZOOM_RATIOS) {
+            // (zoom x100, time ms) pairs the HAL is meant to step through;
+            // the bridge goes straight to the last one.
+            if (item.count >= 2) {
+                constexpr float PERCENT = 100.0f;
+                smoothTarget = static_cast<float>(item.data.ui32[item.count - 2]) / PERCENT;
+            }
+            continue;
+        }
+        items.push_back(item);
+        tags.insert(item.item);
+    }
+    if (smoothTarget > 0.0f && tags.count(OHOS_CONTROL_ZOOM_RATIO) == 0) {
+        tags.insert(OHOS_CONTROL_ZOOM_RATIO);
+    } else {
+        smoothTarget = -1.0f;
+    }
+    if (oldMeta != nullptr && oldMeta->get() != nullptr) {
+        count = OHOS::Camera::GetCameraMetadataItemCount(oldMeta->get());
+        for (uint32_t i = 0; i < count; ++i) {
+            camera_metadata_item_t item {};
+            if (OHOS::Camera::GetCameraMetadataItem(oldMeta->get(), i, &item) == CAM_META_SUCCESS &&
+                tags.count(item.item) == 0) {
+                items.push_back(item);
+            }
+        }
+    }
+    size_t dataBytes = sizeof(float);
+    for (const auto &item : items) {
+        constexpr size_t MAX_ELEMENT_BYTES = 8;
+        dataBytes += item.count * MAX_ELEMENT_BYTES + MAX_ELEMENT_BYTES;
+    }
+    auto out = std::make_shared<CameraMetadata>(items.size() + 2, dataBytes + 1);
+    for (const auto &item : items) {
+        out->addEntry(item.item, item.data.u8, item.count);
+    }
+    if (smoothTarget > 0.0f) {
+        out->addEntry(OHOS_CONTROL_ZOOM_RATIO, &smoothTarget, 1);
+    }
+    std::vector<uint8_t> encoded;
+    if (OHOS::Camera::MetadataUtils::ConvertMetadataToVec(out, encoded)) {
+        merged.swap(encoded);
+    }
+}
+
 void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosSettings,
-                            const CameraInfo &info, ACaptureRequest *request)
+                            const CameraInfo &info, const LensInfo &lens, ACaptureRequest *request)
 {
     if (ndk == nullptr || request == nullptr || ohosSettings.empty()) {
         return;
@@ -340,7 +501,9 @@ void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosS
     }
 
     if (OHOS::Camera::FindCameraMetadataItem(header, OHOS_CONTROL_ZOOM_RATIO, &item) == CAM_META_SUCCESS) {
-        float zoom = item.data.f[0];
+        // Logical zoom -> this lens's own zoom: an ultra-wide lens at its 1x
+        // is the logical camera at lens.scale.
+        float zoom = std::clamp(item.data.f[0] / lens.scale, 1.0f, std::max(lens.zoomMax, 1.0f));
         ndk->ACaptureRequest_setEntry_float(request, ACAMERA_CONTROL_ZOOM_RATIO, 1, &zoom);
     }
 
@@ -370,7 +533,11 @@ void ApplySettingsToRequest(const NdkApi *ndk, const std::vector<uint8_t> &ohosS
     // rectangle passes straight through; Android additionally wants a weight.
     if (OHOS::Camera::FindCameraMetadataItem(header, OHOS_CONTROL_AF_REGIONS, &item) == CAM_META_SUCCESS &&
         item.count >= 4) {
-        int32_t region[5] = { item.data.i32[0], item.data.i32[1], item.data.i32[2], item.data.i32[3],
+        // ... in the main sensor's array; another lens has its own.
+        double sx = info.activeArray[2] > 0 ? static_cast<double>(lens.activeArray[2]) / info.activeArray[2] : 1.0;
+        double sy = info.activeArray[3] > 0 ? static_cast<double>(lens.activeArray[3]) / info.activeArray[3] : 1.0;
+        int32_t region[5] = { static_cast<int32_t>(item.data.i32[0] * sx), static_cast<int32_t>(item.data.i32[1] * sy),
+                              static_cast<int32_t>(item.data.i32[2] * sx), static_cast<int32_t>(item.data.i32[3] * sy),
                               1000 };
         ndk->ACaptureRequest_setEntry_i32(request, ACAMERA_CONTROL_AF_REGIONS, 5, region);
         ndk->ACaptureRequest_setEntry_i32(request, ACAMERA_CONTROL_AE_REGIONS, 5, region);
@@ -391,7 +558,8 @@ const std::vector<int32_t> &SupportedResultTags()
 }
 
 std::shared_ptr<OHOS::Camera::CameraMetadata> BuildResultMetadata(
-    const NdkApi *ndk, const ACameraMetadata *androidResult, const std::vector<int32_t> &enabled)
+    const NdkApi *ndk, const ACameraMetadata *androidResult, const std::vector<int32_t> &enabled,
+    float zoomScale)
 {
     if (ndk == nullptr || androidResult == nullptr) {
         return nullptr;
@@ -461,7 +629,7 @@ std::shared_ptr<OHOS::Camera::CameraMetadata> BuildResultMetadata(
 
     if (wants(OHOS_CONTROL_ZOOM_RATIO) &&
         GetEntry(ndk, androidResult, ACAMERA_CONTROL_ZOOM_RATIO, entry)) {
-        float zoom = entry.data.f[0];
+        float zoom = entry.data.f[0] * zoomScale; // back to the logical camera's ratio
         result->addEntry(OHOS_CONTROL_ZOOM_RATIO, &zoom, 1);
     }
 

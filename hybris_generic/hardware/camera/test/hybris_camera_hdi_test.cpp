@@ -109,6 +109,20 @@ public:
             }
         }
         uint32_t seen = ++count_;
+        std::string armed;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            armed.swap(armedPath_);
+        }
+        if (!armed.empty() && buffer->GetVirAddr() != nullptr) {
+            FILE *f = fopen(armed.c_str(), "wb");
+            if (f != nullptr) {
+                fwrite(buffer->GetVirAddr(), 1, static_cast<size_t>(size), f);
+                fclose(f);
+                Log("%s: frame %u %dx%d stride=%d written to %s", isPhoto_ ? "photo" : "preview", seen,
+                    buffer->GetWidth(), buffer->GetHeight(), buffer->GetStride(), armed.c_str());
+            }
+        }
         if (seen == 1) {
             Log("%s: first buffer %dx%d stride=%d size=%d ts=%lld", isPhoto_ ? "photo" : "preview",
                 buffer->GetWidth(), buffer->GetHeight(), buffer->GetStride(), size,
@@ -129,6 +143,13 @@ public:
 
     uint32_t Count() const { return count_.load(); }
 
+    // Writes the next buffer to `path`.
+    void ArmDump(const std::string &path)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        armedPath_ = path;
+    }
+
     bool WaitFor(uint32_t target, int seconds)
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -139,6 +160,7 @@ public:
 private:
     sptr<Surface> surface_;
     std::string dumpPath_;
+    std::string armedPath_;
     bool isPhoto_;
     std::atomic<uint32_t> count_ { 0 };
     std::mutex mutex_;
@@ -205,6 +227,10 @@ int main(int argc, char **argv)
     std::string previewPath;
     int cameraIndex = 0;
     int soakSec = 0;
+    std::string torch;
+    float zoom = 0.0f;
+    bool macro = false;
+    std::string afterPath;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -222,9 +248,19 @@ int main(int argc, char **argv)
             cameraIndex = static_cast<int>(strtol(argv[++i], nullptr, 0));
         } else if (a == "--soak" && i + 1 < argc) {
             soakSec = static_cast<int>(strtol(argv[++i], nullptr, 0));
+        } else if (a == "--torch" && i + 1 < argc) {
+            torch = argv[++i];
+        } else if (a == "--zoom" && i + 1 < argc) {
+            zoom = strtof(argv[++i], nullptr);
+        } else if (a == "--macro") {
+            macro = true;
+        } else if (a == "--dump-after" && i + 1 < argc) {
+            afterPath = argv[++i];
         } else {
             printf("usage: %s [--list] [--camera N] [--preview N] [--photo PATH] "
-                   "[--dump-preview PATH] [--no-photo] [--soak SEC]\n", argv[0]);
+                   "[--dump-preview PATH] [--no-photo] [--soak SEC] [--torch on|off]\n"
+                   "       [--zoom RATIO] [--macro] [--dump-after PATH]  (applied once the preview "
+                   "runs; the photo is taken after)\n", argv[0]);
             return 1;
         }
     }
@@ -235,6 +271,14 @@ int main(int argc, char **argv)
     if (manager == nullptr) {
         Log("CameraManager::GetInstance returned null");
         return 2;
+    }
+    if (!torch.empty()) {
+        Log("IsTorchSupported -> %d", manager->IsTorchSupported() ? 1 : 0);
+        int32_t rc = manager->SetTorchMode(torch == "on" ? TORCH_MODE_ON : TORCH_MODE_OFF);
+        Log("SetTorchMode(%s) -> %d", torch.c_str(), rc);
+        usleep(300000);
+        Log("GetTorchMode -> %d", static_cast<int>(manager->GetTorchMode()));
+        return rc == 0 ? 0 : 12;
     }
     std::vector<sptr<CameraDevice>> cameras = manager->GetSupportedCameras();
     Log("GetSupportedCameras -> %zu", cameras.size());
@@ -354,6 +398,33 @@ int main(int argc, char **argv)
     double span = NowMs() - t;
     Log("preview: %u frames in %.0f ms => %.1f fps (target %u, timeout=%d)", previewSink->Count(),
         span, previewSink->Count() * 1000.0 / span, previewFrames, ok ? 0 : 1);
+
+    std::vector<float> range;
+    session->GetZoomRatioRange(range);
+    Log("zoom range [%.2f, %.2f], macro supported %d", range.empty() ? 0.0f : range[0],
+        range.size() < 2 ? 0.0f : range[1], session->IsMacroSupported() ? 1 : 0);
+    if (zoom > 0.0f || macro) {
+        session->LockForControl();
+        if (zoom > 0.0f) {
+            Log("SetZoomRatio(%.2f) -> %d", zoom, session->SetZoomRatio(zoom));
+        }
+        if (macro) {
+            Log("EnableMacro(true) -> %d", session->EnableMacro(true));
+        }
+        t = NowMs();
+        Log("UnlockForControl -> %d", session->UnlockForControl());
+        uint32_t before = previewSink->Count();
+        bool more = previewSink->WaitFor(before + 30, 20);
+        Log("after the change: %u frames in %.0f ms (timeout=%d)", previewSink->Count() - before,
+            NowMs() - t, more ? 0 : 1);
+        float now = 0.0f;
+        session->GetZoomRatio(now);
+        Log("GetZoomRatio -> %.2f", now);
+        if (!afterPath.empty()) {
+            previewSink->ArmDump(afterPath);
+            previewSink->WaitFor(previewSink->Count() + 2, 5);
+        }
+    }
 
     if (!photoPath.empty()) {
         t = NowMs();

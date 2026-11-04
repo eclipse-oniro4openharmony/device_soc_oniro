@@ -56,7 +56,15 @@ public:
     // Used by the stream operator.
     ACameraDevice *NdkDevice() const { return device_; }
     const CameraInfo *Info() const { return info_; }
-    const std::vector<uint8_t> &LatestSettings();
+    // The lens the Android device behind us currently is (index into
+    // Info()->lenses) and the switch to another: closes the Android camera
+    // and opens the other lens's.  Must be called with no capture session
+    // left on the device.  On failure the previous lens is reopened.
+    int ActiveLens() const { return lens_; }
+    const LensInfo &ActiveLensInfo() const { return info_->lenses[lens_]; }
+    bool SwitchLens(int lens);
+    // Every setting the framework has pushed, merged (it only sends deltas).
+    std::vector<uint8_t> LatestSettings();
     void ReportResult(const ACameraMetadata *androidResult, int64_t timestampNs);
     void ReportError(VdiErrorType type, int32_t code);
 
@@ -70,6 +78,8 @@ private:
 
     std::mutex lock_;
     ACameraDevice *device_ = nullptr;
+    ACameraManager *manager_ = nullptr;
+    int lens_ = 0;
     sptr<HybrisStreamOperator> streamOperator_;
     std::vector<uint8_t> settings_;
     std::vector<int32_t> enabledResults_;

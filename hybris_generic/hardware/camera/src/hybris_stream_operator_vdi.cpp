@@ -17,6 +17,8 @@
 
 #include "hybris_stream_operator_vdi.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <unistd.h>
 
@@ -143,6 +145,34 @@ void FixupExifOrientation(uint8_t *data, int32_t len)
     }
 }
 
+bool HasSize(const std::vector<StreamSize> &sizes, int32_t w, int32_t h)
+{
+    return std::any_of(sizes.begin(), sizes.end(),
+                       [w, h](const StreamSize &s) { return s.width == w && s.height == h; });
+}
+
+// The size a lens should produce for a stream it cannot serve at the stream's
+// own size: same aspect ratio, the smallest at least as large, else the
+// largest; any aspect only if none matches.  `sizes` is sorted largest first.
+StreamSize PickLensSize(const std::vector<StreamSize> &sizes, int32_t w, int32_t h)
+{
+    constexpr double ASPECT_TOLERANCE = 0.02;
+    const double aspect = static_cast<double>(w) / h;
+    const StreamSize *best = nullptr;
+    for (const auto &s : sizes) {
+        if (std::fabs(static_cast<double>(s.width) / s.height - aspect) > ASPECT_TOLERANCE) {
+            continue;
+        }
+        if (best == nullptr || (s.width >= w && s.height >= h)) {
+            best = &s; // largest first: the last fitting one is the smallest
+        }
+    }
+    if (best == nullptr && !sizes.empty()) {
+        best = &sizes[0];
+    }
+    return best != nullptr ? *best : StreamSize { w, h };
+}
+
 } // namespace
 
 HybrisStreamOperator::HybrisStreamOperator(const NdkApi *ndk, HybrisCameraDevice *device,
@@ -238,6 +268,13 @@ void HybrisStreamOperator::DestroyStream(const std::shared_ptr<Stream> &stream)
         stream->reader = nullptr;
         stream->window = nullptr;
     }
+    for (auto &entry : stream->lensReaders) {
+        if (entry.second.reader != nullptr) {
+            ndk_->AImageReader_setImageListener(entry.second.reader, nullptr);
+            ndk_->AImageReader_delete(entry.second.reader);
+        }
+    }
+    stream->lensReaders.clear();
     stream->listenerCtx.reset(); // safe now: the reader can no longer call us
     stream->surface = nullptr;
 }
@@ -281,9 +318,11 @@ int32_t HybrisStreamOperator::ReleaseStreams(const std::vector<int32_t> &streamI
 int32_t HybrisStreamOperator::CommitStreams(VdiOperationMode /*mode*/,
                                             const std::vector<uint8_t> &modeSetting)
 {
+    std::lock_guard<std::mutex> switchGuard(switchLock_);
     // A camera2 session is immutable, so a re-commit means tearing the old one
     // down first — with the lock released (see CloseSession).  The framework
     // does this whenever the stream set changes.
+    int want = 0;
     {
         ACameraCaptureSession *oldSession = nullptr;
         ACaptureRequest *oldRepeating = nullptr;
@@ -294,8 +333,13 @@ int32_t HybrisStreamOperator::CommitStreams(VdiOperationMode /*mode*/,
             std::swap(oldRepeating, repeatingRequest_);
             std::swap(oldOutputs, outputs_);
             committed_ = false;
+            want = device_ != nullptr ? DesiredLensLocked() : 0;
         }
         CloseSession(oldSession, oldRepeating, oldOutputs);
+    }
+    // No session left on the device, so this is the moment to change lens.
+    if (device_ != nullptr && want != device_->ActiveLens()) {
+        (void)device_->SwitchLens(want);
     }
 
     std::lock_guard<std::mutex> guard(lock_);
@@ -305,6 +349,52 @@ int32_t HybrisStreamOperator::CommitStreams(VdiOperationMode /*mode*/,
     if (streams_.empty()) {
         return VDI::Camera::V1_0::INVALID_ARGUMENT;
     }
+    int32_t rc = BuildSessionLocked();
+    if (rc == VDI::Camera::V1_0::NO_ERROR) {
+        HC_LOGI("committed %{public}zu stream(s) on the %{public}s lens, modeSetting=%{public}zu bytes",
+                streams_.size(), device_->ActiveLensInfo().role.c_str(), modeSetting.size());
+    }
+    return rc;
+}
+
+ANativeWindow *HybrisStreamOperator::WindowForLensLocked(Stream &stream, int lens)
+{
+    const CameraInfo *info = device_->Info();
+    if (lens == 0 || lens < 0 || static_cast<size_t>(lens) >= info->lenses.size()) {
+        return stream.window;
+    }
+    const LensInfo &lensInfo = info->lenses[lens];
+    const auto &sizes = stream.isBlob ? lensInfo.jpegSizes : lensInfo.yuvSizes;
+    if (HasSize(sizes, stream.info.width_, stream.info.height_)) {
+        return stream.window;
+    }
+    auto it = stream.lensReaders.find(lens);
+    if (it != stream.lensReaders.end()) {
+        return it->second.window;
+    }
+    StreamSize size = PickLensSize(sizes, stream.info.width_, stream.info.height_);
+    LensReader lr;
+    int32_t readerFormat = stream.isBlob ? AIMAGE_FORMAT_JPEG : AIMAGE_FORMAT_YUV_420_888;
+    int32_t maxImages = stream.isBlob ? BLOB_READER_MAX_IMAGES : READER_MAX_IMAGES;
+    if (ndk_->AImageReader_new(size.width, size.height, readerFormat, maxImages, &lr.reader) != AMEDIA_OK ||
+        lr.reader == nullptr) {
+        HC_LOGE("stream %{public}d: no %{public}dx%{public}d reader for the %{public}s lens",
+                stream.info.streamId_, size.width, size.height, lensInfo.role.c_str());
+        return nullptr;
+    }
+    AImageReader_ImageListener listener { stream.listenerCtx.get(), OnImageAvailable };
+    ndk_->AImageReader_setImageListener(lr.reader, &listener);
+    ndk_->AImageReader_getWindow(lr.reader, &lr.window);
+    stream.lensReaders[lens] = lr;
+    HC_LOGI("stream %{public}d (%{public}dx%{public}d): the %{public}s lens delivers %{public}dx%{public}d",
+            stream.info.streamId_, stream.info.width_, stream.info.height_, lensInfo.role.c_str(),
+            size.width, size.height);
+    return lr.window;
+}
+
+int32_t HybrisStreamOperator::BuildSessionLocked()
+{
+    const int lens = device_->ActiveLens();
     ndk_->ACaptureSessionOutputContainer_create(&outputs_);
     if (outputs_ == nullptr) {
         return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
@@ -315,16 +405,22 @@ int32_t HybrisStreamOperator::CommitStreams(VdiOperationMode /*mode*/,
             ndk_->ACaptureSessionOutput_free(stream->output);
             stream->output = nullptr;
         }
-        camera_status_t st = ndk_->ACaptureSessionOutput_create(stream->window, &stream->output);
+        if (stream->target != nullptr) {
+            ndk_->ACameraOutputTarget_free(stream->target);
+            stream->target = nullptr;
+        }
+        ANativeWindow *window = WindowForLensLocked(*stream, lens);
+        if (window == nullptr) {
+            return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
+        }
+        camera_status_t st = ndk_->ACaptureSessionOutput_create(window, &stream->output);
         if (st != ACAMERA_OK) {
             HC_LOGE("stream %{public}d: ACaptureSessionOutput_create -> %{public}s", entry.first,
                     NdkStatusName(st));
             return VDI::Camera::V1_0::INSUFFICIENT_RESOURCES;
         }
         ndk_->ACaptureSessionOutputContainer_add(outputs_, stream->output);
-        if (stream->target == nullptr) {
-            ndk_->ACameraOutputTarget_create(stream->window, &stream->target);
-        }
+        ndk_->ACameraOutputTarget_create(window, &stream->target);
     }
 
     ACameraCaptureSession_stateCallbacks stateCb {};
@@ -338,12 +434,80 @@ int32_t HybrisStreamOperator::CommitStreams(VdiOperationMode /*mode*/,
     if (st != ACAMERA_OK || session_ == nullptr) {
         HC_LOGE("createCaptureSession -> %{public}s (%{public}zu streams)", NdkStatusName(st),
                 streams_.size());
+        session_ = nullptr;
         return VDI::Camera::V1_0::DEVICE_ERROR;
     }
     committed_ = true;
-    HC_LOGI("committed %{public}zu stream(s), modeSetting=%{public}zu bytes", streams_.size(),
-            modeSetting.size());
     return VDI::Camera::V1_0::NO_ERROR;
+}
+
+int HybrisStreamOperator::DesiredLensLocked()
+{
+    const CameraInfo *info = device_->Info();
+    if (info->lenses.size() <= 1) {
+        return 0;
+    }
+    float zoom = 1.0f;
+    bool macro = false;
+    // The capture's settings are a snapshot from when it started; what the
+    // device was told since is newer.
+    ReadLensControls(streamingSettings_, zoom, macro);
+    ReadLensControls(device_->LatestSettings(), zoom, macro);
+    if (macro && info->macro >= 0) {
+        return info->macro;
+    }
+    constexpr float EPSILON = 0.001f;
+    if (zoom < 1.0f - EPSILON && info->ultraWide >= 0) {
+        return info->ultraWide;
+    }
+    return 0;
+}
+
+bool HybrisStreamOperator::AnyStreamingLocked()
+{
+    return std::any_of(streams_.begin(), streams_.end(), [](const auto &entry) {
+        return entry.second->streaming && entry.second->captureId >= 0;
+    });
+}
+
+void HybrisStreamOperator::SettingsChanged()
+{
+    std::lock_guard<std::mutex> switchGuard(switchLock_);
+    ACameraCaptureSession *oldSession = nullptr;
+    ACaptureRequest *oldRepeating = nullptr;
+    ACaptureSessionOutputContainer *oldOutputs = nullptr;
+    int want = 0;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (!committed_ || session_ == nullptr || device_ == nullptr) {
+            return; // the next commit picks the lens and settings up
+        }
+        want = DesiredLensLocked();
+        if (want == device_->ActiveLens()) {
+            if (AnyStreamingLocked()) {
+                (void)RepeatLocked();
+            }
+            return;
+        }
+        std::swap(oldSession, session_);
+        std::swap(oldRepeating, repeatingRequest_);
+        std::swap(oldOutputs, outputs_);
+        committed_ = false;
+    }
+    HC_LOGI("switching %{public}s to its %{public}s lens", device_->Info()->vdiId.c_str(),
+            device_->Info()->lenses[want].role.c_str());
+    CloseSession(oldSession, oldRepeating, oldOutputs);
+    (void)device_->SwitchLens(want);
+
+    std::lock_guard<std::mutex> guard(lock_);
+    if (device_->NdkDevice() == nullptr || BuildSessionLocked() != VDI::Camera::V1_0::NO_ERROR) {
+        HC_LOGE("no session after the lens switch");
+        device_->ReportError(VdiErrorType::DRIVER_ERROR, 0);
+        return;
+    }
+    if (AnyStreamingLocked()) {
+        (void)RepeatLocked();
+    }
 }
 
 int32_t HybrisStreamOperator::GetStreamAttributes(std::vector<VdiStreamAttribute> &attributes)
@@ -396,7 +560,11 @@ int32_t HybrisStreamOperator::DetachBufferQueue(int32_t streamId)
 int32_t HybrisStreamOperator::Capture(int32_t captureId, const VdiCaptureInfo &info, bool isStreaming)
 {
     std::vector<int32_t> targets;
-    int32_t rc = SubmitCapture(captureId, info, isStreaming, targets);
+    int32_t rc;
+    {
+        std::lock_guard<std::mutex> switchGuard(switchLock_);
+        rc = SubmitCapture(captureId, info, isStreaming, targets);
+    }
     if (rc != VDI::Camera::V1_0::NO_ERROR) {
         return rc;
     }
@@ -471,10 +639,8 @@ int32_t HybrisStreamOperator::SubmitCapture(int32_t captureId, const VdiCaptureI
 
     // Device-wide settings first (UpdateSettings), then whatever this capture
     // carries — the per-capture settings win, matching the OHOS contract.
-    if (device_ != nullptr) {
-        ApplySettingsToRequest(ndk_, device_->LatestSettings(), *device_->Info(), request);
-    }
-    ApplySettingsToRequest(ndk_, info.captureSetting_, *device_->Info(), request);
+    ApplySettingsToRequest(ndk_, device_->LatestSettings(), *device_->Info(), device_->ActiveLensInfo(), request);
+    ApplySettingsToRequest(ndk_, info.captureSetting_, *device_->Info(), device_->ActiveLensInfo(), request);
 
     ACameraCaptureSession_captureCallbacks capCb {};
     capCb.context = this;
@@ -520,8 +686,9 @@ int32_t HybrisStreamOperator::RepeatLocked()
     for (int32_t id : ids) {
         ndk_->ACaptureRequest_addTarget(request, streams_[id]->target);
     }
-    ApplySettingsToRequest(ndk_, device_->LatestSettings(), *device_->Info(), request);
-    ApplySettingsToRequest(ndk_, streamingSettings_, *device_->Info(), request);
+    // The capture's snapshot first, then what the device was told since.
+    ApplySettingsToRequest(ndk_, streamingSettings_, *device_->Info(), device_->ActiveLensInfo(), request);
+    ApplySettingsToRequest(ndk_, device_->LatestSettings(), *device_->Info(), device_->ActiveLensInfo(), request);
 
     ACameraCaptureSession_captureCallbacks capCb {};
     capCb.context = this;
@@ -729,6 +896,9 @@ bool HybrisStreamOperator::DeliverYuv(Stream &stream, AImage *image, int64_t tim
     int32_t height = 0;
     ndk_->AImage_getWidth(image, &width);
     ndk_->AImage_getHeight(image, &height);
+    if (width != stream.info.width_ || height != stream.info.height_) {
+        return DeliverYuvScaled(stream, image, timestamp, width, height);
+    }
 
     uint8_t *y = nullptr;
     uint8_t *u = nullptr;
@@ -848,6 +1018,107 @@ bool HybrisStreamOperator::DeliverYuv(Stream &stream, AImage *image, int64_t tim
     return true;
 }
 
+/*
+ * A frame from a lens that cannot produce the stream's size (its LensReader):
+ * nearest-neighbour scaled into the stream's buffer, in the chroma order the
+ * consumer asked for.  The sizes differ by little in practice (a 1408x1056
+ * macro frame into a 1440x1080 preview), so sampling is good enough.
+ */
+bool HybrisStreamOperator::DeliverYuvScaled(Stream &stream, AImage *image, int64_t timestamp,
+                                            int32_t width, int32_t height)
+{
+    uint8_t *y = nullptr;
+    uint8_t *u = nullptr;
+    uint8_t *v = nullptr;
+    int yLen = 0;
+    int uLen = 0;
+    int vLen = 0;
+    int32_t yStride = 0;
+    int32_t uStride = 0;
+    int32_t uPixStride = 0;
+    ndk_->AImage_getPlaneData(image, 0, &y, &yLen);
+    ndk_->AImage_getPlaneData(image, 1, &u, &uLen);
+    ndk_->AImage_getPlaneData(image, 2, &v, &vLen);
+    ndk_->AImage_getPlaneRowStride(image, 0, &yStride);
+    ndk_->AImage_getPlaneRowStride(image, 1, &uStride);
+    ndk_->AImage_getPlanePixelStride(image, 1, &uPixStride);
+    if (y == nullptr || u == nullptr || v == nullptr || width < 2 || height < 2) {
+        return false;
+    }
+    const int32_t dstW = stream.info.width_;
+    const int32_t dstH = stream.info.height_;
+
+    OHOS::sptr<OHOS::SurfaceBuffer> sb = nullptr;
+    int32_t fence = -1;
+    OHOS::BufferRequestConfig config {};
+    config.width = dstW;
+    config.height = dstH;
+    config.format = stream.info.format_;
+    config.strideAlignment = STRIDE_ALIGNMENT;
+    config.usage = BUFFER_USAGE_CPU_READ | BUFFER_USAGE_CPU_WRITE | BUFFER_USAGE_MEM_DMA;
+    config.timeout = REQUEST_TIMEOUT_MS;
+    OHOS::SurfaceError err = stream.surface->RequestBuffer(sb, fence, config);
+    if (fence >= 0) {
+        close(fence);
+    }
+    if (err != OHOS::SURFACE_ERROR_OK || sb == nullptr) {
+        return false;
+    }
+    auto *dst = static_cast<uint8_t *>(sb->GetVirAddr());
+    const int32_t dstStride = sb->GetStride();
+    const size_t lumaBytes = static_cast<size_t>(dstStride) * dstH;
+    const size_t neededBytes = lumaBytes + lumaBytes / 2;
+    if (dst == nullptr || dstStride < dstW || sb->GetSize() < neededBytes) {
+        stream.surface->CancelBuffer(sb);
+        return false;
+    }
+    std::vector<int32_t> xmap(dstW);
+    for (int32_t x = 0; x < dstW; ++x) {
+        xmap[x] = static_cast<int32_t>(static_cast<int64_t>(x) * width / dstW);
+    }
+    for (int32_t row = 0; row < dstH; ++row) {
+        const uint8_t *src = y + static_cast<size_t>(static_cast<int64_t>(row) * height / dstH) * yStride;
+        uint8_t *out = dst + static_cast<size_t>(row) * dstStride;
+        for (int32_t x = 0; x < dstW; ++x) {
+            out[x] = src[xmap[x]];
+        }
+    }
+    const bool nv12 = stream.info.format_ == GRAPHIC_PIXEL_FMT_YCBCR_420_SP;
+    const uint8_t *first = nv12 ? u : v;
+    const uint8_t *second = nv12 ? v : u;
+    uint8_t *dstChroma = dst + lumaBytes;
+    const int32_t chromaW = dstW / 2;
+    const int32_t chromaH = dstH / 2;
+    const int32_t srcChromaW = width / 2;
+    const int32_t srcChromaH = height / 2;
+    for (int32_t row = 0; row < chromaH; ++row) {
+        const size_t srcRow = static_cast<size_t>(static_cast<int64_t>(row) * srcChromaH / chromaH) * uStride;
+        uint8_t *out = dstChroma + static_cast<size_t>(row) * dstStride;
+        for (int32_t col = 0; col < chromaW; ++col) {
+            const size_t sc = static_cast<size_t>(static_cast<int64_t>(col) * srcChromaW / chromaW) * uPixStride;
+            out[col * 2] = first[srcRow + sc];
+            out[col * 2 + 1] = second[srcRow + sc];
+        }
+    }
+
+    const OHOS::sptr<OHOS::BufferExtraData> &extra = sb->GetExtraData();
+    if (extra != nullptr) {
+        extra->ExtraSet(OHOS::Camera::dataSize, static_cast<int32_t>(neededBytes));
+        extra->ExtraSet(OHOS::Camera::timeStamp, timestamp);
+        extra->ExtraSet(OHOS::Camera::streamId, stream.info.streamId_);
+        extra->ExtraSet(OHOS::Camera::captureId, stream.captureId);
+        extra->ExtraSet(OHOS::Camera::dataWidth, dstW);
+        extra->ExtraSet(OHOS::Camera::dataHeight, dstH);
+        extra->ExtraSet(OHOS::Camera::isKeyFrame, 1);
+    }
+    OHOS::BufferFlushConfig flush {};
+    flush.damage.w = dstW;
+    flush.damage.h = dstH;
+    flush.timestamp = timestamp;
+    stream.surface->FlushBuffer(sb, -1, flush);
+    return true;
+}
+
 bool HybrisStreamOperator::DeliverBlob(Stream &stream, AImage *image, int64_t timestamp)
 {
     uint8_t *data = nullptr;
@@ -894,8 +1165,13 @@ bool HybrisStreamOperator::DeliverBlob(Stream &stream, AImage *image, int64_t ti
         extra->ExtraSet(OHOS::Camera::timeStamp, timestamp);
         extra->ExtraSet(OHOS::Camera::streamId, stream.info.streamId_);
         extra->ExtraSet(OHOS::Camera::captureId, stream.captureId);
-        extra->ExtraSet(OHOS::Camera::dataWidth, stream.info.width_);
-        extra->ExtraSet(OHOS::Camera::dataHeight, stream.info.height_);
+        // A still from another lens may be smaller than the stream's size.
+        int32_t imageW = stream.info.width_;
+        int32_t imageH = stream.info.height_;
+        ndk_->AImage_getWidth(image, &imageW);
+        ndk_->AImage_getHeight(image, &imageH);
+        extra->ExtraSet(OHOS::Camera::dataWidth, imageW);
+        extra->ExtraSet(OHOS::Camera::dataHeight, imageH);
         extra->ExtraSet(OHOS::Camera::isKeyFrame, 1);
         extra->ExtraSet(OHOS::Camera::deferredImageFormat, 1);
     }

@@ -75,6 +75,10 @@ public:
     // Tears the capture session down; called when the device closes.
     void Shutdown();
 
+    // The device's settings changed: re-issue the repeat so they take effect,
+    // switching lens first when the zoom ratio or macro asks for another one.
+    void SettingsChanged();
+
 private:
     // Per-reader listener context; must outlive the reader, so the stream owns
     // it and it is destroyed only after the reader has been deleted.
@@ -83,11 +87,18 @@ private:
         int32_t streamId;
     };
 
+    // A reader at a size another lens can produce, for a stream whose own
+    // size it cannot; frames are scaled into the stream's buffers.
+    struct LensReader {
+        AImageReader *reader = nullptr;
+        ANativeWindow *window = nullptr;
+    };
     struct Stream {
         VdiStreamInfo info {};
         sptr<OHOS::Surface> surface;
         AImageReader *reader = nullptr;
         ANativeWindow *window = nullptr;
+        std::map<int, LensReader> lensReaders; // by lens index
         ACaptureSessionOutput *output = nullptr;
         ACameraOutputTarget *target = nullptr;
         std::unique_ptr<ListenerCtx> listenerCtx;
@@ -122,8 +133,17 @@ private:
     // (Re)issues the one repeating request the Android session can have,
     // targeting every stream with a live streaming capture.  lock_ held.
     int32_t RepeatLocked();
+    // Creates the Android session for the device's current lens.  lock_ held.
+    int32_t BuildSessionLocked();
+    // The window a stream's output uses on `lens` (creating a LensReader when
+    // the lens cannot produce the stream's size).  lock_ held.
+    ANativeWindow *WindowForLensLocked(Stream &stream, int lens);
+    // The lens the current settings ask for.  lock_ held.
+    int DesiredLensLocked();
+    bool AnyStreamingLocked();
     void HandleImage(int32_t streamId, AImageReader *reader);
     bool DeliverYuv(Stream &stream, AImage *image, int64_t timestamp);
+    bool DeliverYuvScaled(Stream &stream, AImage *image, int64_t timestamp, int32_t width, int32_t height);
     bool DeliverBlob(Stream &stream, AImage *image, int64_t timestamp);
     std::shared_ptr<Stream> FindStream(int32_t streamId);
 
@@ -145,6 +165,10 @@ private:
     sptr<IStreamOperatorVdiCallback> callback_;
 
     std::mutex lock_;
+    // Serialises session rebuilds (commit, lens switch) and captures against
+    // each other; never taken by Android callbacks, so it may be held across
+    // CloseSession and the device reopen.
+    std::mutex switchLock_;
     std::map<int32_t, std::shared_ptr<Stream>> streams_;
     ACaptureSessionOutputContainer *outputs_ = nullptr;
     ACameraCaptureSession *session_ = nullptr;
