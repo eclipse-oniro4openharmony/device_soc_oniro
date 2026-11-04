@@ -171,6 +171,10 @@ public:
     int32_t GetAllSensorInfo(std::vector<HdfSensorInformationVdi> &info) override
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!listSettled_) {
+            SettleSensorListLocked();
+            listSettled_ = true;
+        }
         (void)EnsureOpenLocked();
         info = infoList_;
         return HDF_SUCCESS;
@@ -304,6 +308,70 @@ public:
     }
 
 private:
+    /*
+     * The first sensor list has to be the whole list.  The sensor SA asks for
+     * it once from OnStart, and every client that connects in the next
+     * moments caches what it got for the rest of the boot
+     * (SensorServiceClient only refetches an empty list).  On the Plinius
+     * the SA starts ~3 s before the MTK sensor hub has registered its
+     * sensors with hf_manager, so an early answer was empty (clients saw
+     * only the SA's 4 eng-build mock sensors) or partial — and powermgr,
+     * which connects first, never saw the light sensor: auto brightness
+     * reported "not supported" until it was restarted.
+     *
+     * So wait, once, until hf_manager answers for a non-zero number of
+     * sensor types that has held for STABLE_MS, bounded by SETTLE_MAX_MS.
+     */
+    void SettleSensorListLocked()
+    {
+        constexpr int POLL_MS = 200;
+        constexpr int STABLE_MS = 2000;
+        constexpr int SETTLE_MAX_MS = 10000;
+        size_t last = 0;
+        int stableFor = 0;
+        int waited = 0;
+        for (; waited < SETTLE_MAX_MS; waited += POLL_MS) {
+            size_t n = CountReadyLocked();
+            if (n > 0 && n == last) {
+                stableFor += POLL_MS;
+                if (stableFor >= STABLE_MS) {
+                    break;
+                }
+            } else {
+                stableFor = 0;
+                last = n;
+            }
+            usleep(POLL_MS * 1000);
+        }
+        HDF_LOGI("%{public}s: %{public}zu sensor types ready after %{public}d ms", __func__, last, waited);
+        if (fd_ >= 0 && infoList_.size() < last) {
+            /* Opened earlier (Init) while the hub was still coming up. */
+            infoList_.clear();
+            EnumerateLocked();
+            HDF_LOGI("%{public}s: re-enumerated, %{public}zu sensors", __func__, infoList_.size());
+        }
+    }
+
+    size_t CountReadyLocked()
+    {
+        int fd = (fd_ >= 0) ? fd_ : open(HF_DEV, O_RDWR);
+        if (fd < 0) {
+            return 0;
+        }
+        size_t n = 0;
+        for (const auto &e : SENSOR_MAP) {
+            HfIoctlPacket pkt = {};
+            pkt.sensorType = e.mtkType;
+            if (ioctl(fd, HF_MANAGER_REQUEST_SENSOR_INFO, &pkt) == 0) {
+                n++;
+            }
+        }
+        if (fd != fd_) {
+            close(fd);
+        }
+        return n;
+    }
+
     int32_t EnsureOpenLocked()
     {
         if (fd_ >= 0) {
@@ -465,6 +533,7 @@ private:
     std::mutex mutex_;
     std::mutex cbMutex_;
     int fd_ = -1;
+    bool listSettled_ = false;
     std::atomic<bool> running_{false};
     std::thread reader_;
     std::vector<HdfSensorInformationVdi> infoList_;
