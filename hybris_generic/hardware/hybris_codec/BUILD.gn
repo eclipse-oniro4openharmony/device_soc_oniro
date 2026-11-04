@@ -33,6 +33,12 @@ import("//build/ohos.gni")
 # through the NDK's AMediaCodec (libmediandk.so in the Halium image), loaded
 # with libhybris at runtime; nothing Android is linked.
 ohos_shared_library("avcenc_ohos") {
+  # Never unmapped: av_codec dlclose()s the library when a codec is
+  # released, but the Android libraries it loaded through libhybris stay,
+  # holding its path hooks and running its binder threads -- the next call
+  # into it after an unmap crashed av_codec_service.
+  ldflags = [ "-Wl,-z,nodelete" ]
+
   sources = [
     "src/avcenc_mediandk.cpp",
     "src/hybris_mediandk.cpp",
@@ -60,6 +66,12 @@ ohos_shared_library("avcenc_ohos") {
 # video/hevc decoding when it is present: without it HEVC videos do not play.
 # This one drives MediaTek's c2.mtk.hevc.decoder.
 ohos_shared_library("hevcdec_ohos") {
+  # Never unmapped: av_codec dlclose()s the library when a codec is
+  # released, but the Android libraries it loaded through libhybris stay,
+  # holding its path hooks and running its binder threads -- the next call
+  # into it after an unmap crashed av_codec_service.
+  ldflags = [ "-Wl,-z,nodelete" ]
+
   sources = [
     "src/hevcdec_mediandk.cpp",
     "src/hybris_mediandk.cpp",
