@@ -55,7 +55,15 @@
 #include <unistd.h>
 #include <hdf_log.h>
 #include "parameter.h"
+#include <cerrno>
+#include <cstdio>
+#include <string>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <linux/sockios.h>
 #include "wifi_hal.h"
+#include "common.h" /* GetIfaceInfo; needs IFNAMSIZ from <net/if.h> first */
 
 #undef InitWifiVendorHalFuncTable
 
@@ -102,6 +110,86 @@ WifiError HybrisGetScanResults(wifiInterfaceHandle handle,
     }
     return ret;
 }
+
+/*
+ * Country code.  Upstream sends it as the Google-OUI vendor subcommand
+ * WIFI_SUBCMD_SET_COUNTRY_CODE, which gen4m rejects (-1).  WifiApStartedState
+ * treats that failure as fatal, so the hotspot came up and was torn down
+ * before hostapd ever ran ("set countryCode=CN failed").
+ *
+ * gen4m takes the Android driver command "COUNTRY <cc>" on SIOCDEVPRIVATE+1
+ * (priv_support_driver_cmd), the path MTK's own wifi HAL uses.  Its argument
+ * is struct priv_driver_cmd_s with the buffer INLINE — which is also why the
+ * upstream pointer-layout WifiPrivCmd got its pointer overwritten by the
+ * "UNSUPPORTED" reply (see wifi_ioctl.cpp).
+ */
+constexpr size_t MTK_PRIV_CMD_SIZE = 512;
+struct MtkPrivDriverCmd {
+    char buf[MTK_PRIV_CMD_SIZE];
+    int usedLen;
+    int totalLen;
+};
+
+using SetCountryCodeFn = WifiError (*)(wifiInterfaceHandle, const char *);
+SetCountryCodeFn g_upstreamSetCountryCode = nullptr;
+
+WifiError MtkDriverCmd(const char *ifName, const std::string &cmd)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (sock < 0) {
+        return HAL_UNKNOWN;
+    }
+    MtkPrivDriverCmd priv = {};
+    (void)snprintf(priv.buf, sizeof(priv.buf), "%s", cmd.c_str());
+    priv.usedLen = static_cast<int>(strlen(priv.buf)) + 1;
+    priv.totalLen = static_cast<int>(sizeof(priv.buf));
+    struct ifreq ifr = {};
+    (void)snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifName);
+    ifr.ifr_data = reinterpret_cast<char *>(&priv);
+    int ret = ioctl(sock, SIOCDEVPRIVATE + 1, &ifr);
+    int err = errno;
+    close(sock);
+    if (ret < 0) {
+        HDF_LOGE("%{public}s on %{public}s failed: %{public}d", cmd.c_str(), ifName, err);
+        return HAL_UNKNOWN;
+    }
+    priv.buf[sizeof(priv.buf) - 1] = '\0';
+    if (strncmp(priv.buf, "UNSUPPORTED", strlen("UNSUPPORTED")) == 0) {
+        HDF_LOGE("%{public}s on %{public}s: driver says UNSUPPORTED", cmd.c_str(), ifName);
+        return HAL_NOT_SUPPORTED;
+    }
+    return HAL_SUCCESS;
+}
+
+WifiError HybrisSetCountryCode(wifiInterfaceHandle handle, const char *countryCode)
+{
+    if (countryCode == nullptr) {
+        return HAL_INVALID_ARGS;
+    }
+    if (g_upstreamSetCountryCode != nullptr && g_upstreamSetCountryCode(handle, countryCode) == HAL_SUCCESS) {
+        return HAL_SUCCESS;
+    }
+    InterfaceInfo *info = GetIfaceInfo(handle);
+    const char *ifName = (info != nullptr && info->name[0] != '\0') ? info->name : "wlan0";
+    WifiError ret = MtkDriverCmd(ifName, std::string("COUNTRY ") + countryCode);
+    HDF_LOGI("set country code %{public}s on %{public}s via driver command: %{public}d", countryCode,
+        ifName, ret);
+    return ret;
+}
+
+/*
+ * STA/AP coexistence.  gen4m cannot turn wlan0 into an AP
+ * (NL80211_CMD_SET_INTERFACE to AP fails with -EFAULT); like Android's
+ * ro.vendor.wifi.sap.interface=ap0 it wants a separate AP interface.  With
+ * coex reported, the chip HDI names the AP "wlan1" and creates it with
+ * NL80211_CMD_NEW_INTERFACE (type AP), and uses the STA+AP+P2P mode table,
+ * so the STA link also stays up while the hotspot runs.
+ */
+WifiError HybrisIsSupportCoex(bool &isCoex)
+{
+    isCoex = true;
+    return HAL_SUCCESS;
+}
 } // namespace
 
 extern "C" WifiError UpstreamInitWifiVendorHalFuncTable(WifiHalFn *fn);
@@ -115,6 +203,9 @@ extern "C" WifiError InitWifiVendorHalFuncTable(WifiHalFn *fn)
             g_upstreamGetScanResults = fn->getScanResults;
             fn->getScanResults = HybrisGetScanResults;
         }
+        g_upstreamSetCountryCode = fn->wifiSetCountryCode;
+        fn->wifiSetCountryCode = HybrisSetCountryCode;
+        fn->isSupportCoex = HybrisIsSupportCoex;
     }
     return ret;
 }
