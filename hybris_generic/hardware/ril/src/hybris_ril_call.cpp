@@ -49,6 +49,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,9 +57,13 @@
 #include <aidl/android/hardware/radio/voice/BnRadioVoiceIndication.h>
 #include <aidl/android/hardware/radio/voice/BnRadioVoiceResponse.h>
 #include <aidl/android/hardware/radio/voice/Call.h>
+#include <aidl/android/hardware/radio/voice/CallForwardInfo.h>
+#include <aidl/android/hardware/radio/voice/ClipStatus.h>
 #include <aidl/android/hardware/radio/voice/Dial.h>
 #include <aidl/android/hardware/radio/voice/EmergencyNumber.h>
 #include <aidl/android/hardware/radio/voice/LastCallFailCauseInfo.h>
+#include <aidl/android/hardware/radio/voice/StkCcUnsolSsResult.h>
+#include <aidl/android/hardware/radio/voice/UssdModeType.h>
 
 #include "hril_notification.h"
 #include "hril_request.h"
@@ -70,6 +75,41 @@ namespace HybrisRil {
 namespace {
 
 namespace rvoice = aidl::android::hardware::radio::voice;
+
+/* ---- supplementary-service helpers ----------------------------------- */
+
+/*
+ * 27.007 +CLIP=<n> and +CUSD=<n> only switch the TE's own presentation of
+ * the unsolicited result codes; nothing reaches the network.  AIDL has no
+ * counterpart because Android keeps that switch in the framework, so it is
+ * kept here, per slot, and echoed back by the matching query.
+ */
+int32_t g_clipPresentation[MAX_SLOTS] = {};
+int32_t SlotOf(const ReqDataInfo *req)
+{
+    if (req == nullptr || req->slotId < 0 || req->slotId >= MAX_SLOTS) {
+        return 0;
+    }
+    return req->slotId;
+}
+
+/* 27.007 <type>: 145 for an international number, 129 otherwise. */
+constexpr int32_t TOA_INTERNATIONAL = 145;
+constexpr int32_t TOA_UNKNOWN = 129;
+
+/*
+ * CallForwardInfo::serviceClass / getCallWaiting / getFacilityLockForApp take
+ * the 27.007 <class> bit vector; 0 asks the modem for its default (all
+ * classes), which is what AT+CCFC / AT+CLCK do without a <class>.  Call
+ * waiting is queried for voice only, like the reference AT+CCWA=1,2,1.
+ */
+constexpr int32_t SERVICE_CLASS_DEFAULT = 0;
+constexpr int32_t SERVICE_CLASS_VOICE = 1;
+
+struct CfRecord {
+    std::string number;
+    HRilCFQueryInfo info;
+};
 
 /* ---- the call list --------------------------------------------------- */
 
@@ -293,6 +333,141 @@ public:
         return ReportEmpty(info);
     }
 
+    /* ---- supplementary services ---- */
+
+    /*
+     * ClipStatus numbers provisioning the other way round from 27.007 +CLIP
+     * <m> (AIDL: 0 provisioned, 1 not; 27.007: 0 not, 1 provisioned), so it
+     * is mapped, not passed through.  <n> is the TE-side switch kept above.
+     */
+    ::ndk::ScopedAStatus getClipResponse(const radio::RadioResponseInfo &info,
+                                          rvoice::ClipStatus status) override
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        HRilGetClipResult result = {};
+        result.action = g_clipPresentation[SlotOf(req)];
+        switch (status) {
+            case rvoice::ClipStatus::CLIP_PROVISIONED:
+                result.clipStat = 1;
+                break;
+            case rvoice::ClipStatus::CLIP_UNPROVISIONED:
+                result.clipStat = 0;
+                break;
+            default:
+                result.clipStat = 2;
+                break;
+        }
+        HR_LOGI("clip: err=%{public}d n=%{public}d m=%{public}d", static_cast<int32_t>(info.error),
+                result.action, result.clipStat);
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), &result,
+                                    sizeof(result));
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    /* +CLIR: <n>,<m> on both sides. */
+    ::ndk::ScopedAStatus getClirResponse(const radio::RadioResponseInfo &info, int32_t n,
+                                          int32_t m) override
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        HRilGetCallClirResult result = {};
+        result.action = n;
+        result.clirStat = m;
+        HR_LOGI("clir: err=%{public}d n=%{public}d m=%{public}d", static_cast<int32_t>(info.error), n, m);
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), &result,
+                                    sizeof(result));
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus setClirResponse(const radio::RadioResponseInfo &info) override
+    {
+        return ReportEmpty(info);
+    }
+
+    /* +CCWA: <status>,<class>. */
+    ::ndk::ScopedAStatus getCallWaitingResponse(const radio::RadioResponseInfo &info, bool enable,
+                                                 int32_t serviceClass) override
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        HRilCallWaitResult result = {};
+        result.status = enable ? 1 : 0;
+        result.classCw = serviceClass;
+        HR_LOGI("call waiting: err=%{public}d enable=%{public}d class=%{public}d",
+                static_cast<int32_t>(info.error), result.status, serviceClass);
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), &result,
+                                    sizeof(result));
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus setCallWaitingResponse(const radio::RadioResponseInfo &info) override
+    {
+        HR_LOGI("set call waiting: err=%{public}d", static_cast<int32_t>(info.error));
+        return ReportEmpty(info);
+    }
+
+    /*
+     * One +CCFC line per service class on both sides; the CallForwardInfo
+     * fields are the +CCFC ones (status 0 inactive / 1 active).  Same
+     * build-then-point rule as the call list for the number strings.
+     */
+    ::ndk::ScopedAStatus getCallForwardStatusResponse(
+        const radio::RadioResponseInfo &info,
+        const std::vector<rvoice::CallForwardInfo> &callForwardInfos) override
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        std::vector<CfRecord> records(callForwardInfos.size());
+        for (size_t i = 0; i < callForwardInfos.size(); i++) {
+            const auto &cf = callForwardInfos[i];
+            records[i].number = cf.number;
+            records[i].info.reason = cf.reason;
+            records[i].info.status = cf.status;
+            records[i].info.classx = cf.serviceClass;
+            records[i].info.type = cf.toa;
+            records[i].info.time = cf.timeSeconds;
+        }
+        std::vector<HRilCFQueryInfo> list;
+        list.reserve(records.size());
+        for (auto &record : records) {
+            record.info.number = const_cast<char *>(record.number.c_str());
+            list.push_back(record.info);
+        }
+        HR_LOGI("call forward query: err=%{public}d %{public}zu record(s)",
+                static_cast<int32_t>(info.error), list.size());
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)),
+                                    list.empty() ? nullptr : list.data(),
+                                    list.size() * sizeof(HRilCFQueryInfo));
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus setCallForwardResponse(const radio::RadioResponseInfo &info) override
+    {
+        HR_LOGI("set call forward: err=%{public}d", static_cast<int32_t>(info.error));
+        return ReportEmpty(info);
+    }
+
+    /* The USSD answer itself arrives later through onUssd. */
+    ::ndk::ScopedAStatus sendUssdResponse(const radio::RadioResponseInfo &info) override
+    {
+        HR_LOGI("send ussd: err=%{public}d", static_cast<int32_t>(info.error));
+        return ReportEmpty(info);
+    }
+
+    ::ndk::ScopedAStatus cancelPendingUssdResponse(const radio::RadioResponseInfo &info) override
+    {
+        return ReportEmpty(info);
+    }
+
 private:
     ::ndk::ScopedAStatus ReportEmpty(const radio::RadioResponseInfo &info)
     {
@@ -423,6 +598,46 @@ public:
     ::ndk::ScopedAStatus resendIncallMute(radio::RadioIndicationType type) override
     {
         HR_LOGI("modem asked for the mute setting again (slot %{public}d)", slotId_);
+        AckIndication(type);
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    /*
+     * A USSD answer or network-initiated USSD.  UssdModeType is the 27.007
+     * +CUSD <m> numbering (0 no action needed, 1 action needed, 2 released by
+     * the network, 3 other client, 4 not supported, 5 timeout), which is what
+     * HRilUssdNoticeInfo::m carries.
+     */
+    ::ndk::ScopedAStatus onUssd(radio::RadioIndicationType type, rvoice::UssdModeType modeType,
+                                const std::string &msg) override
+    {
+        HR_LOGI("ussd (slot %{public}d): mode=%{public}d len=%{public}zu", slotId_,
+                static_cast<int32_t>(modeType), msg.size());
+        HRilUssdNoticeInfo notice = {};
+        notice.m = static_cast<int32_t>(modeType);
+        notice.str = const_cast<char *>(msg.c_str());
+        RilBridge::Get().NotifyCall(slotId_, HNOTI_CALL_USSD_REPORT, &notice, sizeof(notice));
+        AckIndication(type);
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    /*
+     * The result of an SS operation the SIM toolkit turned a dialled string
+     * into (call control).  Both sides use the RIL_SsServiceType /
+     * RIL_SsRequestType numbering, so the four fields pass through.
+     */
+    ::ndk::ScopedAStatus onSupplementaryServiceIndication(
+        radio::RadioIndicationType type, const rvoice::StkCcUnsolSsResult &ss) override
+    {
+        HR_LOGI("ss indication (slot %{public}d): service=%{public}d request=%{public}d "
+                "result=%{public}d", slotId_, ss.serviceType, ss.requestType,
+                static_cast<int32_t>(ss.result));
+        HRilSsNoticeInfo notice = {};
+        notice.serviceType = ss.serviceType;
+        notice.requestType = ss.requestType;
+        notice.serviceClass = ss.serviceClass;
+        notice.result = static_cast<int32_t>(ss.result);
+        RilBridge::Get().NotifyCall(slotId_, HNOTI_CALL_SS_REPORT, &notice, sizeof(notice));
         AckIndication(type);
         return ::ndk::ScopedAStatus::ok();
     }
@@ -673,23 +888,195 @@ void GetCallFailReason(const ReqDataInfo *requestInfo)
     voice->getLastCallFailCause(RilBridge::Get().Track(requestInfo));
 }
 
+/* ---- supplementary services (plan phase R7) --------------------------- */
+
+/*
+ * Settings about calling rather than anything a call needs: OHOS drives them
+ * from com.ohos.callsetting and from MMI codes typed into the dialler, through
+ * cellular_call's supplement requests.  Most are one IRadioVoice call each.
+ * Two are not on IRadioVoice: call barring is a facility lock on IRadioSim
+ * (getFacilityLockForApp / setFacilityLockForApp, 27.007 +CLCK) and the
+ * barring password and SS notifications live on IRadioNetwork.  Their answers
+ * arrive in those domains' response classes, which hand them back here with
+ * ReportCall (hybris_ril_sim.cpp / hybris_ril_network.cpp).
+ */
+
+void ReportCallFailure(const ReqDataInfo *requestInfo, int32_t err)
+{
+    RilBridge::Get().ReportCall(requestInfo, err, nullptr, 0);
+}
+
+void GetClip(const ReqDataInfo *requestInfo)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    voice->getClip(RilBridge::Get().Track(requestInfo));
+}
+
+/* +CLIP=<n> is TE-local (see g_clipPresentation): nothing to send. */
+void SetClip(const ReqDataInfo *requestInfo, int32_t action)
+{
+    g_clipPresentation[SlotOf(requestInfo)] = action;
+    HR_LOGI("clip presentation: %{public}d", action);
+    RilBridge::Get().ReportCall(requestInfo, HRIL_ERR_SUCCESS, nullptr, 0);
+}
+
+void GetClir(const ReqDataInfo *requestInfo)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    voice->getClir(RilBridge::Get().Track(requestInfo));
+}
+
+/* +CLIR=<n>: 0 subscription default, 1 invocation, 2 suppression. */
+void SetClir(const ReqDataInfo *requestInfo, int32_t action)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    HR_LOGI("set clir: %{public}d", action);
+    voice->setClir(RilBridge::Get().Track(requestInfo), action);
+}
+
+void GetCallWaiting(const ReqDataInfo *requestInfo)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    voice->getCallWaiting(RilBridge::Get().Track(requestInfo), SERVICE_CLASS_VOICE);
+}
+
+void SetCallWaiting(const ReqDataInfo *requestInfo, int32_t active)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    HR_LOGI("set call waiting: %{public}d", active);
+    voice->setCallWaiting(RilBridge::Get().Track(requestInfo), active != 0, SERVICE_CLASS_VOICE);
+}
+
+void GetCallTransferInfo(const ReqDataInfo *requestInfo, int32_t reason)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    rvoice::CallForwardInfo query;
+    query.status = rvoice::CallForwardInfo::STATUS_INTERROGATE;
+    query.reason = reason;
+    query.serviceClass = SERVICE_CLASS_DEFAULT;
+    query.toa = TOA_UNKNOWN;
+    voice->getCallForwardStatus(RilBridge::Get().Track(requestInfo), query);
+}
+
+/*
+ * HRilCFInfo::mode is the +CCFC <mode> (0 disable, 1 enable, 2 query,
+ * 3 registration, 4 erasure) — the same numbering as CallForwardInfo's
+ * STATUS_* constants.
+ */
+void SetCallTransferInfo(const ReqDataInfo *requestInfo, HRilCFInfo info)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    rvoice::CallForwardInfo cf;
+    cf.status = info.mode;
+    cf.reason = info.reason;
+    cf.serviceClass = info.classx;
+    cf.number = (info.number == nullptr) ? "" : info.number;
+    cf.toa = (!cf.number.empty() && cf.number[0] == '+') ? TOA_INTERNATIONAL : TOA_UNKNOWN;
+    cf.timeSeconds = info.time;
+    HR_LOGI("set call forward: reason=%{public}d mode=%{public}d class=%{public}d", cf.reason,
+            cf.status, cf.serviceClass);
+    voice->setCallForward(RilBridge::Get().Track(requestInfo), cf);
+}
+
+/* Call barring is +CLCK, a facility lock: IRadioSim, answered in hybris_ril_sim.cpp. */
+void GetCallRestriction(const ReqDataInfo *requestInfo, const char *fac)
+{
+    auto sim = RilBridge::Get().Sim(SlotOf(requestInfo));
+    if (sim == nullptr || fac == nullptr) {
+        ReportCallFailure(requestInfo, sim == nullptr ? HRIL_ERR_GENERIC_FAILURE : HRIL_ERR_INVALID_PARAMETER);
+        return;
+    }
+    HR_LOGI("query barring %{public}s", fac);
+    sim->getFacilityLockForApp(RilBridge::Get().Track(requestInfo), fac, "", SERVICE_CLASS_DEFAULT, "");
+}
+
+void SetCallRestriction(const ReqDataInfo *requestInfo, CallRestrictionInfo info)
+{
+    auto sim = RilBridge::Get().Sim(SlotOf(requestInfo));
+    if (sim == nullptr || info.fac == nullptr) {
+        ReportCallFailure(requestInfo, sim == nullptr ? HRIL_ERR_GENERIC_FAILURE : HRIL_ERR_INVALID_PARAMETER);
+        return;
+    }
+    HR_LOGI("set barring %{public}s mode=%{public}d", info.fac, info.mode);
+    sim->setFacilityLockForApp(RilBridge::Get().Track(requestInfo), info.fac, info.mode == 1,
+                               info.password == nullptr ? "" : info.password, SERVICE_CLASS_DEFAULT, "");
+}
+
+void SetBarringPassword(const ReqDataInfo *requestInfo, HRilSetBarringInfo info)
+{
+    auto network = RilBridge::Get().Network(SlotOf(requestInfo));
+    if (network == nullptr || info.fac == nullptr) {
+        ReportCallFailure(requestInfo, network == nullptr ? HRIL_ERR_GENERIC_FAILURE : HRIL_ERR_INVALID_PARAMETER);
+        return;
+    }
+    network->setBarringPassword(RilBridge::Get().Track(requestInfo), info.fac,
+                                info.oldPassword == nullptr ? "" : info.oldPassword,
+                                info.newPassword == nullptr ? "" : info.newPassword);
+}
+
+void SetUssd(const ReqDataInfo *requestInfo, const char *str)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    if (str == nullptr) {
+        ReportCallFailure(requestInfo, HRIL_ERR_INVALID_PARAMETER);
+        return;
+    }
+    HR_LOGI("send ussd (len %{public}zu)", strlen(str));
+    voice->sendUssd(RilBridge::Get().Track(requestInfo), str);
+}
+
+/* +CUSD? asks whether the TE presents USSD results; Android always does. */
+void GetUssd(const ReqDataInfo *requestInfo)
+{
+    int32_t cusd = 1;
+    RilBridge::Get().ReportCall(requestInfo, HRIL_ERR_SUCCESS, &cusd, sizeof(cusd));
+}
+
+void CloseUnFinishedUssd(const ReqDataInfo *requestInfo)
+{
+    std::shared_ptr<radio::voice::IRadioVoice> voice;
+    if (!RilBridge::Get().RequireVoice(requestInfo, &voice)) {
+        return;
+    }
+    voice->cancelPendingUssd(RilBridge::Get().Track(requestInfo));
+}
+
+void SetSuppSrvNotification(const ReqDataInfo *requestInfo, int32_t enable)
+{
+    auto network = RilBridge::Get().Network(SlotOf(requestInfo));
+    if (network == nullptr) {
+        ReportCallFailure(requestInfo, HRIL_ERR_GENERIC_FAILURE);
+        return;
+    }
+    network->setSuppServiceNotifications(RilBridge::Get().Track(requestInfo), enable != 0);
+}
+
 /*
  * Left NULL on purpose:
- *
- *   GetClip / SetClip / GetClir / SetClir / GetCallWaiting / SetCallWaiting /
- *   GetCallTransferInfo / SetCallTransferInfo / GetCallRestriction /
- *   SetCallRestriction / SetBarringPassword / SetUssd / GetUssd /
- *   CloseUnFinishedUssd / SetSuppSrvNotification
- *     Supplementary services — the settings you configure about calling
- *     rather than anything a call needs.  They arrive as one group: OHOS
- *     drives them from com.ohos.callsetting and from MMI codes typed into the
- *     dialler, both of which route through cellular_call's supplement
- *     requests, and none of them is reachable while a call is being set up.
- *     Most map cleanly (setClir, setCallWaiting, setCallForward, sendUssd),
- *     but two do not — SetClip has no AIDL counterpart at all, and call
- *     barring lives on IRadioSim as setFacilityLockForApp, not on IRadioVoice
- *     — so shipping half the group would leave the dialler's MMI handling
- *     failing in ways that look like carrier problems.  Plan phase R7.
  *
  *   GetEmergencyCallList / SetEmergencyCallList
  *     No AIDL counterpart in either direction: Android's modem announces its
@@ -715,8 +1102,7 @@ void GetCallFailReason(const ReqDataInfo *requestInfo)
  *     on the headset jack to mean anything.  Nothing in this tree sets it.
  *
  * Not implemented on the indication side, for the same reasons:
- * onSupplementaryServiceIndication and onUssd (the supplementary-services
- * group), stkCallSetup and stkCallControlAlphaNotify (SIM toolkit), the cdma*
+ * stkCallSetup and stkCallControlAlphaNotify (SIM toolkit), the cdma*
  * family (no CDMA network), and srvccStateNotify — which needs IMS, and whose
  * mapping carries a trap worth writing down for whoever does R8: AIDL's
  * SrvccState is STARTED/COMPLETED/FAILED/CANCELED (1..4) while OHOS's
@@ -729,22 +1115,22 @@ const HRilCallReq g_callOps = {
     .Hangup = Hangup,
     .Reject = Reject,
     .Answer = Answer,
-    .GetClip = nullptr,
-    .SetClip = nullptr,
+    .GetClip = GetClip,
+    .SetClip = SetClip,
     .HoldCall = SwapCalls,
     .UnHoldCall = SwapCalls,
     .SwitchCall = SwapCalls,
     .CombineConference = CombineConference,
     .SeparateConference = SeparateConference,
     .CallSupplement = CallSupplement,
-    .GetCallWaiting = nullptr,
-    .SetCallWaiting = nullptr,
-    .SetCallTransferInfo = nullptr,
-    .GetCallTransferInfo = nullptr,
-    .GetCallRestriction = nullptr,
-    .SetCallRestriction = nullptr,
-    .GetClir = nullptr,
-    .SetClir = nullptr,
+    .GetCallWaiting = GetCallWaiting,
+    .SetCallWaiting = SetCallWaiting,
+    .SetCallTransferInfo = SetCallTransferInfo,
+    .GetCallTransferInfo = GetCallTransferInfo,
+    .GetCallRestriction = GetCallRestriction,
+    .SetCallRestriction = SetCallRestriction,
+    .GetClir = GetClir,
+    .SetClir = SetClir,
     .StartDtmf = StartDtmf,
     .SendDtmf = SendDtmf,
     .StopDtmf = StopDtmf,
@@ -753,18 +1139,18 @@ const HRilCallReq g_callOps = {
     .SetCallPreferenceMode = nullptr,
     .GetLteImsSwitchStatus = nullptr,
     .SetLteImsSwitchStatus = nullptr,
-    .SetUssd = nullptr,
-    .GetUssd = nullptr,
+    .SetUssd = SetUssd,
+    .GetUssd = GetUssd,
     .SetMute = SetMute,
     .GetMute = GetMute,
     .GetEmergencyCallList = nullptr,
     .GetCallFailReason = GetCallFailReason,
     .SetEmergencyCallList = nullptr,
-    .SetBarringPassword = nullptr,
-    .CloseUnFinishedUssd = nullptr,
+    .SetBarringPassword = SetBarringPassword,
+    .CloseUnFinishedUssd = CloseUnFinishedUssd,
     .ExplicitCallTransferConnection = ExplicitCallTransferConnection,
     .SetVonrSwitch = nullptr,
-    .SetSuppSrvNotification = nullptr,
+    .SetSuppSrvNotification = SetSuppSrvNotification,
     .GetTTYMode = nullptr,
     .SetTTYMode = nullptr,
 };

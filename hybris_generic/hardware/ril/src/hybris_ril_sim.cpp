@@ -228,6 +228,45 @@ public:
         return ReportLockStatus(info, remainingRetries);
     }
 
+    /*
+     * Facility locks (+CLCK).  The only sender today is call barring
+     * (callOps GetCallRestriction / SetCallRestriction in hybris_ril_call.cpp;
+     * the SIM-lock ops above are NULL), so the answer goes back to the call
+     * domain.  If SIM-lock support is added, route by request instead.
+     *
+     * `response` is the 27.007 <class> bit vector the facility is active for
+     * (0 = not active), i.e. +CLCK: <status>,<class>.
+     */
+    ::ndk::ScopedAStatus getFacilityLockForAppResponse(const radio::RadioResponseInfo &info,
+                                                        int32_t response) override
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        HRilCallRestrictionResult result = {};
+        result.status = (response != 0) ? 1 : 0;
+        result.classCw = response;
+        HR_LOGI("barring query: err=%{public}d classes=%{public}d", static_cast<int32_t>(info.error),
+                response);
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), &result,
+                                    sizeof(result));
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus setFacilityLockForAppResponse(const radio::RadioResponseInfo &info,
+                                                        int32_t retry) override
+    {
+        (void)retry;
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        HR_LOGI("barring set: err=%{public}d", static_cast<int32_t>(info.error));
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), nullptr, 0);
+        return ::ndk::ScopedAStatus::ok();
+    }
+
 private:
     ::ndk::ScopedAStatus ReportLockStatus(const radio::RadioResponseInfo &info, int32_t remaining)
     {

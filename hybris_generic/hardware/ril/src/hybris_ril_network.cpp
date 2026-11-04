@@ -392,6 +392,23 @@ public:
         return ReportEmpty(info);
     }
 
+    /*
+     * These two are call-domain requests (callOps SetBarringPassword /
+     * SetSuppSrvNotification) that AIDL happens to put on IRadioNetwork, so
+     * they are answered to the call domain.
+     */
+    ::ndk::ScopedAStatus setBarringPasswordResponse(const radio::RadioResponseInfo &info) override
+    {
+        HR_LOGI("barring password: err=%{public}d", static_cast<int32_t>(info.error));
+        return ReportCallEmpty(info);
+    }
+
+    ::ndk::ScopedAStatus setSuppServiceNotificationsResponse(
+        const radio::RadioResponseInfo &info) override
+    {
+        return ReportCallEmpty(info);
+    }
+
     ::ndk::ScopedAStatus getAllowedNetworkTypesBitmapResponse(
         const radio::RadioResponseInfo &info, int32_t networkTypeBitmap) override
     {
@@ -418,6 +435,16 @@ private:
         }
         RilBridge::Get().ReportNetwork(req, ToHrilError(static_cast<int32_t>(info.error)), nullptr,
                                        0);
+        return ::ndk::ScopedAStatus::ok();
+    }
+
+    ::ndk::ScopedAStatus ReportCallEmpty(const radio::RadioResponseInfo &info)
+    {
+        ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        if (req == nullptr) {
+            return ::ndk::ScopedAStatus::ok();
+        }
+        RilBridge::Get().ReportCall(req, ToHrilError(static_cast<int32_t>(info.error)), nullptr, 0);
         return ::ndk::ScopedAStatus::ok();
     }
 
