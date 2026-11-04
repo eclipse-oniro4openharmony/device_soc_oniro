@@ -423,10 +423,37 @@ int32_t HybrisStreamOperator::SubmitCapture(int32_t captureId, const VdiCaptureI
         return VDI::Camera::V1_0::INVALID_ARGUMENT;
     }
 
+    for (int32_t streamId : info.streamIds_) {
+        auto it = streams_.find(streamId);
+        if (it == streams_.end() || it->second->target == nullptr) {
+            HC_LOGE("capture %{public}d references unknown stream %{public}d", captureId, streamId);
+            return VDI::Camera::V1_0::INVALID_ARGUMENT;
+        }
+    }
+
+    /*
+     * Streaming captures share the session's single repeating request.  OHOS
+     * runs preview and video as two concurrent streaming captures, so each
+     * one must ADD its streams to the repeat rather than replace it:
+     * replacing it made the viewfinder freeze the moment recording started
+     * (the repeat then only fed the encoder).
+     */
+    if (isStreaming) {
+        for (int32_t streamId : info.streamIds_) {
+            auto &stream = streams_[streamId];
+            stream->captureId = captureId;
+            stream->streaming = true;
+            stream->shutterCallback = info.enableShutterCallback_;
+            stream->frameCount = 0;
+            targets.push_back(streamId);
+        }
+        streamingSettings_ = info.captureSetting_;
+        return RepeatLocked();
+    }
+
     ACaptureRequest *request = nullptr;
-    ACameraDevice_request_template tmpl = isStreaming ? TEMPLATE_PREVIEW : TEMPLATE_STILL_CAPTURE;
-    camera_status_t st = ndk_->ACameraDevice_createCaptureRequest(device_->NdkDevice(), tmpl,
-                                                                  &request);
+    camera_status_t st = ndk_->ACameraDevice_createCaptureRequest(device_->NdkDevice(),
+                                                                  TEMPLATE_STILL_CAPTURE, &request);
     if (st != ACAMERA_OK || request == nullptr) {
         HC_LOGE("createCaptureRequest -> %{public}s", NdkStatusName(st));
         return VDI::Camera::V1_0::DEVICE_ERROR;
@@ -434,11 +461,6 @@ int32_t HybrisStreamOperator::SubmitCapture(int32_t captureId, const VdiCaptureI
 
     for (int32_t streamId : info.streamIds_) {
         auto it = streams_.find(streamId);
-        if (it == streams_.end() || it->second->target == nullptr) {
-            HC_LOGE("capture %{public}d references unknown stream %{public}d", captureId, streamId);
-            ndk_->ACaptureRequest_free(request);
-            return VDI::Camera::V1_0::INVALID_ARGUMENT;
-        }
         ndk_->ACaptureRequest_addTarget(request, it->second->target);
         it->second->captureId = captureId;
         it->second->streaming = isStreaming;
@@ -464,28 +486,68 @@ int32_t HybrisStreamOperator::SubmitCapture(int32_t captureId, const VdiCaptureI
     capCb.onCaptureSequenceAborted = OnSequenceAbortedCb;
     capCb.onCaptureBufferLost = OnBufferLostCb;
 
-    if (isStreaming) {
-        if (repeatingRequest_ != nullptr) {
-            ndk_->ACameraCaptureSession_stopRepeating(session_);
-            ndk_->ACaptureRequest_free(repeatingRequest_);
-            repeatingRequest_ = nullptr;
-        }
-        st = ndk_->ACameraCaptureSession_setRepeatingRequest(session_, &capCb, 1, &request, nullptr);
-        if (st != ACAMERA_OK) {
-            HC_LOGE("setRepeatingRequest -> %{public}s", NdkStatusName(st));
-            ndk_->ACaptureRequest_free(request);
-            return VDI::Camera::V1_0::DEVICE_ERROR;
-        }
-        repeatingRequest_ = request; // freed when the repeat is cancelled
-    } else {
-        st = ndk_->ACameraCaptureSession_capture(session_, &capCb, 1, &request, nullptr);
-        ndk_->ACaptureRequest_free(request);
-        if (st != ACAMERA_OK) {
-            HC_LOGE("capture -> %{public}s", NdkStatusName(st));
-            return VDI::Camera::V1_0::DEVICE_ERROR;
+    st = ndk_->ACameraCaptureSession_capture(session_, &capCb, 1, &request, nullptr);
+    ndk_->ACaptureRequest_free(request);
+    if (st != ACAMERA_OK) {
+        HC_LOGE("capture -> %{public}s", NdkStatusName(st));
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+    return VDI::Camera::V1_0::NO_ERROR;
+}
+
+int32_t HybrisStreamOperator::RepeatLocked()
+{
+    bool hasVideo = false;
+    std::vector<int32_t> ids;
+    for (auto &entry : streams_) {
+        auto &stream = entry.second;
+        if (stream->streaming && stream->captureId >= 0 && stream->target != nullptr) {
+            ids.push_back(entry.first);
+            hasVideo = hasVideo || stream->info.intent_ == VDI::Camera::V1_0::VIDEO;
         }
     }
+    if (ids.empty()) {
+        return VDI::Camera::V1_0::NO_ERROR;
+    }
+    // RECORD keeps the frame rate steady and enables the video 3A tuning.
+    ACameraDevice_request_template tmpl = hasVideo ? TEMPLATE_RECORD : TEMPLATE_PREVIEW;
+    ACaptureRequest *request = nullptr;
+    camera_status_t st = ndk_->ACameraDevice_createCaptureRequest(device_->NdkDevice(), tmpl, &request);
+    if (st != ACAMERA_OK || request == nullptr) {
+        HC_LOGE("createCaptureRequest -> %{public}s", NdkStatusName(st));
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+    for (int32_t id : ids) {
+        ndk_->ACaptureRequest_addTarget(request, streams_[id]->target);
+    }
+    ApplySettingsToRequest(ndk_, device_->LatestSettings(), *device_->Info(), request);
+    ApplySettingsToRequest(ndk_, streamingSettings_, *device_->Info(), request);
 
+    ACameraCaptureSession_captureCallbacks capCb {};
+    capCb.context = this;
+    capCb.onCaptureStarted = OnCaptureStartedCb;
+    capCb.onCaptureProgressed = nullptr;
+    capCb.onCaptureCompleted = OnCaptureCompletedCb;
+    capCb.onCaptureFailed = OnCaptureFailedCb;
+    capCb.onCaptureSequenceCompleted = OnSequenceCompletedCb;
+    capCb.onCaptureSequenceAborted = OnSequenceAbortedCb;
+    capCb.onCaptureBufferLost = OnBufferLostCb;
+
+    // setRepeatingRequest replaces the running repeat in place, so there is
+    // no gap and no stopRepeating (which would wait on callbacks that need
+    // lock_).  The NDK keeps its own copy of the request.
+    st = ndk_->ACameraCaptureSession_setRepeatingRequest(session_, &capCb, 1, &request, nullptr);
+    if (st != ACAMERA_OK) {
+        HC_LOGE("setRepeatingRequest -> %{public}s", NdkStatusName(st));
+        ndk_->ACaptureRequest_free(request);
+        return VDI::Camera::V1_0::DEVICE_ERROR;
+    }
+    if (repeatingRequest_ != nullptr) {
+        ndk_->ACaptureRequest_free(repeatingRequest_);
+    }
+    repeatingRequest_ = request;
+    HC_LOGI("repeating %{public}zu stream(s), template %{public}s", ids.size(),
+            hasVideo ? "RECORD" : "PREVIEW");
     return VDI::Camera::V1_0::NO_ERROR;
 }
 
@@ -512,8 +574,17 @@ int32_t HybrisStreamOperator::CancelCapture(int32_t captureId)
             stream->streaming = false;
         }
         if (wasStreaming) {
-            stopSession = session_;
-            std::swap(staleRequest, repeatingRequest_);
+            bool othersStreaming = false;
+            for (auto &entry : streams_) {
+                othersStreaming = othersStreaming || (entry.second->streaming && entry.second->captureId >= 0);
+            }
+            if (othersStreaming) {
+                // e.g. recording stopped while the preview runs on: keep the rest.
+                (void)RepeatLocked();
+            } else {
+                stopSession = session_;
+                std::swap(staleRequest, repeatingRequest_);
+            }
         }
         cb = callback_;
     }

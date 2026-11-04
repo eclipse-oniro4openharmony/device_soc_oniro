@@ -119,6 +119,9 @@ private:
     // is sent by the caller once the lock is gone.
     int32_t SubmitCapture(int32_t captureId, const VdiCaptureInfo &info, bool isStreaming,
                           std::vector<int32_t> &targets);
+    // (Re)issues the one repeating request the Android session can have,
+    // targeting every stream with a live streaming capture.  lock_ held.
+    int32_t RepeatLocked();
     void HandleImage(int32_t streamId, AImageReader *reader);
     bool DeliverYuv(Stream &stream, AImage *image, int64_t timestamp);
     bool DeliverBlob(Stream &stream, AImage *image, int64_t timestamp);
@@ -146,6 +149,9 @@ private:
     ACaptureSessionOutputContainer *outputs_ = nullptr;
     ACameraCaptureSession *session_ = nullptr;
     ACaptureRequest *repeatingRequest_ = nullptr;
+    // Settings of the most recent streaming capture, applied on top of the
+    // device settings whenever the repeating request is rebuilt.
+    std::vector<uint8_t> streamingSettings_;
     bool committed_ = false;
 };
 
