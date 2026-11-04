@@ -728,25 +728,31 @@ bool HybrisStreamOperator::DeliverYuv(Stream &stream, AImage *image, int64_t tim
                      y + static_cast<size_t>(row) * yStride, static_cast<size_t>(copyWidth));
     }
 
-    // NV21 chroma: V and U interleaved, V first.  When the HAL hands us a
-    // semi-planar buffer in that order (v == u - 1, the MT6878 case) the whole
-    // plane is one memcpy per row; otherwise interleave by hand.
+    // Semi-planar chroma in the order the consumer asked for: NV21 (V first,
+    // YCRCB_420_SP — preview and the camera's own streams) or NV12 (U first,
+    // YCBCR_420_SP — what a video encoder's input surface may request; writing
+    // NV21 there swaps the colour channels of the recording).  When the HAL's
+    // semi-planar buffer is already in that order (v == u - 1 for NV21, the
+    // MT6878 case) the whole plane is one memcpy per row; otherwise interleave.
+    const bool nv12 = stream.info.format_ == GRAPHIC_PIXEL_FMT_YCBCR_420_SP;
+    const uint8_t *first = nv12 ? u : v;
+    const uint8_t *second = nv12 ? v : u;
     uint8_t *dstChroma = dst + static_cast<size_t>(dstStride) * height;
     int32_t chromaRows = height / 2;
-    if (uPixStride == 2 && v + 1 == u) {
+    if (uPixStride == 2 && first + 1 == second) {
         for (int32_t row = 0; row < chromaRows; ++row) {
             (void)memcpy(dstChroma + static_cast<size_t>(row) * dstStride,
-                         v + static_cast<size_t>(row) * uStride, static_cast<size_t>(copyWidth));
+                         first + static_cast<size_t>(row) * uStride, static_cast<size_t>(copyWidth));
         }
     } else {
         int32_t chromaCols = copyWidth / 2;
         for (int32_t row = 0; row < chromaRows; ++row) {
             uint8_t *out = dstChroma + static_cast<size_t>(row) * dstStride;
-            const uint8_t *srcV = v + static_cast<size_t>(row) * uStride;
-            const uint8_t *srcU = u + static_cast<size_t>(row) * uStride;
+            const uint8_t *srcFirst = first + static_cast<size_t>(row) * uStride;
+            const uint8_t *srcSecond = second + static_cast<size_t>(row) * uStride;
             for (int32_t col = 0; col < chromaCols; ++col) {
-                out[col * 2] = srcV[col * uPixStride];
-                out[col * 2 + 1] = srcU[col * uPixStride];
+                out[col * 2] = srcFirst[col * uPixStride];
+                out[col * 2 + 1] = srcSecond[col * uPixStride];
             }
         }
     }
