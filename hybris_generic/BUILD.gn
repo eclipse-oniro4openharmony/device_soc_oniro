@@ -19,6 +19,7 @@ import("waydroid/waydroid.gni")
 group("hybris_generic_soc_group") {
   deps = [
     "hardware/audio:audio_primary_model",
+    "hardware/avcenc:avcenc_model",
     "hardware/bluetooth:bt_vendor_model",
     "hardware/camera:camera_vdi_model",
     "hardware/display:display_buffer_model",

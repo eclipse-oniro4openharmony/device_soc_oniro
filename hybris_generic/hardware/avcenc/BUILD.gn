@@ -1,0 +1,63 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+# Hardware H.264 encoder behind av_codec's AVC encoder plugin ABI.
+#
+# av_codec's AvcEncoder (foundation/multimedia/av_codec/services/engine/codec/
+# video/avcencoder) dlopens "libavcenc_ohos.z.so" for InitEncoder /
+# EncodeProcess / ReleaseEncoder, and only offers video/avc encoding when
+# that library is present.  Upstream expects a closed vendor blob there, so
+# without this the phones cannot record video.  This one drives the Android
+# side's MediaCodec encoder (MediaTek c2.mtk.avc.encoder on the Volla phones)
+# through the NDK's AMediaCodec (libmediandk.so in the Halium image), loaded
+# with libhybris at runtime; nothing Android is linked.
+ohos_shared_library("avcenc_ohos") {
+  sources = [ "src/avcenc_mediandk.cpp" ]
+
+  include_dirs = [
+    "src",
+    "//foundation/multimedia/av_codec/services/engine/codec/video/avcencoder",
+  ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  # dlopen'd by av_codec_service from the system library path.
+  install_images = [ "system" ]
+  install_enable = true
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# Bring-up tool: drives the library like av_codec does on a synthetic
+# picture and writes the stream to a file (see test/avcenc_probe.cpp).
+ohos_executable("avcenc_probe") {
+  sources = [ "test/avcenc_probe.cpp" ]
+  include_dirs =
+      [ "//foundation/multimedia/av_codec/services/engine/codec/video/avcencoder" ]
+  install_enable = true
+  install_images = [ "system" ]
+  module_install_dir = "bin"
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+group("avcenc_model") {
+  deps = [
+    ":avcenc_ohos",
+    ":avcenc_probe",
+  ]
+}
