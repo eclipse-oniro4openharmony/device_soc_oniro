@@ -19,6 +19,9 @@
  * android.hardware.radio.network v2. */
 
 #include <atomic>
+#include <cstring>
+#include <mutex>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -448,6 +451,20 @@ private:
         return ::ndk::ScopedAStatus::ok();
     }
 
+    static bool RegChanged(int32_t slotId, int32_t notifyId, const HRilRegStatusInfo &now)
+    {
+        static std::mutex lock;
+        static std::map<std::pair<int32_t, int32_t>, HRilRegStatusInfo> last;
+        std::lock_guard<std::mutex> guard(lock);
+        auto key = std::make_pair(slotId, notifyId);
+        auto it = last.find(key);
+        if (it != last.end() && memcmp(&it->second, &now, sizeof(now)) == 0) {
+            return false;
+        }
+        last[key] = now;
+        return true;
+    }
+
     ::ndk::ScopedAStatus ReportReg(const radio::RadioResponseInfo &info,
                                    const rnet::RegStateResult &reg, const char *what)
     {
@@ -459,8 +476,14 @@ private:
         int32_t slotId = 0;
         int32_t notifyId = 0;
         if (RilBridge::Get().TakeNotify(info.serial, &slotId, &notifyId)) {
-            HR_LOGI("%{public}s reg=%{public}d rat=%{public}d plmn=%{public}s (unsol)", what,
-                    out.regStatus, out.actType, reg.registeredPlmn.c_str());
+            /* A modem with nothing to camp on (the empty second slot) raises
+             * networkStateChanged every few seconds with nothing changed;
+             * only pass on what did change. */
+            if (!RegChanged(slotId, notifyId, out)) {
+                return ::ndk::ScopedAStatus::ok();
+            }
+            HR_LOGI("%{public}s (slot %{public}d) reg=%{public}d rat=%{public}d plmn=%{public}s (unsol)",
+                    what, slotId, out.regStatus, out.actType, reg.registeredPlmn.c_str());
             RilBridge::Get().NotifyNetwork(slotId, notifyId, &out, sizeof(out));
             return ::ndk::ScopedAStatus::ok();
         }

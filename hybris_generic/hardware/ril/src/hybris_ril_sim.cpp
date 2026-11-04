@@ -144,8 +144,9 @@ public:
         if (req == nullptr) {
             return ::ndk::ScopedAStatus::ok();
         }
-        HR_LOGI("card: state=%{public}d type=%{public}d aid=%{public}zu chars", state.simState,
-                state.simType, aid.size());
+        HR_LOGI("card (slot %{public}d): cardState=%{public}d err=%{public}d -> state=%{public}d "
+                "type=%{public}d aid=%{public}zu chars", slotId_, static_cast<int32_t>(card.cardState),
+                static_cast<int32_t>(info.error), state.simState, state.simType, aid.size());
         RilBridge::Get().ReportSim(req, ToHrilError(static_cast<int32_t>(info.error)), &state,
                                    sizeof(state));
         return ::ndk::ScopedAStatus::ok();
@@ -453,6 +454,11 @@ const HRilSimReq g_simOps = {
 };
 
 } // namespace
+
+bool SlotHasSimApp(int32_t slotId)
+{
+    return !AppAid(slotId).empty();
+}
 
 const HRilSimReq *SimOps()
 {

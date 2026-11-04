@@ -39,10 +39,11 @@ namespace HybrisRil {
 
 namespace radio = aidl::android::hardware::radio;
 
-/* OHOS runs this product as a single-card build (const.telephony.slotCount=1),
- * so only slot 0 is wired for now; the Android instance names are 1-based
- * ("slot1").  Dual SIM is plan phase R7. */
-constexpr int32_t MAX_SLOTS = 1;
+/* Both phones are dual-SIM; the product sets const.telephony.slotCount=2
+ * (sys_prod param, which wins over telephony.para's 1).  The Android instance
+ * names are 1-based ("slot1", "slot2").  Slot 0 is required; further slots
+ * are best effort (see RilBridge::ConnectLoop). */
+constexpr int32_t MAX_SLOTS = 2;
 
 /* Set to "1" by androidd once the Halium composer has registered — our
  * proxy for "the container is serving binder".  See WaitForContainer(). */
@@ -160,6 +161,11 @@ private:
 int32_t ToHrilError(int32_t radioError);
 
 /* The op tables, defined per domain. */
+/* Last radio power state the modem reported for a slot (hybris_ril_modem.cpp). */
+int32_t CachedRadioState(int32_t slotId);
+/* Whether the slot's card has a SIM application (hybris_ril_sim.cpp). */
+bool SlotHasSimApp(int32_t slotId);
+
 const HRilModemReq *ModemOps();
 const HRilSimReq *SimOps();
 const HRilNetworkReq *NetworkOps();

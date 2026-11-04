@@ -344,8 +344,18 @@ void RilBridge::ConnectLoop()
     }
     /* The thread pool is started later, once we actually hold a service
      * handle — see ConnectSlot(). */
+    /* Slot 0 is what cellular depends on: wait for it.  The others only
+     * exist on dual-SIM hardware whose rild registers them, so give each a
+     * bounded wait and carry on without it -- its requests then fail
+     * cleanly (Require* sees no service) instead of holding up slot 0. */
+    constexpr int32_t EXTRA_SLOT_TRIES = 15;
     for (int32_t slot = 0; slot < MAX_SLOTS; slot++) {
+        int32_t tries = 0;
         while (!ConnectSlot(slot)) {
+            if (slot > 0 && ++tries >= EXTRA_SLOT_TRIES) {
+                HR_LOGW("slot %{public}d: no radio service, continuing without it", slot);
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
     }
@@ -374,6 +384,35 @@ void RilBridge::ConnectLoop()
         int32_t state = HRIL_RADIO_POWER_STATE_OFF;
         NotifyModem(slot, HNOTI_MODEM_RADIO_STATE_UPDATED, &state, sizeof(state));
         NotifySim(slot, HNOTI_SIM_STATUS_CHANGED, nullptr, 0);
+    }
+
+    /*
+     * One OFF is not always enough.  NetworkSearchHandler only powers the
+     * radio on from that notification if the SIM is already *active*
+     * (RadioOnWhenHasSim: hasSim && IsSimActive), and SIM activation follows
+     * the card-status and IMSI reads a moment later; when our OFF wins that
+     * race nothing ever asks again and the phone stays off-network.  With
+     * two slots to connect it wins most of the time.  So repeat the OFF for
+     * any slot whose radio is still off but whose card has a SIM application,
+     * until the framework has switched it on (or for 90 s).
+     */
+    constexpr int32_t NUDGE_INTERVAL_S = 3;
+    constexpr int32_t NUDGE_ROUNDS = 30;
+    for (int32_t round = 0; round < NUDGE_ROUNDS; round++) {
+        std::this_thread::sleep_for(std::chrono::seconds(NUDGE_INTERVAL_S));
+        bool pending = false;
+        for (int32_t slot = 0; slot < MAX_SLOTS; slot++) {
+            if (!SlotHasSimApp(slot) || CachedRadioState(slot) != HRIL_RADIO_POWER_STATE_OFF) {
+                continue;
+            }
+            pending = true;
+            int32_t state = HRIL_RADIO_POWER_STATE_OFF;
+            HR_LOGI("slot %{public}d: SIM present, radio still off -- re-notifying", slot);
+            NotifyModem(slot, HNOTI_MODEM_RADIO_STATE_UPDATED, &state, sizeof(state));
+        }
+        if (!pending && round > 0) {
+            break;
+        }
     }
 }
 

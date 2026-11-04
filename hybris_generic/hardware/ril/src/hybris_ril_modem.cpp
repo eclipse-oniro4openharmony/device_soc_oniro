@@ -55,7 +55,7 @@ namespace {
  * So OFF is the right starting point: it makes the framework assert the
  * state it wants, and the setRadioPower response tells us the truth.
  */
-std::atomic<int32_t> g_radioState{HRIL_RADIO_POWER_STATE_OFF};
+std::atomic<int32_t> g_radioState[MAX_SLOTS] = {};  /* 0 == HRIL_RADIO_POWER_STATE_OFF */
 
 /* setRadioPower's response does not echo the value that was requested, so
  * remember it per serial.  Small and short-lived: hril serialises requests. */
@@ -122,13 +122,13 @@ public:
         }
 
         ReqDataInfo *req = RilBridge::Get().TakePending(info.serial);
+        int32_t slot = (req != nullptr && req->slotId >= 0 && req->slotId < MAX_SLOTS) ? req->slotId : 0;
         if (known && info.error == radio::RadioError::NONE) {
             int32_t state = requestedOn ? HRIL_RADIO_POWER_STATE_ON
                                         : HRIL_RADIO_POWER_STATE_OFF;
-            if (g_radioState.exchange(state) != state) {
-                HR_LOGI("radio power -> %{public}d", state);
-                RilBridge::Get().NotifyModem(req != nullptr ? req->slotId : 0,
-                                             HNOTI_MODEM_RADIO_STATE_UPDATED, &state,
+            if (g_radioState[slot].exchange(state) != state) {
+                HR_LOGI("radio power (slot %{public}d) -> %{public}d", slot, state);
+                RilBridge::Get().NotifyModem(slot, HNOTI_MODEM_RADIO_STATE_UPDATED, &state,
                                              sizeof(state));
             }
         }
@@ -170,7 +170,7 @@ public:
                                            radio::modem::RadioState radioState) override
     {
         int32_t state = ToHrilRadioState(radioState);
-        g_radioState.store(state);
+        g_radioState[slotId_].store(state);
         HR_LOGI("radio state -> %{public}d", state);
         RilBridge::Get().NotifyModem(slotId_, HNOTI_MODEM_RADIO_STATE_UPDATED, &state,
                                      sizeof(state));
@@ -187,7 +187,7 @@ public:
     {
         HR_LOGW("modem reset: %{public}s", reason.c_str());
         int32_t state = HRIL_RADIO_POWER_STATE_UNAVAILABLE;
-        g_radioState.store(state);
+        g_radioState[slotId_].store(state);
         RilBridge::Get().NotifyModem(slotId_, HNOTI_MODEM_RADIO_STATE_UPDATED, &state,
                                      sizeof(state));
         return ::ndk::ScopedAStatus::ok();
@@ -221,7 +221,8 @@ void GetRadioState(const ReqDataInfo *requestInfo)
         return;
     }
     /* Answered from the cached indication state — see g_radioState. */
-    int32_t state = g_radioState.load();
+    int32_t slot = (requestInfo->slotId >= 0 && requestInfo->slotId < MAX_SLOTS) ? requestInfo->slotId : 0;
+    int32_t state = g_radioState[slot].load();
     RilBridge::Get().ReportModem(requestInfo, HRIL_ERR_SUCCESS, &state, sizeof(state));
 }
 
@@ -300,6 +301,14 @@ const HRilModemReq g_modemOps = {
 };
 
 } // namespace
+
+int32_t CachedRadioState(int32_t slotId)
+{
+    if (slotId < 0 || slotId >= MAX_SLOTS) {
+        return HRIL_RADIO_POWER_STATE_UNAVAILABLE;
+    }
+    return g_radioState[slotId].load();
+}
 
 const HRilModemReq *ModemOps()
 {
