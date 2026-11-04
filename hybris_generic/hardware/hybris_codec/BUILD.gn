@@ -15,6 +15,13 @@
 
 import("//build/ohos.gni")
 
+# Hardware video codecs for av_codec on the hybris phones.  av_codec loads
+# closed vendor libraries for its software-category AVC encoder and HEVC
+# decoder; these implement those ABIs on the Android side's MediaCodec
+# (MediaTek Codec2 on the Volla phones) through the NDK's AMediaCodec
+# (libmediandk.so in the Halium image), loaded with libhybris at runtime --
+# nothing Android is linked.  src/hybris_mediandk.cpp is the shared loader.
+
 # Hardware H.264 encoder behind av_codec's AVC encoder plugin ABI.
 #
 # av_codec's AvcEncoder (foundation/multimedia/av_codec/services/engine/codec/
@@ -26,7 +33,10 @@ import("//build/ohos.gni")
 # through the NDK's AMediaCodec (libmediandk.so in the Halium image), loaded
 # with libhybris at runtime; nothing Android is linked.
 ohos_shared_library("avcenc_ohos") {
-  sources = [ "src/avcenc_mediandk.cpp" ]
+  sources = [
+    "src/avcenc_mediandk.cpp",
+    "src/hybris_mediandk.cpp",
+  ]
 
   include_dirs = [
     "src",
@@ -38,6 +48,53 @@ ohos_shared_library("avcenc_ohos") {
   # dlopen'd by av_codec_service from the system library path.
   install_images = [ "system" ]
   install_enable = true
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# Hardware H.265 decoder behind av_codec's HEVC decoder plugin ABI.
+#
+# av_codec's HevcDecoder (foundation/multimedia/av_codec/services/engine/codec/
+# video/hevcdecoder) dlopens "libhevcdec_ohos.z.so" for HEVC_CreateDecoder /
+# HEVC_DecodeFrame / HEVC_FlushFrame / HEVC_DeleteDecoder and only offers
+# video/hevc decoding when it is present: without it HEVC videos do not play.
+# This one drives MediaTek's c2.mtk.hevc.decoder.
+ohos_shared_library("hevcdec_ohos") {
+  sources = [
+    "src/hevcdec_mediandk.cpp",
+    "src/hybris_mediandk.cpp",
+  ]
+
+  include_dirs = [
+    "src",
+    "//foundation/multimedia/av_codec/services/engine/codec/video/hevcdecoder",
+  ]
+
+  external_deps = [ "hilog:libhilog" ]
+
+  install_images = [ "system" ]
+  install_enable = true
+  subsystem_name = "oniro_soc_products"
+  part_name = "hybris_generic_soc"
+}
+
+# Bring-up tool: encodes an H.265 test clip with the hardware encoder and
+# muxes it into an MP4, to exercise hevcdec_ohos (see test/hevc_mkclip.cpp).
+ohos_executable("hevc_mkclip") {
+  sources = [
+    "src/hybris_mediandk.cpp",
+    "test/hevc_mkclip.cpp",
+  ]
+  include_dirs = [ "src" ]
+  external_deps = [
+    "av_codec:native_media_avmuxer",
+    "av_codec:native_media_codecbase",
+    "hilog:libhilog",
+    "media_foundation:native_media_core",
+  ]
+  install_enable = true
+  install_images = [ "system" ]
+  module_install_dir = "bin"
   subsystem_name = "oniro_soc_products"
   part_name = "hybris_generic_soc"
 }
@@ -73,10 +130,12 @@ ohos_executable("avframe_dump") {
   part_name = "hybris_generic_soc"
 }
 
-group("avcenc_model") {
+group("hybris_codec_model") {
   deps = [
     ":avcenc_ohos",
     ":avcenc_probe",
     ":avframe_dump",
+    ":hevc_mkclip",
+    ":hevcdec_ohos",
   ]
 }

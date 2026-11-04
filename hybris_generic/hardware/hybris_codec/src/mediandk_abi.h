@@ -49,10 +49,11 @@ typedef struct AMediaCodecBufferInfo {
 } // extern "C"
 
 namespace OHOS {
-namespace OniroAvcEnc {
+namespace OniroCodec {
 
 constexpr media_status_t AMEDIA_OK = 0;
 constexpr uint32_t AMEDIACODEC_CONFIGURE_FLAG_ENCODE = 1;
+constexpr uint32_t AMEDIACODEC_CONFIGURE_FLAG_DECODE = 0;
 constexpr uint32_t AMEDIACODEC_BUFFER_FLAG_KEY_FRAME = 1;
 constexpr uint32_t AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG = 2;
 constexpr uint32_t AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM = 4;
@@ -64,6 +65,7 @@ constexpr ssize_t AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED = -3;
 struct MediaNdk {
     AMediaCodec *(*createCodecByName)(const char *name) = nullptr;
     AMediaCodec *(*createEncoderByType)(const char *mime) = nullptr;
+    AMediaCodec *(*createDecoderByType)(const char *mime) = nullptr;
     media_status_t (*configure)(AMediaCodec *, const AMediaFormat *, void *surface, void *crypto,
                                 uint32_t flags) = nullptr;
     media_status_t (*start)(AMediaCodec *) = nullptr;
@@ -77,6 +79,8 @@ struct MediaNdk {
     uint8_t *(*getOutputBuffer)(AMediaCodec *, size_t idx, size_t *outSize) = nullptr;
     media_status_t (*releaseOutputBuffer)(AMediaCodec *, size_t idx, bool render) = nullptr;
     AMediaFormat *(*getInputFormat)(AMediaCodec *) = nullptr;
+    AMediaFormat *(*getOutputFormat)(AMediaCodec *) = nullptr;
+    media_status_t (*flush)(AMediaCodec *) = nullptr;
     media_status_t (*setParameters)(AMediaCodec *, const AMediaFormat *) = nullptr;
 
     AMediaFormat *(*formatNew)() = nullptr;
@@ -85,12 +89,14 @@ struct MediaNdk {
     void (*formatSetInt32)(AMediaFormat *, const char *name, int32_t value) = nullptr;
     bool (*formatGetInt32)(AMediaFormat *, const char *name, int32_t *out) = nullptr;
     const char *(*formatToString)(AMediaFormat *) = nullptr;
+    /* Optional (API 28); null when the library lacks it. */
+    bool (*formatGetRect)(AMediaFormat *, const char *name, int32_t *l, int32_t *t, int32_t *r, int32_t *b) = nullptr;
 };
 
 /* Loads libmediandk.so through libhybris once per process; null on failure. */
 const MediaNdk *LoadMediaNdk();
 
-} // namespace OniroAvcEnc
+} // namespace OniroCodec
 } // namespace OHOS
 
 #endif // ONIRO_AVCENC_MEDIANDK_ABI_H
