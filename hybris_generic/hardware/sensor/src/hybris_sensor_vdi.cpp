@@ -171,7 +171,19 @@ public:
     int32_t GetAllSensorInfo(std::vector<HdfSensorInformationVdi> &info) override
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!listSettled_) {
+        /*
+         * The first call is SensorIfService::Init's own, made from the driver
+         * bind right after our Init: the HDI service is not published until
+         * it returns.  The sensor SA gives up on the HDI service after 25
+         * tries 200 ms apart and falls back to its mock sensor list for the
+         * rest of the boot, and a settle inside bind (up to SETTLE_MAX_MS)
+         * outlasted those 5 s whenever the hub came up late.  Answer bind
+         * with what is there now (the service only uses it to clamp
+         * SetDelay) and settle on the next call, the SA's.
+         */
+        if (!bindListServed_) {
+            bindListServed_ = true;
+        } else if (!listSettled_) {
             SettleSensorListLocked();
             listSettled_ = true;
         }
@@ -534,6 +546,7 @@ private:
     std::mutex cbMutex_;
     int fd_ = -1;
     bool listSettled_ = false;
+    bool bindListServed_ = false;
     std::atomic<bool> running_{false};
     std::thread reader_;
     std::vector<HdfSensorInformationVdi> infoList_;
