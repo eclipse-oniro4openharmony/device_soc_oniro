@@ -74,6 +74,18 @@ public:
     void OnVsync(int64_t timestampNs);
 
 private:
+    /* One HWC2 config (the panel's display modes: same size, different
+     * refresh rates).  Read once through the compat layer's C++ API. */
+    struct HwcMode {
+        uint32_t id;
+        int32_t width;
+        int32_t height;
+        int64_t vsyncPeriodNs;
+    };
+    std::vector<HwcMode> hwcModes_;
+    bool hwcModesLoaded_{false};
+    void LoadHwcModes();
+
     uint32_t devId_{0};
     hwc2_compat_display_t* display_{nullptr};
     hwc2_display_t hwc2DisplayId_{0};
@@ -101,6 +113,8 @@ private:
      */
     std::atomic<bool> vsyncEnabled_{false};
     std::atomic<bool> swVsyncRun_{false};
+    /* Period of the active mode; the software fallback ticks at it too. */
+    std::atomic<int64_t> swPeriodNs_{16666667};
     std::atomic<int64_t> lastHwVsyncNs_{0};
     std::thread swVsyncThread_;
     void EnsureSwVsyncThread();

@@ -19,6 +19,8 @@
 #include <hdf_base.h>
 #include <cstring>
 #include <ctime>
+#include <memory>
+#include <vector>
 #include <unordered_map>
 #include "display_common.h"
 #include "hybris_buffer_layout.h"
@@ -202,24 +204,135 @@ int32_t HybrisDisplay::GetDisplayCapability(DisplayCapability& info)
     return HDF_SUCCESS;
 }
 
+/*
+ * HWC2 display configs through the compat layer's C++ API.
+ *
+ * The C wrapper only exposes the active config, but libhwc2_compat_layer.so
+ * exports HWC2::impl::Display::getConfigs() and setActiveConfigWithConstraints(),
+ * and hwc2_compat_display_t is { HWC2::Display* self } (impl::Display derives
+ * from HWC2::Display alone, so self is a valid impl `this`).  Same ABI
+ * reasoning as getChangedCompositionTypes below: libc++ std::__1 on both
+ * sides and one shared heap.
+ *
+ * HWC2::Display::Config layout (libhybris compat/hwc2/HWC2.h):
+ *   Display& mDisplay; HWConfigId mId; int32_t mWidth, mHeight;
+ *   nsecs_t mVsyncPeriod; float mDpiX, mDpiY; int32_t mConfigGroup;
+ * The layout is checked against the active config before it is trusted.
+ */
+namespace {
+struct HwcConfigLayout {
+    void* display;
+    uint32_t id;
+    int32_t width;
+    int32_t height;
+    int64_t vsyncPeriod;
+    float dpiX;
+    float dpiY;
+    int32_t configGroup;
+};
+struct VsyncPeriodChangeConstraints {   /* composer V2_4::IComposerClient */
+    int64_t desiredTimeNanos;
+    bool seamlessRequired;
+};
+struct VsyncPeriodChangeTimeline {
+    int64_t newVsyncAppliedTimeNanos;
+    bool refreshRequired;
+    int64_t refreshTimeNanos;
+};
+using GetConfigsFn = std::vector<std::shared_ptr<const HwcConfigLayout>> (*)(const void* self);
+using SetActiveConfigFn = int32_t (*)(void* self, uint32_t configId,
+    const VsyncPeriodChangeConstraints& constraints, VsyncPeriodChangeTimeline* timeline);
+
+struct HwcDisplaySelf {
+    void* self;   /* the layout of hwc2_compat_display_t */
+};
+
+void* CompatLayerHandle()
+{
+    static void* handle = android_dlopen("libhwc2_compat_layer.so", RTLD_LAZY);
+    return handle;
+}
+
+GetConfigsFn LoadGetConfigsFn()
+{
+    void* handle = CompatLayerHandle();
+    return handle == nullptr ? nullptr : reinterpret_cast<GetConfigsFn>(
+        android_dlsym(handle, "_ZNK7android4HWC24impl7Display10getConfigsEv"));
+}
+
+SetActiveConfigFn LoadSetActiveConfigFn()
+{
+    void* handle = CompatLayerHandle();
+    return handle == nullptr ? nullptr : reinterpret_cast<SetActiveConfigFn>(android_dlsym(handle,
+        "_ZN7android4HWC24impl7Display30setActiveConfigWithConstraintsEjRKNS_8hardware8graphics8"
+        "composer4V2_415IComposerClient28VsyncPeriodChangeConstraintsEPNS6_25VsyncPeriodChangeTimelineE"));
+}
+
+uint32_t RefreshRateHz(int64_t vsyncPeriodNs)
+{
+    constexpr int64_t NS_PER_S = 1000000000LL;
+    return vsyncPeriodNs > 0 ? static_cast<uint32_t>((NS_PER_S + vsyncPeriodNs / 2) / vsyncPeriodNs) : 60u;
+}
+} // namespace
+
+void HybrisDisplay::LoadHwcModes()
+{
+    if (hwcModesLoaded_) {
+        return;
+    }
+    hwcModesLoaded_ = true;
+    HWC2DisplayConfig* active = hwc2_compat_display_get_active_config(display_);
+    static GetConfigsFn getConfigs = LoadGetConfigsFn();
+    if (getConfigs != nullptr && active != nullptr) {
+        void* self = reinterpret_cast<HwcDisplaySelf*>(display_)->self;
+        auto configs = getConfigs(self);
+        bool layoutOk = false;
+        for (const auto& c : configs) {
+            if (c && c->id == active->id && c->width == active->width && c->height == active->height &&
+                c->vsyncPeriod == active->vsyncPeriod) {
+                layoutOk = true;
+            }
+        }
+        if (layoutOk) {
+            for (const auto& c : configs) {
+                if (c) {
+                    hwcModes_.push_back({ c->id, c->width, c->height, c->vsyncPeriod });
+                    DISPLAY_LOGI("HWC config %{public}u: %{public}dx%{public}d @ %{public}u Hz "
+                        "(vsync %{public}lld ns, group %{public}d)", c->id, c->width, c->height,
+                        RefreshRateHz(c->vsyncPeriod), static_cast<long long>(c->vsyncPeriod), c->configGroup);
+                }
+            }
+        } else {
+            DISPLAY_LOGE("getConfigs: %{public}zu config(s), none matches the active one; "
+                "Config layout differs, reporting the active mode only", configs.size());
+        }
+    }
+    if (hwcModes_.empty() && active != nullptr) {
+        hwcModes_.push_back({ active->id, active->width, active->height, active->vsyncPeriod });
+    }
+    if (active != nullptr) {
+        if (active->vsyncPeriod > 0) {
+            swPeriodNs_ = active->vsyncPeriod;
+        }
+        free(active);
+    }
+}
+
 int32_t HybrisDisplay::GetDisplaySupportedModes(std::vector<DisplayModeInfo>& modes)
 {
-    HWC2DisplayConfig* cfg = hwc2_compat_display_get_active_config(display_);
-    if (!cfg) {
-        DISPLAY_LOGE("No active config for display %u", devId_);
+    LoadHwcModes();
+    if (hwcModes_.empty()) {
+        DISPLAY_LOGE("No display config for display %u", devId_);
         return HDF_FAILURE;
     }
-
-    DisplayModeInfo mode;
-    mode.width = cfg->width;
-    mode.height = cfg->height;
-    /* vsyncPeriod is in nanoseconds; convert to Hz */
-    mode.freshRate = (cfg->vsyncPeriod > 0) ?
-        static_cast<uint32_t>(1000000000LL / cfg->vsyncPeriod) : 60u;
-    mode.id = static_cast<int32_t>(cfg->id);
-
-    modes.push_back(mode);
-    free(cfg);
+    for (const auto& m : hwcModes_) {
+        DisplayModeInfo mode;
+        mode.width = m.width;
+        mode.height = m.height;
+        mode.freshRate = RefreshRateHz(m.vsyncPeriodNs);
+        mode.id = static_cast<int32_t>(m.id);
+        modes.push_back(mode);
+    }
     return HDF_SUCCESS;
 }
 
@@ -235,10 +348,28 @@ int32_t HybrisDisplay::GetDisplayMode(uint32_t& modeId)
 
 int32_t HybrisDisplay::SetDisplayMode(uint32_t modeId)
 {
-    /* HWC2 compat layer doesn't expose setActiveConfig; mode changes are
-     * not supported in this bring-up implementation. */
-    DISPLAY_UNUSED(modeId);
-    DISPLAY_LOGW("SetDisplayMode not supported in hybris VDI");
+    LoadHwcModes();
+    const HwcMode* target = nullptr;
+    for (const auto& m : hwcModes_) {
+        if (m.id == modeId) {
+            target = &m;
+        }
+    }
+    DISPLAY_CHK_RETURN(target == nullptr, HDF_ERR_INVALID_PARAM,
+        DISPLAY_LOGE("SetDisplayMode: no mode %{public}u", modeId));
+    static SetActiveConfigFn setActive = LoadSetActiveConfigFn();
+    DISPLAY_CHK_RETURN(setActive == nullptr, HDF_ERR_NOT_SUPPORT,
+        DISPLAY_LOGE("SetDisplayMode: setActiveConfigWithConstraints not found"));
+    VsyncPeriodChangeConstraints constraints { NowNs(), false };
+    VsyncPeriodChangeTimeline timeline {};
+    void* self = reinterpret_cast<HwcDisplaySelf*>(display_)->self;
+    int32_t err = setActive(self, modeId, constraints, &timeline);
+    DISPLAY_LOGI("SetDisplayMode %{public}u (%{public}u Hz) -> %{public}d, applied in %{public}lld us, "
+        "refresh required %{public}d", modeId, RefreshRateHz(target->vsyncPeriodNs), err,
+        static_cast<long long>((timeline.newVsyncAppliedTimeNanos - constraints.desiredTimeNanos) / 1000),
+        timeline.refreshRequired ? 1 : 0);
+    DISPLAY_CHK_RETURN(err != 0, HDF_FAILURE, DISPLAY_LOGE("setActiveConfigWithConstraints failed"));
+    swPeriodNs_ = target->vsyncPeriodNs;
     return HDF_SUCCESS;
 }
 
@@ -319,16 +450,15 @@ void HybrisDisplay::EnsureSwVsyncThread()
 
 void HybrisDisplay::SwVsyncLoop()
 {
-    /* 60 Hz — the sampler in render_service phase-locks to whatever cadence
-     * we deliver; 120 Hz panel timing is a later refinement. */
-    constexpr int64_t kPeriodNs = 16666667;
+    /* The active mode's period: the sampler in render_service phase-locks
+     * to whatever cadence we deliver. */
     /* Consider hardware vsync "alive" if a callback landed in the last 100 ms;
      * the fallback then stays silent and the real signal wins. */
     constexpr int64_t kHwSilenceNs = 100000000;
     bool active = false;
     int64_t lastIdleLogNs = 0;
     while (swVsyncRun_) {
-        struct timespec ts = { 0, static_cast<long>(kPeriodNs) };
+        struct timespec ts = { 0, static_cast<long>(swPeriodNs_.load()) };
         nanosleep(&ts, nullptr);
         if (!vsyncEnabled_ || vblankCb_ == nullptr) {
             int64_t now = NowNs();
@@ -348,7 +478,8 @@ void HybrisDisplay::SwVsyncLoop()
             continue;
         }
         if (!active) {
-            DISPLAY_LOGI("sw-vsync: no hardware vsync — fallback generating 60 Hz");
+            DISPLAY_LOGI("sw-vsync: no hardware vsync — fallback generating %{public}lld ns ticks",
+                static_cast<long long>(swPeriodNs_.load()));
             active = true;
         }
         if (now - lastIdleLogNs > 5000000000LL) {
