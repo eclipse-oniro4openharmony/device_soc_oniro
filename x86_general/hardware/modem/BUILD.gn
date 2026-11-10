@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+import("//build/ohos.gni")
+
+group("emulator_modem_group") {
+  deps = [
+    ":emulator_modem",
+    ":emulator_modem_cfg",
+    ":emulator_modem_para",
+  ]
+}
+
+# Simulated LTE modem and SIM behind the stock AT vendor library: see
+# src/emulator_modem.c.
+ohos_executable("emulator_modem") {
+  sources = [ "src/emulator_modem.c" ]
+  external_deps = [
+    "hilog:libhilog",
+    "init:libbegetutil",
+  ]
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}
+
+ohos_prebuilt_etc("emulator_modem_cfg") {
+  source = "emulator_modem.cfg"
+  relative_install_dir = "init"
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}
+
+ohos_prebuilt_etc("emulator_modem_para") {
+  source = "emulator_modem.para"
+  relative_install_dir = "param"
+  install_images = [ chipset_base_dir ]
+  part_name = "x86_general"
+}

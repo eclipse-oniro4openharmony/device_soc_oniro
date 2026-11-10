@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+# The RIL HDI talks to the emulator's simulated modem (emulator_modem)
+# through the stock AT vendor library, on its default port /dev/ttyUSB0.
+const.sys.radio.vendorlib.path=libril_vendor.z.so
+
+# Signal bars shown by the simulated modem, 0-4. The host can also deliver
+# an SMS or ring the phone (both parameters are cleared once handled):
+#   hdc shell param set emulator.modem.signal 2
+#   hdc shell param set emulator.modem.sms "+447700900123 Hello from the host"
+#   hdc shell param set emulator.modem.call +447700900123
+#   hdc shell param set emulator.modem.call hangup
+emulator.modem.signal=4

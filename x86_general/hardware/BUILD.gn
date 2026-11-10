@@ -20,6 +20,7 @@ group("hardware_group") {
     "gnss:gnss_emulator_group",
     "gpu:gpu-libs",
     "input:emulator_touch_group",
+    "modem:emulator_modem_group",
     "sensor:sensor_vdi_model",
   ]
 }
