@@ -22,7 +22,7 @@ freedesktop.org Mesa 25.0.x                       (canonical upstream)
         branch OpenHarmony-7.0-Release @ 339cb11 (in-tree: third_party/mesa3d, 25.0.1)
       └─> Oniro fork          (diemit's x86_64 port + Oniro fixes, rebased)
             github.com/frankplus/third_party_mesa3d
-            branch OpenHarmony-7.0-Release @ 2d564becbaddf0ce464c66b8f6682aa8b80bd094
+            branch OpenHarmony-7.0-Release @ bbaf95e10654903e034fd0d957298adf425cf1c3
           └─> these binaries   (built from that source; see build recipe below)
 ```
 
@@ -37,6 +37,7 @@ The Oniro branch is upstream OpenHarmony-7.0-Release plus:
 | `37b9b9c` | Oniro | `kms_sw`: lock the shared buffer list and reference counts |
 | `0b1ba09` | Oniro | `util`: use the NEON memcpy only on ARM (x86_64 build fix) |
 | `2d564be` | Oniro | x86_64 cross setup links the product's own libqos |
+| `bbaf95e` | Oniro | `util`: leave OpenHarmony's reserved real-time signals (stack dump, sampling, hooks) unblocked in Mesa threads |
 
 diemit's fork (gitcode `diemit/third_party_mesa3d`, branch
 `mesa25.0.1_x86_dev`) shares no history with the OpenHarmony repository: its
@@ -55,6 +56,13 @@ twice or freed them while in use: render_service crashed or deadlocked within
 minutes of continuous redraws, and the restarts could escalate to a kernel
 panic. The fix adds a winsys-wide lock and initialises `map_lock` for targets
 imported from a dma-buf, which was never done.
+
+The signal fix: `u_thread_create()` blocks almost every signal in the threads
+Mesa starts, including the real-time signals OpenHarmony's musl reserves
+(SIGRTMIN+0..+10: faultloggerd stack dumps, stack sampling, malloc/fd hooks).
+render_service's 12 Mesa threads (llvmpipe workers and queues) therefore never
+answered a per-thread dump request: SIGRTMIN+3 (local stack dump) sat pending
+on all of them. They are now left unblocked on OpenHarmony.
 
 ## How these binaries were built
 
@@ -101,7 +109,7 @@ are what these binaries contain.
 # 0. clone the source, pinned to the exact commit
 git clone --branch OpenHarmony-7.0-Release --single-branch \
     https://github.com/frankplus/third_party_mesa3d.git third_party/mesa3d-new
-git -C third_party/mesa3d-new checkout 2d564becbaddf0ce464c66b8f6682aa8b80bd094
+git -C third_party/mesa3d-new checkout bbaf95e10654903e034fd0d957298adf425cf1c3
 
 # 1. build + deploy into this lib64/ (runs in the build container, after a
 #    product build so out/x86_general has zlib, expat, libqos, the sysroot...)
