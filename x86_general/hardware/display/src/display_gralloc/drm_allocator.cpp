@@ -49,6 +49,22 @@ int32_t DrmAllocator::Allocate(const BufferInfo &bufferInfo, BufferHandle &handl
     dumb.height = bufferInfo.heightStride_;
     dumb.flags = 0;
     dumb.bpp = bufferInfo.bitsPerPixel_;
+    // virtio-gpu only creates 32 bpp dumb buffers. Anything else (YUV camera
+    // and video buffers, 16/24 bpp RGB) is backed by a 32 bpp buffer of the
+    // same byte stride and at least the size the format needs; the planes are
+    // laid out by the stride and size in the handle, not by the dumb buffer.
+    constexpr uint32_t DUMB_BPP = 32;
+    constexpr uint32_t DUMB_BYTES_PER_PIXEL = DUMB_BPP / 8;
+    if (dumb.bpp != DUMB_BPP) {
+        uint32_t rowBytes = bufferInfo.widthStride_ * bufferInfo.bytesPerPixel_;
+        if (rowBytes % DUMB_BYTES_PER_PIXEL != 0 || rowBytes == 0) {
+            DISPLAY_LOGE("unsupported row size %{public}u for format 0x%{public}x", rowBytes, bufferInfo.format_);
+            return DISPLAY_NOT_SUPPORT;
+        }
+        dumb.width = rowBytes / DUMB_BYTES_PER_PIXEL;
+        dumb.height = (bufferInfo.size_ + rowBytes - 1) / rowBytes;
+        dumb.bpp = DUMB_BPP;
+    }
     DISPLAY_LOGD();
     ret = drmIoctl(drmFd_, DRM_IOCTL_MODE_CREATE_DUMB, &dumb);
     DISPLAY_LOGI("fmt 0x%{public}x create dumb width: %{public}d  height: %{public}d bpp: %{public}u pitch %{public}d "
