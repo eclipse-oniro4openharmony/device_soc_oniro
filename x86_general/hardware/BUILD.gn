@@ -17,6 +17,7 @@ group("hardware_group") {
   deps = [
     "display:display_buffer_model",
     "display:display_composer_model",
+    "gnss:gnss_emulator_group",
     "gpu:gpu-libs",
     "input:emulator_touch_group",
     "sensor:sensor_vdi_model",

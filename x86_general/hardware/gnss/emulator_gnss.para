@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+# Position reported by the emulator's simulated GNSS receiver
+# (vendorGnssAdapter.so). Change it at runtime to move the device:
+#   hdc shell param set emulator.gnss.location "48.8584 2.2945 35"
+# "latitude longitude [altitude [speed [bearing [accuracy]]]]" in degrees,
+# metres, m/s, degrees and metres. Empty means no fix.
+
+# Westminster, London (the emulator's default time zone is Europe/London)
+emulator.gnss.location=51.5007 -0.1246 20
