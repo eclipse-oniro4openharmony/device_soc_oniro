@@ -22,5 +22,6 @@ group("hardware_group") {
     "input:emulator_touch_group",
     "modem:emulator_modem_group",
     "sensor:sensor_vdi_model",
+    "wlan:emulator_wifi_group",
   ]
 }
