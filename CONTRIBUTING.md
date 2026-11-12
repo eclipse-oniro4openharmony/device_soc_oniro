@@ -6,7 +6,7 @@ Thanks for your interest in this project.
 
 Eclipse Oniro for OpenHarmony is a distribution of
 [OpenHarmony](https://www.openharmony.cn/) maintained at the Eclipse
-Foundation. This repository contains the SoC-level adaptations (e.g. the display and GPU HAL glue for the hybris_generic and x86_general SoC targets).
+Foundation. This repository contains the SoC-level adaptations (e.g. the display and GPU HAL glue for the hybris_generic and emulator SoC targets).
 
 * https://projects.eclipse.org/projects/oniro.oniro4openharmony
 

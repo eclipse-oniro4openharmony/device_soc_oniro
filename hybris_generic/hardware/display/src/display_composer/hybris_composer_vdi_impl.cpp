@@ -825,7 +825,7 @@ extern "C" int32_t UpdateConfig(std::string& /*result*/)
     return HDF_ERR_NOT_SUPPORT;
 }
 
-/* ── C wrapper shims (same pattern as x86_general) ───────────────────────── */
+/* ── C wrapper shims (same pattern as the emulator) ──────────────────────── */
 
 extern "C" int32_t RegHotPlugCallback(HotPlugCallback cb, void* data)
 {

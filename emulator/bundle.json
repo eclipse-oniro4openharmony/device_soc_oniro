@@ -1,0 +1,40 @@
+{
+    "name": "@ohos/emulator",
+    "version": "3.1",
+    "license": "Apache License 2.0",
+    "private": false,
+    "scripts": {},
+    "dirs": [""],
+    "component": {
+      "name": "emulator",
+      "subsystem": "oniro_soc_products",
+      "syscap": [],
+      "features": [],
+      "deps": {
+        "components": [
+          "c_utils",
+          "hilog",
+          "init",
+          "hdf_core",
+          "drivers_interface_display",
+          "drivers_interface_camera",
+          "drivers_interface_sensor",
+          "hitrace",
+          "ipc",
+          "graphic_surface",
+          "window_manager",
+          "graphic_2d"
+        ],
+        "third_party": [
+          "libdrm",
+          "zlib"
+        ]
+      },
+      "build": {
+        "sub_component": [
+          "//device/soc/oniro/emulator/hardware:hardware_group"
+        ],
+        "test": []
+      }
+    }
+  }

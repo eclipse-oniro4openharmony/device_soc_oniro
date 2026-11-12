@@ -12,7 +12,7 @@ NOT open a public GitHub issue for an undisclosed vulnerability.
 
 ## Scope
 
-This repository contains the SoC-level adaptations (e.g. the display and GPU HAL glue for the hybris_generic and x86_general SoC targets). Please report here only vulnerabilities in
+This repository contains the SoC-level adaptations (e.g. the display and GPU HAL glue for the hybris_generic and emulator SoC targets). Please report here only vulnerabilities in
 content authored by this project:
 
 * Vulnerabilities in upstream OpenHarmony components (the

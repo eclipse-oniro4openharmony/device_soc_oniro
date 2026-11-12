@@ -15,12 +15,16 @@ Android vendor stack through **libhybris**. This layer hosts the vendor display
 interface (VDI) and audio HAL implementations that bridge OpenHarmony HDIs onto
 the Android vendor blobs.
 
-### `x86_general` — QEMU / x86 emulator
+### `emulator` — the QEMU emulator (x86_64 and arm64)
 
-GPU adaptation for the Oniro emulator target, based on the Mesa graphics stack.
-The prebuilt GPU libraries are cross-compiled from Mesa source; their provenance
-and rebuild recipe are documented in
-[`x86_general/hardware/gpu/lib64/PROVENANCE.md`](x86_general/hardware/gpu/lib64/PROVENANCE.md).
+SoC adaptation for the Oniro emulator products `emulator_x86_64` and
+`emulator_arm64`: display composer, the Mesa graphics stack, and simulated
+sensors, GNSS, modem and camera. The prebuilt GPU libraries are cross-compiled
+from Mesa source, one set per architecture; their provenance and rebuild recipe
+are documented in
+[`emulator/hardware/gpu/x86_64/PROVENANCE.md`](emulator/hardware/gpu/x86_64/PROVENANCE.md)
+and
+[`emulator/hardware/gpu/arm64/PROVENANCE.md`](emulator/hardware/gpu/arm64/PROVENANCE.md).
 
 ## Building
 
@@ -38,7 +42,7 @@ repo forall -c 'git lfs pull'
 | Path | Description |
 | --- | --- |
 | `hybris_generic/hardware/` | libhybris-backed HDI/HAL implementations (display, audio) for Volla devices |
-| `x86_general/hardware/gpu/` | Mesa-based GPU stack for the QEMU emulator |
+| `emulator/hardware/` | HDI/HAL implementations for the QEMU emulator (display, Mesa GPU stack, simulated devices) |
 
 ## License
 

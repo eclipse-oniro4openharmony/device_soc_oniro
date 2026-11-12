@@ -1,0 +1,32 @@
+# Copyright (c) 2026 Eclipse Oniro for OpenHarmony contributors.
+# SPDX-License-Identifier: Apache-2.0
+
+import("//build/ohos.gni")
+
+group("emulator_wifi_group") {
+  deps = [
+    ":emulator_wifi",
+    ":emulator_wifi_cfg",
+  ]
+}
+
+# virt_wifi setup for run.sh --wifi: see src/emulator_wifi.c.
+ohos_executable("emulator_wifi") {
+  sources = [ "src/emulator_wifi.c" ]
+  external_deps = [ "hilog:libhilog" ]
+  cflags = [
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+  install_enable = true
+  install_images = [ chipset_base_dir ]
+  part_name = "emulator"
+}
+
+ohos_prebuilt_etc("emulator_wifi_cfg") {
+  source = "emulator_wifi.cfg"
+  relative_install_dir = "init"
+  install_images = [ chipset_base_dir ]
+  part_name = "emulator"
+}
