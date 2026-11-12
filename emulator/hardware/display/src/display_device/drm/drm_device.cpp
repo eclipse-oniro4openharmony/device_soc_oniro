@@ -172,17 +172,47 @@ int32_t DrmDevice::GetProperty(uint32_t objId, uint32_t objType, const std::stri
     return found ? DISPLAY_SUCCESS : DISPLAY_NOT_SUPPORT;
 }
 
+int32_t DrmDevice::BecomeMaster()
+{
+    // The kernel makes the first opener of the card its DRM master; afterwards
+    // only that open file (or CAP_SYS_ADMIN) may set master. Mesa's kms_swrast
+    // in render_service opens the card too and drops the master it may get
+    // (Mesa platform_ohos), but when it got there first (likely under CPU
+    // emulation, where startup order shifts), our earlier open can never become
+    // master. A fresh open does, once nobody holds it: reopen and retry.
+    constexpr int attempts = 50;
+    constexpr useconds_t retryDelayUs = 200 * 1000;
+    for (int attempt = 0; attempt < attempts; attempt++) {
+        if (attempt > 0) {
+            usleep(retryDelayUs);
+            int fd = FindAndOpenKmsCard();
+            if (fd < 0) {
+                continue;
+            }
+            *mDrmFd = fd;
+        }
+        if (drmIsMaster(GetDrmFd()) || drmSetMaster(GetDrmFd()) == 0) {
+            if (attempt > 0) {
+                DISPLAY_LOGI("DRM master after %{public}d reopen(s)", attempt);
+            }
+            return DISPLAY_SUCCESS;
+        }
+        DISPLAY_LOGW("can not set to master errno : %{public}d, attempt %{public}d", errno, attempt);
+    }
+    return DISPLAY_FAILURE;
+}
+
 int32_t DrmDevice::Init()
 {
-    int ret = drmSetClientCap(GetDrmFd(), DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    int ret = BecomeMaster();
+    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not become DRM master"));
+
+    ret = drmSetClientCap(GetDrmFd(), DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
     DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE,
         DISPLAY_LOGE("DRM_CLIENT_CAP_UNIVERSAL_PLANES set failed %{public}s", strerror(errno)));
     ret = drmSetClientCap(GetDrmFd(), DRM_CLIENT_CAP_ATOMIC, 1);
     DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE,
         DISPLAY_LOGE("DRM_CLIENT_CAP_ATOMIC set failed %{public}s", strerror(errno)));
-
-    ret = drmSetMaster(GetDrmFd());
-    DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE, DISPLAY_LOGE("can not set to master errno : %{public}d", errno));
 
     ret = drmIsMaster(GetDrmFd());
     DISPLAY_CHK_RETURN((!ret), DISPLAY_FAILURE, DISPLAY_LOGE("is not master : %{public}d", errno));

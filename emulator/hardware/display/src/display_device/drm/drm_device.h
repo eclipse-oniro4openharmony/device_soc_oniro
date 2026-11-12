@@ -41,6 +41,7 @@ public:
     static std::shared_ptr<HdiDeviceInterface> Create();
     static uint32_t ConvertToDrmFormat(PixelFormat fmtIn);
     static int GetDrmFd();
+    static int32_t BecomeMaster();
     DrmDevice();
     virtual ~DrmDevice() {}
 
