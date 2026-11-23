@@ -11,7 +11,7 @@ commits), with the same drivers: `llvmpipe`, `softpipe` and `virgl`.
 
 ```
 github.com/frankplus/third_party_mesa3d
-branch OpenHarmony-7.0-Release @ 82d2a611e7bffe5c8f8e5833246530df98e10221
+branch OpenHarmony-7.0-Release @ 4b39f422c9ff3fc9ecf3d7afb5cd06b28911bc7a
 ```
 
 The same commit as the x86_64 libraries; `../x86_64/PROVENANCE.md` lists
@@ -19,6 +19,13 @@ what the branch adds to upstream. The arm64 build uses
 `ohos/meson_cross_process_oniro.py` (commit `253367c`), the cross file /
 pkg-config generator that takes the target architecture and a directory of
 static LLVM libraries.
+
+As on x86_64, the libraries are not all from one build: `libEGL.so.1.0.0`
+is built from `4b39f42`, the others from `82d2a61`. `4b39f42` changes only
+`src/egl/drivers/dri2/platform_ohos.c`, which links into libEGL alone, and a
+fresh build of the other libraries against a later `out/` was not
+byte-identical for `libgallium_dri.so` (the GLES and GBM libraries were), so
+the tested `libgallium_dri.so` was kept.
 
 ## LLVM
 
@@ -44,7 +51,7 @@ tree's OHOS clang 15.0.4) for `aarch64-unknown-linux-ohos`:
 # 0. the Mesa source, pinned
 git clone --branch OpenHarmony-7.0-Release --single-branch \
     https://github.com/frankplus/third_party_mesa3d.git third_party/mesa3d-new
-git -C third_party/mesa3d-new checkout 82d2a611e7bffe5c8f8e5833246530df98e10221
+git -C third_party/mesa3d-new checkout 4b39f422c9ff3fc9ecf3d7afb5cd06b28911bc7a
 
 # 1. an emulator_arm64 product build (sysroot, zlib, expat, libdrm, hilog, qos)
 #    so that out/emulator_arm64 exists. A first build before this directory has

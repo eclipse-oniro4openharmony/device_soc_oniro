@@ -22,7 +22,7 @@ freedesktop.org Mesa 25.0.x                       (canonical upstream)
         branch OpenHarmony-7.0-Release @ 339cb11 (in-tree: third_party/mesa3d, 25.0.1)
       └─> Oniro fork          (diemit's x86_64 port + Oniro fixes, rebased)
             github.com/frankplus/third_party_mesa3d
-            branch OpenHarmony-7.0-Release @ 82d2a611e7bffe5c8f8e5833246530df98e10221
+            branch OpenHarmony-7.0-Release @ 4b39f422c9ff3fc9ecf3d7afb5cd06b28911bc7a
           └─> these binaries   (built from that source; see build recipe below)
 ```
 
@@ -40,6 +40,14 @@ The Oniro branch is upstream OpenHarmony-7.0-Release plus:
 | `bbaf95e` | Oniro | `util`: leave OpenHarmony's reserved real-time signals (stack dump, sampling, hooks) unblocked in Mesa threads |
 | `253367c` | Oniro | `ohos/meson_cross_process_oniro.py`: cross file generator for either architecture (used by the arm64 build) |
 | `82d2a61` | Oniro | `egl/ohos`: drop the DRM master gained by opening the primary node, so the composer can become master |
+| `4b39f42` | Oniro | `egl/ohos`: return the window height for `EGL_HEIGHT` (it returned the width) |
+
+The libraries are not all from one build: `libEGL.so.1.0.0` is built from
+`4b39f42`, the others from `82d2a61`. `4b39f42` changes only
+`src/egl/drivers/dri2/platform_ohos.c`, which links into libEGL alone, and a
+fresh build of the other libraries against a later `out/` was not
+byte-identical for `libgallium_dri.so` (the GLES and GBM libraries were), so
+the tested `libgallium_dri.so` was kept.
 
 diemit's fork (gitcode `diemit/third_party_mesa3d`, branch
 `mesa25.0.1_x86_dev`) shares no history with the OpenHarmony repository: its
@@ -111,7 +119,7 @@ are what these binaries contain.
 # 0. clone the source, pinned to the exact commit
 git clone --branch OpenHarmony-7.0-Release --single-branch \
     https://github.com/frankplus/third_party_mesa3d.git third_party/mesa3d-new
-git -C third_party/mesa3d-new checkout 82d2a611e7bffe5c8f8e5833246530df98e10221
+git -C third_party/mesa3d-new checkout 4b39f422c9ff3fc9ecf3d7afb5cd06b28911bc7a
 
 # 1. build + deploy into this x86_64/ (runs in the build container, after a
 #    product build so out/emulator_x86_64 has zlib, expat, libqos, the sysroot...)
